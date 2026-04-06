@@ -1,0 +1,31 @@
+services:
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: thesis-trainer
+    working_dir: /workspace
+    shm_size: "16gb"
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./:/workspace
+      - ./outputs:/outputs
+      - ./cache:/cache
+      - ./data:/data
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TORCH_HOME: /cache/torch
+      HF_HOME: /cache/huggingface
+      TRANSFORMERS_CACHE: /cache/huggingface/transformers
+      PYTHONPATH: /workspace
+      BRANCH: main
+    ports:
+      - "6006:6006"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

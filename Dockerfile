@@ -52,9 +52,15 @@ RUN mkdir -p /workspace /data /outputs /cache && \
 
 WORKDIR /workspace
 
-# Install Python dependencies first for Docker layer caching
+# Install PyTorch explicitly first
+RUN pip install --no-cache-dir \
+    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Install the rest of requirements, but WITHOUT torch/torchvision/torchaudio in requirements.txt
 COPY requirements.txt /workspace/requirements.txt
-RUN pip install -r /workspace/requirements.txt
+RUN grep -viE '^(torch|torchvision|torchaudio)([<>=].*)?$' /workspace/requirements.txt > /tmp/requirements.no-torch.txt && \
+    pip install --no-cache-dir -r /tmp/requirements.no-torch.txt
 
 # Copy project files
 COPY src /workspace/src
@@ -68,6 +74,5 @@ USER trainer
 
 EXPOSE 6006
 
-USER trainer
 ENTRYPOINT ["/workspace/scripts/start.sh"]
 CMD ["shell"]

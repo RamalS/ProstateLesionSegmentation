@@ -2,6 +2,7 @@ services:
   trainer:
     build:
       context: .
+      network: host
       dockerfile: Dockerfile
     container_name: thesis-trainer
     working_dir: /workspace

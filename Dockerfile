@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -11,24 +11,33 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TRANSFORMERS_CACHE=/cache/huggingface/transformers
 
 # System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-venv \
-    git \
-    curl \
-    ca-certificates \
-    build-essential \
-    pkg-config \
-    ffmpeg \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    nano \
-    htop \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/cuda*.list /etc/apt/sources.list.d/nvidia*.list || true; \
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+        sed -i 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        git \
+        curl \
+        ca-certificates \
+        build-essential \
+        pkg-config \
+        ffmpeg \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        nano \
+        htop; \
+    rm -rf /var/lib/apt/lists/*
 
 # Create Python virtual environment
 RUN python3 -m venv ${VENV_PATH} && \
@@ -59,5 +68,6 @@ USER trainer
 
 EXPOSE 6006
 
+USER trainer
 ENTRYPOINT ["/workspace/scripts/start.sh"]
 CMD ["shell"]

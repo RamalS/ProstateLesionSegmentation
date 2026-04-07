@@ -1,0 +1,24 @@
+name: Train sync
+
+on:
+  push:
+    branches:
+      - train
+
+concurrency:
+  group: train-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository files for this workflow run
+        uses: actions/checkout@v4
+
+      - name: Make script executable
+        run: chmod +x scripts/train-sync.sh
+
+      - name: Run sync script
+        run: ./scripts/train-sync.sh

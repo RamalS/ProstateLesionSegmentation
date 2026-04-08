@@ -415,11 +415,18 @@ class PiCaiDataset(Dataset):
         image = np.stack([t2w, adc, hbv], axis=0)
 
         # 6. Load and binarise label
+        # Resample the label into the *resampled* T2w's exact voxel grid rather
+        # than performing an independent global resample.  Independent resampling
+        # can produce a slightly different integer output size (due to rounding in
+        # np.round) even when the target spacing is identical, causing a shape
+        # mismatch that crashes RandCropByPosNegLabeld.  Using t2w_sitk as the
+        # reference image guarantees the label and image always share the same
+        # (D, H, W) dimensions.
         if case["label"] is not None:
             lbl_sitk = _load_volume(case["label"])
-            lbl_sitk = _resample(
+            lbl_sitk = _resample_to_reference(
                 lbl_sitk,
-                self.target_spacing,
+                t2w_sitk,
                 interpolator=sitk.sitkNearestNeighbor,
                 default_value=0.0,
             )

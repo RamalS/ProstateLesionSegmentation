@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import warnings
 from pathlib import Path
 
 import torch
@@ -48,6 +49,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# Suppress MONAI class-balanced sampler warnings that fire on negative-only patches.
+warnings.filterwarnings(
+    "ignore",
+    message=".*unable to generate class balanced samples.*",
+    category=UserWarning,
+    module="monai",
 )
 logger = logging.getLogger(__name__)
 

@@ -9,3 +9,10 @@ scikit-learn
 tqdm
 pyyaml
 Pillow
+
+# Medical imaging
+monai
+SimpleITK
+nibabel
+scipy
+connected-components-3d

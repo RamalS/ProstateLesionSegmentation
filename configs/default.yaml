@@ -1,7 +1,32 @@
 experiment_name: baseline_run
-epochs: 5
-batch_size: 8
-learning_rate: 0.001
+epochs: 100
+batch_size: 2
+learning_rate: 1.0e-4
+weight_decay: 1.0e-5
 num_workers: 4
 device: cuda
 base_output_dir: /outputs/runs
+random_seed: 42
+
+# Data
+images_dir: /data/images
+labels_dir: /data/labels
+target_spacing: [3.0, 0.5, 0.5]   # (z, y, x) in mm — preserves T2w in-plane res
+val_fraction: 0.2
+
+# Patch sampling
+patch_size: [20, 128, 128]         # (D, H, W) in voxels
+pos_fraction: 0.75                 # fraction of patches containing a lesion
+
+# Model
+in_channels: 3                    # T2w + ADC + HBV
+out_channels: 1                   # binary segmentation
+features: [32, 64, 128, 256]      # encoder feature map sizes
+
+# Loss
+dice_weight: 1.0
+bce_weight: 1.0
+
+# Validation (sliding window)
+sw_overlap: 0.5                   # overlap fraction for sliding window inference
+sw_batch_size: 4                  # number of patches processed per SW step

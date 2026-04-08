@@ -27,6 +27,7 @@ import torch
 from monai.inferers import sliding_window_inference
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from src.config import load_config
 from src.dataset import PiCaiDataset, discover_cases, train_val_split
@@ -76,7 +77,7 @@ def validate(
     n = 0
 
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
             images = batch["image"].to(device)   # (1, 3, D, H, W)
             labels = batch["label"].to(device)   # (1, 1, D, H, W)
 
@@ -242,13 +243,14 @@ def main() -> None:
     logger.info("Run directory: %s", run_dir)
     logger.info("Loss: %s", criterion)
 
-    for epoch in range(1, epochs + 1):
+    for epoch in tqdm(range(1, epochs + 1), desc="Epochs", unit="epoch"):
 
         # ---- Train ----
         model.train()
         epoch_loss = 0.0
 
-        for batch in train_loader:
+        batch_bar = tqdm(train_loader, desc=f"Train {epoch}/{epochs}", leave=False, unit="batch")
+        for batch in batch_bar:
             images = batch["image"].to(device)   # (B, 3, D, H, W)
             labels = batch["label"].to(device)   # (B, 1, D, H, W)
 
@@ -259,6 +261,7 @@ def main() -> None:
             optimizer.step()
 
             epoch_loss += loss.item()
+            batch_bar.set_postfix(loss=f"{loss.item():.4f}")
 
         scheduler.step()
 

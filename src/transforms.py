@@ -54,6 +54,17 @@ def get_train_transforms(
     return T.Compose(
         [
             # ----------------------------------------------------------
+            # Ensure every volume is at least patch_size in each axis so
+            # that RandCropByPosNegLabeld never sees a volume smaller than
+            # the requested crop ROI.  Volumes that are already large
+            # enough are unaffected; smaller ones get zero-padded.
+            # ----------------------------------------------------------
+            T.SpatialPadd(
+                keys=_BOTH,
+                spatial_size=patch_size,
+                mode="constant",
+            ),
+            # ----------------------------------------------------------
             # Patch sampling
             # Positive patches: centred on a foreground (lesion) voxel.
             # Negative patches: random crop from the background region.

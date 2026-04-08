@@ -1,7 +1,32 @@
 experiment_name: baseline_run
 epochs: 5
-batch_size: 8
-learning_rate: 0.001
-num_workers: 4
+batch_size: 2
+learning_rate: 1.0e-4
+weight_decay: 1.0e-5
+num_workers: 2
 device: cuda
 base_output_dir: outputs/runs
+random_seed: 42
+
+# Data
+images_dir: data/images
+labels_dir: data/labels
+target_spacing: [3.0, 0.5, 0.5]
+val_fraction: 0.2
+
+# Patch sampling
+patch_size: [20, 128, 128]
+pos_fraction: 0.75
+
+# Model
+in_channels: 3
+out_channels: 1
+features: [32, 64, 128, 256]
+
+# Loss
+dice_weight: 1.0
+bce_weight: 1.0
+
+# Validation (sliding window)
+sw_overlap: 0.5
+sw_batch_size: 2

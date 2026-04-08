@@ -52,10 +52,10 @@ RUN mkdir -p /workspace /data /outputs /cache && \
 
 WORKDIR /workspace
 
-# Install PyTorch explicitly first
+# Install PyTorch explicitly first (cu126 wheels match the CUDA 12.6 base image)
 RUN pip install --no-cache-dir \
-    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu126
 
 # Install the rest of requirements, but WITHOUT torch/torchvision/torchaudio in requirements.txt
 COPY requirements.txt /workspace/requirements.txt

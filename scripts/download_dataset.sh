@@ -121,6 +121,9 @@ echo ""
 # ---------------------------------------------------------------------------
 # Download + extract loop
 # ---------------------------------------------------------------------------
+n_downloaded=0
+n_cached=0
+
 for (( i=0; i<N_FOLDS; i++ )); do
     FOLD_NAME="picai_public_images_fold${i}"
     ZIP_NAME="${FOLD_NAME}.zip"
@@ -129,11 +132,12 @@ for (( i=0; i<N_FOLDS; i++ )); do
     FOLD_MARKER="$OUT_DIR/.${FOLD_NAME}_done"
 
     echo -e "${BOLD}──────────────────────────────────────────${RESET}"
-    info "Fold $i / $((TOTAL_FOLDS - 1))  →  $ZIP_NAME"
+    info "Fold $((i+1))/$N_FOLDS  (fold${i})  →  $ZIP_NAME"
 
     # Skip if already fully extracted
     if [[ -f "$FOLD_MARKER" ]]; then
-        success "Fold $i already downloaded and extracted — skipping."
+        success "fold${i} already downloaded and extracted — skipping."
+        (( n_cached++ )) || true
         continue
     fi
 
@@ -199,7 +203,7 @@ with zipfile.ZipFile(zip_path, 'r') as zf:
 print("  Extraction complete.")
 PYEOF
 
-    success "Extracted fold $i to $IMAGES_DIR"
+    success "Extracted fold${i} to $IMAGES_DIR"
 
     # ---- Cleanup ----
     if [[ "$KEEP_ZIP" == false ]]; then
@@ -209,6 +213,7 @@ PYEOF
 
     # Mark fold as done so re-runs skip it
     touch "$FOLD_MARKER"
+    (( n_downloaded++ )) || true
 done
 
 # ---------------------------------------------------------------------------
@@ -219,7 +224,9 @@ echo -e "${BOLD}─────────────────────�
 if [[ "$DRY_RUN" == true ]]; then
     success "Dry run complete. No files were downloaded."
 else
-    success "Done! Images are in: $IMAGES_DIR"
+    success "All $N_FOLDS fold(s) now available in: $IMAGES_DIR"
+    echo "  Newly downloaded : $n_downloaded fold(s)"
+    echo "  Already cached   : $n_cached fold(s)"
     echo ""
     echo "  Next step: download the labels (csPCa lesion masks):"
     echo "  https://zenodo.org/records/6667655"

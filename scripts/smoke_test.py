@@ -322,6 +322,111 @@ except Exception as exc:
     fail("Dataset helper test failed", exc)
 
 # ---------------------------------------------------------------------------
+# 6c. stratified_train_val_split
+# ---------------------------------------------------------------------------
+section("6c. stratified_train_val_split")
+
+if _sitk is None:
+    skip("SimpleITK not installed — skipping stratified split test")
+else:
+    try:
+        import tempfile
+
+        from dataset import stratified_train_val_split
+
+        # Build a synthetic fixture: 4 positive cases (non-zero .nii.gz via
+        # nibabel) and 6 negative cases (0-byte touch-files, which
+        # _case_has_lesion must handle gracefully by returning False).
+        N_POS = 4
+        N_NEG = 6
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            images_dir = tmp_path / "images"
+            labels_dir = tmp_path / "labels"
+            images_dir.mkdir(parents=True)
+            labels_dir.mkdir(parents=True)
+
+            synth_cases: list[dict] = []
+            for i in range(N_POS + N_NEG):
+                case_id = f"case_{i:04d}"
+                for suffix in ("_t2w.mha", "_adc.mha", "_hbv.mha"):
+                    (images_dir / f"{case_id}{suffix}").touch()
+
+                label_path = labels_dir / f"{case_id}.nii.gz"
+                if i < N_POS:
+                    # Write a minimal valid NIfTI with one positive voxel.
+                    try:
+                        import nibabel as nib
+                        import numpy as _np_strat
+                        arr = _np_strat.zeros((8, 8, 8), dtype=_np_strat.uint8)
+                        arr[4, 4, 4] = 1
+                        nib.save(nib.Nifti1Image(arr, _np_strat.eye(4)), str(label_path))
+                    except ImportError:
+                        # nibabel unavailable: fall back to touch (treated as negative)
+                        label_path.touch()
+                else:
+                    label_path.touch()   # 0-byte → _case_has_lesion returns False
+
+                synth_cases.append({
+                    "case_id": case_id,
+                    "t2w": images_dir / f"{case_id}_t2w.mha",
+                    "adc": images_dir / f"{case_id}_adc.mha",
+                    "hbv": images_dir / f"{case_id}_hbv.mha",
+                    "label": label_path,
+                })
+
+            train_c, val_c = stratified_train_val_split(
+                synth_cases, val_fraction=0.25, seed=0
+            )
+
+            # All cases should have been annotated with has_lesion
+            annotated = all("has_lesion" in c for c in synth_cases)
+            if annotated:
+                ok("has_lesion key added to all case dicts in-place")
+            else:
+                fail("has_lesion key missing from one or more case dicts")
+
+            # 0-byte files must be treated as negative
+            n_detected = sum(1 for c in synth_cases if c.get("has_lesion"))
+            try:
+                import nibabel  # noqa: F401
+                expected_pos = N_POS
+            except ImportError:
+                expected_pos = 0   # nibabel absent, all touch-files → False
+            if n_detected == expected_pos:
+                ok(f"_case_has_lesion: detected {n_detected}/{N_POS + N_NEG} positive cases correctly")
+            else:
+                fail(
+                    f"_case_has_lesion: expected {expected_pos} positive, "
+                    f"got {n_detected}"
+                )
+
+            total = len(train_c) + len(val_c)
+            if total == N_POS + N_NEG:
+                ok(f"stratified split: {len(train_c)} train / {len(val_c)} val (total={total})")
+            else:
+                fail(f"stratified split lost cases: {total} != {N_POS + N_NEG}")
+
+            # Ratio preserved: both splits should have pos cases (if nibabel present)
+            if expected_pos > 0:
+                train_pos = sum(1 for c in train_c if c.get("has_lesion"))
+                val_pos   = sum(1 for c in val_c if c.get("has_lesion"))
+                if train_pos > 0 and val_pos > 0:
+                    ok(
+                        f"positive cases in both splits: "
+                        f"train={train_pos}, val={val_pos}"
+                    )
+                else:
+                    fail(
+                        f"positives not in both splits: "
+                        f"train_pos={train_pos}, val_pos={val_pos}"
+                    )
+
+    except Exception as exc:
+        fail("stratified_train_val_split test failed", exc)
+
+# ---------------------------------------------------------------------------
 # 7. Transforms (requires MONAI)
 # ---------------------------------------------------------------------------
 section("7. MONAI transforms")

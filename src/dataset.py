@@ -320,6 +320,94 @@ def train_val_split(
 
 
 # ---------------------------------------------------------------------------
+# Stratified split helpers
+# ---------------------------------------------------------------------------
+
+def _case_has_lesion(case: dict) -> bool:
+    """
+    Return True if *case* has a label file that contains at least one
+    positive (non-zero) voxel.
+
+    Reads the label via SimpleITK.  Returns False if the label path is
+    None, the file is unreadable, or the file is empty (e.g. synthetic
+    touch-files used in unit tests).
+    """
+    if case.get("label") is None:
+        return False
+    try:
+        img = sitk.ReadImage(str(case["label"]))
+        arr = sitk.GetArrayViewFromImage(img)
+        return bool(arr.max() > 0)
+    except Exception:
+        return False
+
+
+def stratified_train_val_split(
+    cases: list[dict],
+    val_fraction: float = 0.2,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Split *cases* into train and validation subsets while preserving the
+    positive-to-negative case ratio in both splits.
+
+    Each case dict is annotated in-place with a ``has_lesion`` boolean key
+    so callers (e.g. the training loop's WeightedRandomSampler) can use it
+    without re-reading any files.
+
+    Parameters
+    ----------
+    cases        : full list of case dicts from `discover_cases`
+    val_fraction : fraction of cases to reserve for validation [0, 1)
+    seed         : random seed for reproducibility
+
+    Returns
+    -------
+    (train_cases, val_cases) — both lists preserve the dataset's
+    positive/negative ratio within ±1 case.
+    """
+    # Annotate cases with positivity flag (reads label files once).
+    for case in cases:
+        if "has_lesion" not in case:
+            case["has_lesion"] = _case_has_lesion(case)
+
+    pos_cases = [c for c in cases if c["has_lesion"]]
+    neg_cases = [c for c in cases if not c["has_lesion"]]
+
+    logger.info(
+        "Stratified split: %d positive / %d negative cases",
+        len(pos_cases), len(neg_cases),
+    )
+
+    rng = random.Random(seed)
+
+    def _split(subset: list[dict]) -> tuple[list[dict], list[dict]]:
+        shuffled = subset.copy()
+        rng.shuffle(shuffled)
+        n_val = max(1, int(len(shuffled) * val_fraction)) if shuffled else 0
+        return shuffled[n_val:], shuffled[:n_val]
+
+    pos_train, pos_val = _split(pos_cases)
+    neg_train, neg_val = _split(neg_cases)
+
+    train_cases = pos_train + neg_train
+    val_cases   = pos_val   + neg_val
+
+    # Shuffle each split so the DataLoader sees interleaved pos/neg batches.
+    rng.shuffle(train_cases)
+    rng.shuffle(val_cases)
+
+    logger.info(
+        "Train: %d total (%d pos / %d neg) | "
+        "Val: %d total (%d pos / %d neg)",
+        len(train_cases), len(pos_train), len(neg_train),
+        len(val_cases),   len(pos_val),   len(neg_val),
+    )
+
+    return train_cases, val_cases
+
+
+# ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
 

@@ -26,12 +26,12 @@ from pathlib import Path
 
 import torch
 from monai.inferers import sliding_window_inference
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.config import load_config
-from src.dataset import PiCaiDataset, discover_cases, train_val_split
+from src.dataset import PiCaiDataset, discover_cases, stratified_train_val_split
 from src.losses import DiceBCELoss
 from src.metrics import compute_all_metrics
 from src.models import UNet3D
@@ -205,7 +205,7 @@ def main() -> None:
             "Check that your data is mounted correctly (./data -> /data)."
         )
 
-    train_cases, val_cases = train_val_split(
+    train_cases, val_cases = stratified_train_val_split(
         all_cases,
         val_fraction=cfg.get("val_fraction", 0.2),
         seed=seed,
@@ -231,13 +231,47 @@ def main() -> None:
         cases=val_cases,
     )
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg["batch_size"],
-        shuffle=True,
-        num_workers=cfg["num_workers"],
-        pin_memory=(device.type == "cuda"),
-    )
+    # ---- Weighted sampler: over-sample positive cases ----
+    # Each positive case gets weight 1/n_pos; each negative gets 1/n_neg.
+    # This gives each batch a roughly balanced mix without duplicating data.
+    n_pos = sum(1 for c in train_cases if c.get("has_lesion", False))
+    n_neg = len(train_cases) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        logger.warning(
+            "All training cases are %s — WeightedRandomSampler disabled, "
+            "falling back to shuffle=True.",
+            "positive" if n_neg == 0 else "negative",
+        )
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg["batch_size"],
+            shuffle=True,
+            num_workers=cfg["num_workers"],
+            pin_memory=(device.type == "cuda"),
+        )
+    else:
+        w_pos = 1.0 / n_pos
+        w_neg = 1.0 / n_neg
+        sample_weights = [
+            w_pos if c.get("has_lesion", False) else w_neg
+            for c in train_cases
+        ]
+        weighted_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_cases),
+            replacement=True,
+        )
+        logger.info(
+            "WeightedRandomSampler: %d pos (w=%.4f) / %d neg (w=%.4f)",
+            n_pos, w_pos, n_neg, w_neg,
+        )
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg["batch_size"],
+            sampler=weighted_sampler,
+            num_workers=cfg["num_workers"],
+            pin_memory=(device.type == "cuda"),
+        )
 
     # Validation uses batch_size=1: full volumes, sliding window handles memory
     val_loader = DataLoader(

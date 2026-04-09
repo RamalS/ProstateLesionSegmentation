@@ -39,6 +39,8 @@ from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     create_run_dir,
     ensure_dir,
+    load_checkpoint,
+    rotate_checkpoints,
     save_checkpoint,
     save_config_copy,
     save_latest_pointer,
@@ -125,6 +127,11 @@ def main() -> None:
     )
     parser.add_argument("--config", type=str, required=True,
                         help="Path to YAML config file")
+    parser.add_argument(
+        "--resume", type=str, default=None, metavar="CHECKPOINT",
+        help="Path to a .pt checkpoint to resume training from "
+             "(overrides resume_checkpoint in config)",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -243,16 +250,35 @@ def main() -> None:
 
     # ---- Training loop ----
     best_val_dice = 0.0
+    start_epoch = 1
     sw_overlap = cfg.get("sw_overlap", 0.5)
     sw_batch_size = cfg.get("sw_batch_size", 4)
     epochs = cfg["epochs"]
+    keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
+
+    # ---- Resume from checkpoint (CLI flag takes precedence over config) ----
+    resume_path: str | None = args.resume or cfg.get("resume_checkpoint")
+    if resume_path:
+        ckpt = load_checkpoint(
+            path=resume_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+        )
+        start_epoch = ckpt["epoch"] + 1
+        best_val_dice = float(ckpt.get("best_val_dice", 0.0))
+        logger.info(
+            "Resuming from epoch %d (best_val_dice=%.4f) → starting at epoch %d",
+            ckpt["epoch"], best_val_dice, start_epoch,
+        )
 
     logger.info("Device: %s", device)
     logger.info("Experiment: %s", cfg["experiment_name"])
     logger.info("Run directory: %s", run_dir)
     logger.info("Loss: %s", criterion)
 
-    for epoch in tqdm(range(1, epochs + 1), desc="Epochs", unit="epoch"):
+    for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs", unit="epoch"):
 
         # ---- Train ----
         model.train()
@@ -289,7 +315,10 @@ def main() -> None:
         save_checkpoint(
             model, optimizer, epoch,
             str(checkpoint_dir / f"epoch_{epoch:04d}.pt"),
+            scheduler=scheduler,
+            best_val_dice=best_val_dice,
         )
+        rotate_checkpoints(checkpoint_dir, keep_last_n)
 
         # ---- Validate ----
         val_metrics = validate(
@@ -330,6 +359,8 @@ def main() -> None:
             save_checkpoint(
                 model, optimizer, epoch,
                 str(checkpoint_dir / "best.pt"),
+                scheduler=scheduler,
+                best_val_dice=best_val_dice,
             )
             logger.info(
                 "New best model at epoch %d (val_dice=%.4f) → %s",

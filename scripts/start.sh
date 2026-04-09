@@ -3,6 +3,7 @@ set -e
 
 MODE="shell"
 USE_LOCAL=false
+EXTRA_ARGS=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -13,9 +14,7 @@ for arg in "$@"; do
       MODE="$arg"
       ;;
     *)
-      echo "Unknown argument: $arg"
-      echo "Usage: $0 [--local] {train|tensorboard|smoke-test|shell}"
-      exit 1
+      EXTRA_ARGS+=("$arg")
       ;;
   esac
 done
@@ -36,7 +35,7 @@ case "$MODE" in
   train)
     echo "Starting training..."
     cd "$PROJECT_ROOT"
-    PYTHONPATH="$PROJECT_ROOT" python -m src.train --config "$CONFIG_PATH"
+    PYTHONPATH="$PROJECT_ROOT" python -m src.train --config "$CONFIG_PATH" "${EXTRA_ARGS[@]}"
     ;;
   tensorboard)
     echo "Starting TensorBoard on 0.0.0.0:6006..."

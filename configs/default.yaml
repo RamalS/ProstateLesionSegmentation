@@ -30,3 +30,8 @@ bce_weight: 1.0
 # Validation (sliding window)
 sw_overlap: 0.5                   # overlap fraction for sliding window inference
 sw_batch_size: 4                  # number of patches processed per SW step
+
+# Checkpointing
+keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep (0 = keep all)
+# resume_checkpoint:              # uncomment and set path to resume from a checkpoint
+                                  # e.g. resume_checkpoint: /outputs/runs/my_run/checkpoints/epoch_0050.pt

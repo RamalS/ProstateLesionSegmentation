@@ -9,6 +9,7 @@ What this tests (no real data required):
   5. All metrics: dice, iou, sensitivity, specificity, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
+  8. Checkpoint save/load round-trip (save_checkpoint + load_checkpoint)
 
 Run inside the Docker container:
     python scripts/smoke_test.py
@@ -285,6 +286,56 @@ else:
 
     except Exception as exc:
         fail("Transforms test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 8. Checkpoint save / load round-trip
+# ---------------------------------------------------------------------------
+section("8. Checkpoint save/load (save_checkpoint + load_checkpoint)")
+
+try:
+    import tempfile
+
+    from utils import load_checkpoint, save_checkpoint
+
+    # Build a minimal model + optimizer + scheduler to round-trip
+    _ckpt_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16))
+    _ckpt_model = _ckpt_model.to(DEVICE)
+    _ckpt_opt = torch.optim.AdamW(_ckpt_model.parameters(), lr=1e-4)
+    _ckpt_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        _ckpt_opt, T_max=10, eta_min=1e-6
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ckpt_path = Path(tmp) / "test_epoch_0001.pt"
+
+        # Save
+        save_checkpoint(
+            _ckpt_model, _ckpt_opt, epoch=1,
+            path=str(ckpt_path),
+            scheduler=_ckpt_sched,
+            best_val_dice=0.42,
+        )
+        ok(f"save_checkpoint wrote {ckpt_path.name}")
+
+        # Load into a fresh model/optimizer/scheduler
+        _new_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16)).to(DEVICE)
+        _new_opt = torch.optim.AdamW(_new_model.parameters(), lr=1e-4)
+        _new_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            _new_opt, T_max=10, eta_min=1e-6
+        )
+
+        ckpt = load_checkpoint(
+            ckpt_path, _new_model, _new_opt, _new_sched, device=DEVICE
+        )
+
+        assert ckpt["epoch"] == 1, f"epoch mismatch: {ckpt['epoch']}"
+        assert abs(ckpt.get("best_val_dice", -1) - 0.42) < 1e-6, "best_val_dice mismatch"
+        assert "scheduler_state_dict" in ckpt, "scheduler_state_dict missing"
+        ok(f"load_checkpoint restored epoch={ckpt['epoch']}, "
+           f"best_val_dice={ckpt['best_val_dice']:.2f}, scheduler state present")
+
+except Exception as exc:
+    fail("Checkpoint round-trip test failed", exc)
 
 # ---------------------------------------------------------------------------
 # Summary

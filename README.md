@@ -84,6 +84,64 @@ The Docker Compose file mounts `./data` → `/data` inside the container.
 
 ---
 
+## Dataset
+
+This project uses the **[PI-CAI (Prostate Imaging: Cancer AI)](https://pi-cai.grand-challenge.org/)** public training and development dataset.
+
+### Overview
+
+| Property | Value |
+|---|---|
+| Total cases | 1,500 |
+| Positive (csPCa, ISUP ≥ 2) | 425 (28.3 %) |
+| Negative (benign / indolent) | 1,075 (71.7 %) |
+| Imaging modalities | Axial T2w, ADC, HBV (high b-value DWI) |
+| Label format | Voxel-level lesion mask (grades 2–5); binarised to {0, 1} for training |
+| Scanner vendors | Siemens Healthineers, Philips Medical Systems |
+| Acquisition centers | RUMC (NL), ZGT (NL), PCNN (NL), STOH (NO) |
+
+### Patient Population
+
+All patients are men referred for prostate MRI due to clinical suspicion of prostate cancer (elevated PSA or abnormal DRE findings), without prior ISUP ≥ 2 findings or treatment. The 28 % positive rate reflects real-world clinical prevalence in this screening population.
+
+### Labels
+
+Labels use the **combined human-expert + AI-derived** annotation set from [`DIAGNijmegen/picai_labels`](https://github.com/DIAGNijmegen/picai_labels):
+
+- **220 positive cases** carry human-expert voxel delineations.
+- **205 positive cases** carry AI-derived delineations (semi-supervised; Bosma et al., 2022).
+- **1,075 negative cases** have confirmed all-zero masks (histopathology ISUP ≤ 1 or PI-RADS ≤ 2).
+
+Labels are binarised at load time: any voxel value > 0 is treated as lesion.
+
+### Class Imbalance Strategy
+
+The ~1:2.5 case-level and ~1:50+ voxel-level imbalance is addressed at four stacked layers:
+
+| Layer | Mechanism |
+|---|---|
+| Data split | `stratified_train_val_split` preserves the 28/72 % ratio in both train and val subsets |
+| Case sampling | `WeightedRandomSampler` (weight = 1 / class\_count) equalises positive/negative case frequency per epoch |
+| Patch sampling | `RandCropByPosNegLabeld` with `pos_fraction=0.75` ensures 75 % of training patches are centred on a lesion voxel |
+| Loss | `DiceBCELoss` with `bce_pos_weight=10.0` up-weights lesion-voxel gradients in the BCE term |
+
+### Downloading the Data
+
+```bash
+# Images — download all 5 folds (~25 GB total, ~5 GB each)
+bash scripts/download_dataset.sh 5
+
+# Labels — follow the instructions at:
+# https://github.com/DIAGNijmegen/picai_labels
+
+# Verify dataset statistics after download
+PYTHONPATH=. python scripts/count_positives.py \
+    --images-dir data/images \
+    --labels-dir data/labels
+```
+
+---
+
 ## Commands
 
 ### Docker

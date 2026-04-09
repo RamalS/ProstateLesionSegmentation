@@ -26,6 +26,7 @@ features: [32, 64, 128, 256]
 # Loss
 dice_weight: 1.0
 bce_weight: 1.0
+bce_pos_weight: 10.0
 
 # Validation (sliding window)
 sw_overlap: 0.5

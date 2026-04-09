@@ -59,9 +59,23 @@ def dice_coefficient(
     DSC = 2|P ∩ T| / (|P| + |T|)
 
     Range: [0, 1]; higher is better.
+
+    Samples where the ground-truth target is entirely empty (no positive
+    voxels) are excluded from the average.  This prevents negative cases
+    from inflating the metric via the smooth term: when both prediction and
+    target are all-zero, the smooth numerator and denominator cancel to 1.0,
+    which would misleadingly reward a model that never predicts any lesion.
+
+    Returns float('nan') if all samples in the batch have empty targets.
     """
     p = _binarise(preds, threshold).view(preds.size(0), -1)
     t = targets.view(targets.size(0), -1)
+
+    mask = t.sum(dim=1) > 0          # True for samples with ≥1 positive voxel
+    if not mask.any():
+        return float("nan")
+    p, t = p[mask], t[mask]
+
     intersection = (p * t).sum(dim=1)
     dsc = (2.0 * intersection + smooth) / (p.sum(dim=1) + t.sum(dim=1) + smooth)
     return dsc.mean().item()
@@ -79,9 +93,20 @@ def iou_score(
     IoU = |P ∩ T| / |P ∪ T|
 
     Range: [0, 1]; higher is better.
+
+    Samples with empty ground-truth targets are excluded from the average
+    for the same reason as in ``dice_coefficient``.
+
+    Returns float('nan') if all samples in the batch have empty targets.
     """
     p = _binarise(preds, threshold).view(preds.size(0), -1)
     t = targets.view(targets.size(0), -1)
+
+    mask = t.sum(dim=1) > 0
+    if not mask.any():
+        return float("nan")
+    p, t = p[mask], t[mask]
+
     intersection = (p * t).sum(dim=1)
     union = (p + t - p * t).sum(dim=1)
     iou = (intersection + smooth) / (union + smooth)
@@ -100,9 +125,22 @@ def sensitivity(
     Sensitivity = TP / (TP + FN)
 
     Range: [0, 1]; higher is better.
+
+    Samples with empty ground-truth targets are excluded from the average.
+    When ``t = 0`` everywhere, FN = 0 regardless of the prediction, so the
+    smooth term would always return 1.0 — making sensitivity meaningless for
+    those cases and masking a model that predicts nothing.
+
+    Returns float('nan') if all samples in the batch have empty targets.
     """
     p = _binarise(preds, threshold).view(preds.size(0), -1)
     t = targets.view(targets.size(0), -1)
+
+    mask = t.sum(dim=1) > 0
+    if not mask.any():
+        return float("nan")
+    p, t = p[mask], t[mask]
+
     tp = (p * t).sum(dim=1)
     fn = ((1.0 - p) * t).sum(dim=1)
     sens = (tp + smooth) / (tp + fn + smooth)
@@ -205,6 +243,16 @@ def compute_all_metrics(
     Returns
     -------
     dict with keys: "dice", "iou", "sensitivity", "specificity", "hd95"
+
+    Notes
+    -----
+    - "dice", "iou", "sensitivity": computed only over samples whose
+      ground-truth target is non-empty (has at least one positive voxel).
+      Returns float('nan') when all samples in the batch are empty-target.
+    - "specificity": computed over all samples (meaningful for both positive
+      and negative cases — measures the false-positive rate).
+    - "hd95": computed only over samples where both prediction and target
+      are non-empty; returns float('nan') otherwise.
     """
     return {
         "dice":        dice_coefficient(preds, targets, threshold),

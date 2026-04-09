@@ -77,25 +77,44 @@ class DiceBCELoss(nn.Module):
     ----------
     dice_weight : weight applied to the Dice term (default 1.0)
     bce_weight  : weight applied to the BCE term  (default 1.0)
+    pos_weight  : scalar multiplier applied to the loss at positive (lesion)
+                  voxels in the BCE term.  Compensates for the severe class
+                  imbalance typical in prostate lesion segmentation, where
+                  lesion voxels are ~1-2 % of the total volume.  Without this,
+                  the BCE gradient from the majority background voxels can
+                  overwhelm the lesion gradient and drive the model toward
+                  predicting all-zeros.
+                  Rule of thumb: set to (background voxels) / (lesion voxels).
+                  Default is 1.0 (no re-weighting) for backward compatibility.
     """
 
     def __init__(
         self,
         dice_weight: float = 1.0,
         bce_weight: float = 1.0,
+        pos_weight: float = 1.0,
     ) -> None:
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
-        self._bce = nn.BCEWithLogitsLoss()
+        self.pos_weight = pos_weight
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
         d_loss = dice_loss(logits, targets)
-        b_loss = self._bce(logits, targets)
+        # Build pos_weight tensor on the same device/dtype as the logits so
+        # the loss function works on both CPU and CUDA without manual moves.
+        pw = torch.tensor(
+            [self.pos_weight], device=logits.device, dtype=logits.dtype
+        )
+        b_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, pos_weight=pw
+        )
         return self.dice_weight * d_loss + self.bce_weight * b_loss
 
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}"
-            f"(dice_weight={self.dice_weight}, bce_weight={self.bce_weight})"
+            f"{self.__class__.__name__}("
+            f"dice_weight={self.dice_weight}, "
+            f"bce_weight={self.bce_weight}, "
+            f"pos_weight={self.pos_weight})"
         )

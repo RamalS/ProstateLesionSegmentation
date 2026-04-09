@@ -26,6 +26,11 @@ features: [32, 64, 128, 256]      # encoder feature map sizes
 # Loss
 dice_weight: 1.0
 bce_weight: 1.0
+# Positive-voxel weight for the BCE term. Compensates for class imbalance
+# (lesion voxels are ~1-2% of a prostate volume). Rule of thumb: set to
+# roughly (background voxels) / (lesion voxels). Start with 10.0 and tune
+# upward if the model still predicts all-background after a few epochs.
+bce_pos_weight: 10.0
 
 # Validation (sliding window)
 sw_overlap: 0.5                   # overlap fraction for sliding window inference

@@ -78,14 +78,23 @@ def validate(
     """
     Run sliding-window inference over full validation volumes and return
     averaged segmentation metrics.
+
+    Dice, IoU, and sensitivity are averaged only over positive cases (volumes
+    whose ground-truth label contains at least one lesion voxel).  Specificity
+    is averaged over all cases.  HD95 is averaged over cases where both
+    prediction and target are non-empty.
     """
     model.eval()
 
-    sums: dict[str, float] = {
-        "dice": 0.0, "iou": 0.0, "sensitivity": 0.0, "specificity": 0.0,
-    }
+    # Positive-case accumulators (dice / iou / sensitivity)
+    pos_sums: dict[str, float] = {"dice": 0.0, "iou": 0.0, "sensitivity": 0.0}
+    n_pos = 0   # volumes with ≥1 lesion voxel in ground truth
+
+    # All-case accumulators (specificity)
+    spec_sum = 0.0
+    n_all = 0
+
     hd95_values: list[float] = []
-    n = 0
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
@@ -102,18 +111,39 @@ def validate(
 
             m = compute_all_metrics(logits, labels)
 
-            for k in sums:
-                sums[k] += m[k]
+            # Specificity: meaningful for all cases
+            spec_sum += m["specificity"]
+            n_all += 1
+
+            # Dice / IoU / sensitivity: only for positive cases
+            # compute_all_metrics returns nan when the target is empty
+            if not math.isnan(m["dice"]):
+                for k in pos_sums:
+                    pos_sums[k] += m[k]
+                n_pos += 1
+
             if not math.isnan(m["hd95"]):
                 hd95_values.append(m["hd95"])
-            n += 1
 
-    if n == 0:
-        return {"dice": 0.0, "iou": 0.0, "sensitivity": 0.0,
-                "specificity": 0.0, "hd95": float("nan")}
+    if n_all == 0:
+        return {"dice": float("nan"), "iou": float("nan"),
+                "sensitivity": float("nan"), "specificity": 0.0,
+                "hd95": float("nan"), "n_pos": 0, "n_all": 0}
 
-    result = {k: v / n for k, v in sums.items()}
-    result["hd95"] = float(sum(hd95_values) / len(hd95_values)) if hd95_values else float("nan")
+    result: dict[str, float] = {
+        "specificity": spec_sum / n_all,
+        "hd95": float(sum(hd95_values) / len(hd95_values)) if hd95_values else float("nan"),
+        "n_pos": float(n_pos),
+        "n_all": float(n_all),
+    }
+    if n_pos > 0:
+        for k in pos_sums:
+            result[k] = pos_sums[k] / n_pos
+    else:
+        result["dice"] = float("nan")
+        result["iou"] = float("nan")
+        result["sensitivity"] = float("nan")
+
     return result
 
 
@@ -246,6 +276,7 @@ def main() -> None:
     criterion = DiceBCELoss(
         dice_weight=cfg.get("dice_weight", 1.0),
         bce_weight=cfg.get("bce_weight", 1.0),
+        pos_weight=cfg.get("bce_pos_weight", 1.0),
     )
 
     # ---- Training loop ----
@@ -310,8 +341,6 @@ def main() -> None:
             "Epoch %d/%d | loss=%.4f | lr=%.2e",
             epoch, epochs, avg_loss, current_lr,
         )
-
-        # Save epoch checkpoint
         save_checkpoint(
             model, optimizer, epoch,
             str(checkpoint_dir / f"epoch_{epoch:04d}.pt"),
@@ -337,25 +366,30 @@ def main() -> None:
         if not math.isnan(val_metrics["hd95"]):
             writer.add_scalar("val/hd95", val_metrics["hd95"], epoch)
 
-        hd95_str = (
-            f"{val_metrics['hd95']:.2f}"
-            if not math.isnan(val_metrics["hd95"])
-            else "n/a"
-        )
+        n_pos = int(val_metrics["n_pos"])
+        n_all = int(val_metrics["n_all"])
+
+        def _fmt(v: float) -> str:
+            return f"{v:.4f}" if not math.isnan(v) else "n/a"
+
+        hd95_str = _fmt(val_metrics["hd95"])
         logger.info(
-            "Epoch %d/%d | val_dice=%.4f | val_iou=%.4f"
-            " | val_sens=%.4f | val_spec=%.4f | val_hd95=%s",
+            "Epoch %d/%d | val_dice=%s | val_iou=%s"
+            " | val_sens=%s | val_spec=%.4f | val_hd95=%s"
+            " | pos_cases=%d/%d",
             epoch, epochs,
-            val_metrics["dice"],
-            val_metrics["iou"],
-            val_metrics["sensitivity"],
+            _fmt(val_metrics["dice"]),
+            _fmt(val_metrics["iou"]),
+            _fmt(val_metrics["sensitivity"]),
             val_metrics["specificity"],
             hd95_str,
+            n_pos, n_all,
         )
 
-        # Save best model checkpoint
-        if val_metrics["dice"] > best_val_dice:
-            best_val_dice = val_metrics["dice"]
+        # Save best model checkpoint — only update when there are positive cases
+        dice_val = val_metrics["dice"]
+        if not math.isnan(dice_val) and dice_val > best_val_dice:
+            best_val_dice = dice_val
             save_checkpoint(
                 model, optimizer, epoch,
                 str(checkpoint_dir / "best.pt"),

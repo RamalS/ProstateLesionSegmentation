@@ -167,6 +167,25 @@ try:
     else:
         fail(f"DiceBCELoss returned non-finite value: {loss_val.item()}")
 
+    # Verify pos_weight parameter is wired through correctly.
+    # A high pos_weight should increase the loss when positive voxels are
+    # predicted as zero (i.e. when logits are very negative).
+    criterion_pw = DiceBCELoss(dice_weight=1.0, bce_weight=1.0, pos_weight=10.0)
+    neg_logits = torch.full((2, 1, 20, 64, 64), -5.0, device=DEVICE)  # all predict 0
+    pos_targets = torch.ones(2, 1, 20, 64, 64, device=DEVICE)         # all actually 1
+    loss_no_pw = criterion(neg_logits, pos_targets)
+    loss_with_pw = criterion_pw(neg_logits, pos_targets)
+    if loss_with_pw.item() > loss_no_pw.item():
+        ok(
+            f"pos_weight=10 raises loss on FN voxels: "
+            f"{loss_no_pw.item():.4f} → {loss_with_pw.item():.4f}"
+        )
+    else:
+        fail(
+            f"pos_weight did not raise loss as expected: "
+            f"no_pw={loss_no_pw.item():.4f}, with_pw={loss_with_pw.item():.4f}"
+        )
+
 except Exception as exc:
     fail("DiceBCELoss test failed", exc)
 
@@ -185,6 +204,51 @@ try:
 
     for name, val in metrics.items():
         ok(f"{name:<14s} = {val:.4f}")
+
+    # --- Empty-target guard: all-zero target + all-zero prediction -----------
+    # dice / iou / sensitivity must return nan (skipped — no positive voxels).
+    # Before the fix these returned 1.0, which inflated validation metrics.
+    zero_logits  = torch.full((1, 1, 20, 64, 64), -10.0, device=DEVICE)  # pred = 0
+    zero_targets = torch.zeros(1, 1, 20, 64, 64, device=DEVICE)          # target = 0
+
+    m_empty = compute_all_metrics(zero_logits, zero_targets)
+
+    import math as _math
+    for name in ("dice", "iou", "sensitivity"):
+        if _math.isnan(m_empty[name]):
+            ok(f"empty-target guard: {name} correctly returns nan")
+        else:
+            fail(
+                f"empty-target guard: {name} should be nan for all-zero target "
+                f"but got {m_empty[name]:.4f}"
+            )
+    # Specificity should still be finite (1.0 — no false positives)
+    if not _math.isnan(m_empty["specificity"]):
+        ok(f"empty-target guard: specificity={m_empty['specificity']:.4f} (finite, as expected)")
+    else:
+        fail("empty-target guard: specificity unexpectedly returned nan")
+
+    # --- Empty-target guard: all-zero target + non-zero prediction -----------
+    # dice / iou / sensitivity must still be nan (target has no positives).
+    # specificity should be < 1.0 because the model produces false positives.
+    pos_logits = torch.full((1, 1, 20, 64, 64), 10.0, device=DEVICE)   # pred = 1 everywhere
+
+    m_fp = compute_all_metrics(pos_logits, zero_targets)
+
+    for name in ("dice", "iou", "sensitivity"):
+        if _math.isnan(m_fp[name]):
+            ok(f"empty-target / FP guard: {name} correctly returns nan")
+        else:
+            fail(
+                f"empty-target / FP guard: {name} should be nan but got {m_fp[name]:.4f}"
+            )
+    if m_fp["specificity"] < 0.01:
+        ok(f"empty-target / FP guard: specificity={m_fp['specificity']:.4f} (near 0, as expected)")
+    else:
+        fail(
+            f"empty-target / FP guard: specificity={m_fp['specificity']:.4f} "
+            f"should be ~0 when model predicts all-positive on all-negative target"
+        )
 
 except Exception as exc:
     fail("Metrics test failed", exc)

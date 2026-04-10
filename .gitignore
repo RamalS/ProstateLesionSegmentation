@@ -1,3 +1,4 @@
 outputs/
 cache/
 data/
+.docker_build_hash

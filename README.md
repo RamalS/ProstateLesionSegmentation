@@ -70,6 +70,33 @@ export PYTHONPATH=$(pwd)
 
 ---
 
+## Hardware
+
+### Laptop (local dev)
+
+| | |
+|---|---|
+| **OS** | Arch Linux (kernel 6.19.10) |
+| **CPU** | Intel Core Ultra 7 255HX — 20 cores, 30 MB L3 cache |
+| **RAM** | 32 GB |
+| **Storage** | 1 TB NVMe SSD (SK Hynix PVC10) |
+| **GPU** | NVIDIA GeForce RTX 5070 Laptop — Blackwell (sm_120), 8 GB VRAM |
+| **CUDA** | 13.0, driver 595.58.03 |
+| **AMP** | `local_default.yaml` — `amp_dtype: bf16` |
+
+### Server (training)
+
+| | |
+|---|---|
+| **OS** | KVM virtual machine |
+| **CPU** | 6 vCPU (Skylake) |
+| **RAM** | 80 GB |
+| **Storage** | 128 GB QEMU virtual disk |
+| **GPU** | NVIDIA TITAN V — Volta (sm_70), 12 GB VRAM |
+| **AMP** | `default.yaml` — `amp_dtype: fp16` |
+
+---
+
 ## Data Layout
 
 Place the PI-CAI dataset under `./data/`:

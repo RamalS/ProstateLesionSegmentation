@@ -42,7 +42,7 @@ sw_batch_size: 8                  # number of patches processed per SW step
 use_amp: true                     # automatic mixed precision (see amp_dtype below)
 amp_dtype: fp16                   # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
                                   # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
-use_compile: true                 # torch.compile (Triton): safe with fixed patch_size
+use_compile: false                # torch.compile requires sm_75+ (Triton); TITAN V is sm_70
 cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
 cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
 

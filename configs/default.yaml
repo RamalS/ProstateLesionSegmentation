@@ -17,6 +17,8 @@ val_fraction: 0.2
 # Patch sampling
 patch_size: [20, 128, 128]         # (D, H, W) in voxels
 pos_fraction: 0.75                 # fraction of patches containing a lesion
+num_samples: 2                     # patches extracted per volume per __getitem__ call
+                                   # effective batch size = batch_size × num_samples
 
 # Model
 in_channels: 3                    # T2w + ADC + HBV
@@ -36,7 +38,28 @@ bce_pos_weight: 3.0
 sw_overlap: 0.5                   # overlap fraction for sliding window inference
 sw_batch_size: 4                  # number of patches processed per SW step
 
+# Training speed optimizations
+use_amp: true                     # BF16 automatic mixed precision (requires CUDA + Blackwell/Ampere)
+use_compile: false                # torch.compile — enable manually after verifying convergence
+cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
+cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
+
 # Checkpointing
 keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep (0 = keep all)
 # resume_checkpoint:              # uncomment and set path to resume from a checkpoint
                                   # e.g. resume_checkpoint: /outputs/runs/my_run/checkpoints/epoch_0050.pt
+
+# Best checkpoint selection (composite score)
+# best.pt is saved when the composite score improves:
+#   score = w_sensitivity * sensitivity + w_dice * dice + w_hd95 * (1 / (1 + hd95))
+# Weights are normalised internally so they do not need to sum to 1.0.
+best_ckpt_w_sensitivity: 0.5
+best_ckpt_w_dice: 0.3
+best_ckpt_w_hd95: 0.2
+
+# Early stopping
+# Training halts when the composite score does not improve by more than
+# early_stopping_min_delta for early_stopping_patience consecutive epochs.
+# Set early_stopping_patience to 0 to disable early stopping.
+early_stopping_patience: 20
+early_stopping_min_delta: 0.001

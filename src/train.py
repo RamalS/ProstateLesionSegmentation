@@ -24,6 +24,7 @@ import math
 import warnings
 from pathlib import Path
 
+import monai.data.utils
 import torch
 from monai.inferers import sliding_window_inference
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -37,6 +38,7 @@ from src.metrics import compute_all_metrics
 from src.models import UNet3D
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
+    compute_composite_score,
     create_run_dir,
     ensure_dir,
     load_checkpoint,
@@ -74,6 +76,8 @@ def validate(
     patch_size: tuple[int, ...],
     sw_overlap: float,
     sw_batch_size: int,
+    use_amp: bool = False,
+    compute_hd95: bool = True,
 ) -> dict[str, float]:
     """
     Run sliding-window inference over full validation volumes and return
@@ -83,6 +87,13 @@ def validate(
     whose ground-truth label contains at least one lesion voxel).  Specificity
     is averaged over all cases.  HD95 is averaged over cases where both
     prediction and target are non-empty.
+
+    Parameters
+    ----------
+    use_amp      : enable BF16 autocast around sliding-window inference.
+    compute_hd95 : if False, skip the expensive HD95 calculation and log
+                   float('nan') for "hd95".  Useful during the training loop
+                   where HD95 is not needed every epoch.
     """
     model.eval()
 
@@ -96,20 +107,27 @@ def validate(
 
     hd95_values: list[float] = []
 
+    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16) if use_amp else torch.amp.autocast(device_type="cpu", enabled=False)  # type: ignore[attr-defined]
+
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
             images = batch["image"].to(device)   # (1, 3, D, H, W)
             labels = batch["label"].to(device)   # (1, 1, D, H, W)
 
-            logits = sliding_window_inference(
-                inputs=images,
-                roi_size=patch_size,
-                sw_batch_size=sw_batch_size,
-                predictor=model,
-                overlap=sw_overlap,
-            )
+            with amp_ctx:
+                logits = sliding_window_inference(
+                    inputs=images,
+                    roi_size=patch_size,
+                    sw_batch_size=sw_batch_size,
+                    predictor=model,
+                    overlap=sw_overlap,
+                )
 
-            m = compute_all_metrics(logits, labels)
+            # Cast back to float32 for metrics (avoids BF16 precision loss in distance
+            # transforms and other numpy-backed metric operations).
+            logits = logits.float()
+
+            m = compute_all_metrics(logits, labels, compute_hd95=compute_hd95)
 
             # Specificity: meaningful for all cases
             spec_sum += m["specificity"]
@@ -209,6 +227,7 @@ def main() -> None:
         all_cases,
         val_fraction=cfg.get("val_fraction", 0.2),
         seed=seed,
+        cache_path=Path(cfg["labels_dir"]) / "lesion_flags.json",
     )
     logger.info("Split: %d train | %d val", len(train_cases), len(val_cases))
 
@@ -219,8 +238,11 @@ def main() -> None:
         transform=get_train_transforms(
             patch_size=patch_size,
             pos_fraction=cfg.get("pos_fraction", 0.75),
+            num_samples=cfg.get("num_samples", 1),
         ),
         cases=train_cases,
+        use_cache=cfg.get("cache_dataset", False),
+        cache_rate=cfg.get("cache_rate", 1.0),
     )
 
     val_ds = PiCaiDataset(
@@ -236,6 +258,10 @@ def main() -> None:
     # This gives each batch a roughly balanced mix without duplicating data.
     n_pos = sum(1 for c in train_cases if c.get("has_lesion", False))
     n_neg = len(train_cases) - n_pos
+    # persistent_workers=True is required when cache_dataset=True: workers must
+    # survive across epochs so their in-process caches are not discarded.
+    num_workers: int = cfg["num_workers"]
+    use_persistent: bool = num_workers > 0
     if n_pos == 0 or n_neg == 0:
         logger.warning(
             "All training cases are %s — WeightedRandomSampler disabled, "
@@ -246,8 +272,11 @@ def main() -> None:
             train_ds,
             batch_size=cfg["batch_size"],
             shuffle=True,
-            num_workers=cfg["num_workers"],
+            num_workers=num_workers,
             pin_memory=(device.type == "cuda"),
+            persistent_workers=use_persistent,
+            prefetch_factor=2 if use_persistent else None,
+            collate_fn=monai.data.utils.list_data_collate,
         )
     else:
         w_pos = 1.0 / n_pos
@@ -269,8 +298,11 @@ def main() -> None:
             train_ds,
             batch_size=cfg["batch_size"],
             sampler=weighted_sampler,
-            num_workers=cfg["num_workers"],
+            num_workers=num_workers,
             pin_memory=(device.type == "cuda"),
+            persistent_workers=use_persistent,
+            prefetch_factor=2 if use_persistent else None,
+            collate_fn=monai.data.utils.list_data_collate,
         )
 
     # Validation uses batch_size=1: full volumes, sliding window handles memory
@@ -278,8 +310,10 @@ def main() -> None:
         val_ds,
         batch_size=1,
         shuffle=False,
-        num_workers=cfg["num_workers"],
+        num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
+        persistent_workers=use_persistent,
+        prefetch_factor=2 if use_persistent else None,
     )
 
     # ---- Model ----
@@ -291,6 +325,15 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("UNet3D | trainable parameters: %s", f"{n_params:,}")
+
+    # Optional: torch.compile (triton-based kernel fusion).  Disabled by default
+    # until the user has verified convergence; enable via use_compile: true in
+    # the config.  Safe here because patch_size is fixed, so no recompilation.
+    compiled_model: torch.nn.Module = model
+    if cfg.get("use_compile", False):
+        logger.info("Compiling model with torch.compile …")
+        compiled_model = torch.compile(model)  # type: ignore[assignment]
+    model = compiled_model
 
     # ---- Optimizer + scheduler ----
     optimizer = torch.optim.AdamW(
@@ -315,11 +358,32 @@ def main() -> None:
 
     # ---- Training loop ----
     best_val_dice = 0.0
+    best_composite_score = 0.0
     start_epoch = 1
     sw_overlap = cfg.get("sw_overlap", 0.5)
     sw_batch_size = cfg.get("sw_batch_size", 4)
     epochs = cfg["epochs"]
     keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
+
+    # BF16 autocast: enabled by default when a CUDA device is available.
+    # No GradScaler needed: BF16 has sufficient dynamic range unlike FP16.
+    use_amp: bool = cfg.get("use_amp", True) and device.type == "cuda"
+    amp_ctx = (
+        torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)  # type: ignore[attr-defined]
+        if use_amp
+        else torch.amp.autocast(device_type="cpu", enabled=False)  # type: ignore[attr-defined]
+    )
+
+    # ---- Composite score weights ----
+    w_sensitivity: float = cfg.get("best_ckpt_w_sensitivity", 0.5)
+    w_dice: float = cfg.get("best_ckpt_w_dice", 0.3)
+    w_hd95: float = cfg.get("best_ckpt_w_hd95", 0.2)
+
+    # ---- Early stopping ----
+    es_patience: int = cfg.get("early_stopping_patience", 20)
+    es_min_delta: float = cfg.get("early_stopping_min_delta", 0.001)
+    es_counter: int = 0
+    es_enabled: bool = es_patience > 0
 
     # ---- Resume from checkpoint (CLI flag takes precedence over config) ----
     resume_path: str | None = args.resume or cfg.get("resume_checkpoint")
@@ -333,15 +397,31 @@ def main() -> None:
         )
         start_epoch = ckpt["epoch"] + 1
         best_val_dice = float(ckpt.get("best_val_dice", 0.0))
+        best_composite_score = float(ckpt.get("best_composite_score", 0.0))
         logger.info(
-            "Resuming from epoch %d (best_val_dice=%.4f) → starting at epoch %d",
-            ckpt["epoch"], best_val_dice, start_epoch,
+            "Resuming from epoch %d (best_composite_score=%.4f, best_val_dice=%.4f)"
+            " → starting at epoch %d",
+            ckpt["epoch"], best_composite_score, best_val_dice, start_epoch,
         )
 
     logger.info("Device: %s", device)
+    logger.info("AMP (BF16): %s", use_amp)
+    logger.info("torch.compile: %s", cfg.get("use_compile", False))
     logger.info("Experiment: %s", cfg["experiment_name"])
     logger.info("Run directory: %s", run_dir)
     logger.info("Loss: %s", criterion)
+    logger.info(
+        "Best checkpoint metric: composite score "
+        "(w_sensitivity=%.2f, w_dice=%.2f, w_hd95=%.2f)",
+        w_sensitivity, w_dice, w_hd95,
+    )
+    if es_enabled:
+        logger.info(
+            "Early stopping: patience=%d, min_delta=%.4f",
+            es_patience, es_min_delta,
+        )
+    else:
+        logger.info("Early stopping: disabled")
 
     for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs", unit="epoch"):
 
@@ -354,9 +434,10 @@ def main() -> None:
             images = batch["image"].to(device)   # (B, 3, D, H, W)
             labels = batch["label"].to(device)   # (B, 1, D, H, W)
 
-            optimizer.zero_grad()
-            logits = model(images)
-            loss = criterion(logits, labels)
+            optimizer.zero_grad(set_to_none=True)
+            with amp_ctx:
+                logits = model(images)
+                loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
 
@@ -380,6 +461,7 @@ def main() -> None:
             str(checkpoint_dir / f"epoch_{epoch:04d}.pt"),
             scheduler=scheduler,
             best_val_dice=best_val_dice,
+            best_composite_score=best_composite_score,
         )
         rotate_checkpoints(checkpoint_dir, keep_last_n)
 
@@ -391,6 +473,8 @@ def main() -> None:
             patch_size=patch_size,
             sw_overlap=sw_overlap,
             sw_batch_size=sw_batch_size,
+            use_amp=use_amp,
+            compute_hd95=False,   # HD95 skipped during training; use evaluate_checkpoint.py for final eval
         )
 
         writer.add_scalar("val/dice",        val_metrics["dice"],        epoch)
@@ -420,23 +504,59 @@ def main() -> None:
             n_pos, n_all,
         )
 
-        # Save best model checkpoint — only update when there are positive cases
-        dice_val = val_metrics["dice"]
-        if not math.isnan(dice_val) and dice_val > best_val_dice:
-            best_val_dice = dice_val
+        # ---- Composite score: best.pt selection + early stopping ----
+        composite_score = compute_composite_score(
+            val_metrics,
+            w_sensitivity=w_sensitivity,
+            w_dice=w_dice,
+            w_hd95=w_hd95,
+        )
+
+        if not math.isnan(composite_score):
+            writer.add_scalar("val/composite_score", composite_score, epoch)
+            logger.info(
+                "Epoch %d/%d | composite_score=%.4f (best=%.4f)",
+                epoch, epochs, composite_score, best_composite_score,
+            )
+
+        # Save best model checkpoint when composite score improves
+        if not math.isnan(composite_score) and composite_score > best_composite_score + es_min_delta:
+            best_composite_score = composite_score
+            # Also track best dice for logging convenience
+            if not math.isnan(val_metrics["dice"]):
+                best_val_dice = val_metrics["dice"]
             save_checkpoint(
                 model, optimizer, epoch,
                 str(checkpoint_dir / "best.pt"),
                 scheduler=scheduler,
                 best_val_dice=best_val_dice,
+                best_composite_score=best_composite_score,
             )
             logger.info(
-                "New best model at epoch %d (val_dice=%.4f) → %s",
-                epoch, best_val_dice, checkpoint_dir / "best.pt",
+                "New best model at epoch %d (composite_score=%.4f, val_dice=%s) → %s",
+                epoch, best_composite_score, _fmt(val_metrics["dice"]),
+                checkpoint_dir / "best.pt",
             )
+            es_counter = 0
+        else:
+            if es_enabled and not math.isnan(composite_score):
+                es_counter += 1
+                logger.info(
+                    "Early stopping counter: %d / %d",
+                    es_counter, es_patience,
+                )
+
+        if es_enabled and es_counter >= es_patience:
+            logger.info(
+                "Early stopping triggered at epoch %d — no improvement in composite score "
+                "for %d consecutive epochs (min_delta=%.4f).",
+                epoch, es_patience, es_min_delta,
+            )
+            break
 
     writer.close()
     logger.info("Training complete.")
+    logger.info("Best composite score: %.4f", best_composite_score)
     logger.info("Best validation Dice: %.4f", best_val_dice)
     logger.info("Artifacts saved to: %s", run_dir)
 

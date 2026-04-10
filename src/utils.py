@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from datetime import datetime
 import json
@@ -12,6 +13,75 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Composite score
+# ---------------------------------------------------------------------------
+
+def compute_composite_score(
+    val_metrics: dict[str, float],
+    w_sensitivity: float = 0.5,
+    w_dice: float = 0.3,
+    w_hd95: float = 0.2,
+) -> float:
+    """
+    Compute a weighted composite validation score for best-checkpoint selection.
+
+    score = w_sens * sensitivity + w_dice * dice + w_hd95 * (1 / (1 + hd95))
+
+    Weights are normalised internally so they always sum to 1.0, making the
+    score independent of whether the caller uses raw or pre-normalised values.
+
+    The HD95 term is inverted (lower HD95 → higher score) via ``1/(1+hd95)``,
+    which maps HD95 ∈ [0, ∞) to (0, 1].
+
+    NaN handling
+    ------------
+    - If ``sensitivity`` or ``dice`` is NaN (i.e. no positive cases were
+      present in the validation set), the function returns ``float('nan')``.
+      The caller should treat this as "no update" for best-checkpoint selection.
+    - If only ``hd95`` is NaN (prediction or target was empty for every case),
+      the HD95 term is dropped and its weight is redistributed proportionally
+      between sensitivity and dice.
+
+    Parameters
+    ----------
+    val_metrics   : dict with keys "sensitivity", "dice", "hd95"
+    w_sensitivity : weight for sensitivity (TPR); default 0.5
+    w_dice        : weight for Dice DSC; default 0.3
+    w_hd95        : weight for inverted HD95; default 0.2
+
+    Returns
+    -------
+    float in [0, 1], or float('nan') when primary metrics are undefined.
+    """
+    sens = val_metrics["sensitivity"]
+    dice = val_metrics["dice"]
+    hd95 = val_metrics["hd95"]
+
+    # Primary metrics undefined → score is undefined
+    if math.isnan(sens) or math.isnan(dice):
+        return float("nan")
+
+    if not math.isnan(hd95):
+        hd95_term: float | None = 1.0 / (1.0 + hd95)
+    else:
+        hd95_term = None
+
+    # Build weighted sum with normalised weights
+    effective_w_hd95 = w_hd95 if hd95_term is not None else 0.0
+    total_w = w_sensitivity + w_dice + effective_w_hd95
+
+    score = (w_sensitivity * sens + w_dice * dice) / total_w
+    if hd95_term is not None:
+        score += (w_hd95 * hd95_term) / total_w
+
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
 def ensure_dir(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -35,24 +105,27 @@ def save_checkpoint(
     path: str,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
     best_val_dice: float = 0.0,
+    best_composite_score: float = 0.0,
 ) -> None:
     """
     Persist model, optimizer, and (optionally) scheduler state to *path*.
 
     Parameters
     ----------
-    model         : the ``torch.nn.Module`` being trained
-    optimizer     : the optimizer whose state should be saved
-    epoch         : current epoch number (1-indexed), stored in the checkpoint
-    path          : destination file path (will be created or overwritten)
-    scheduler     : learning-rate scheduler; its state is saved when provided
-    best_val_dice : best validation Dice seen so far, stored for resuming
+    model                 : the ``torch.nn.Module`` being trained
+    optimizer             : the optimizer whose state should be saved
+    epoch                 : current epoch number (1-indexed), stored in the checkpoint
+    path                  : destination file path (will be created or overwritten)
+    scheduler             : learning-rate scheduler; its state is saved when provided
+    best_val_dice         : best validation Dice seen so far, stored for resuming
+    best_composite_score  : best composite score seen so far, stored for resuming
     """
     state: dict = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "best_val_dice": best_val_dice,
+        "best_composite_score": best_composite_score,
     }
     if scheduler is not None:
         state["scheduler_state_dict"] = scheduler.state_dict()

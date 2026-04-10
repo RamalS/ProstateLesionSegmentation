@@ -22,6 +22,25 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Fixed test-set case IDs
+# These 10 cases are permanently reserved for evaluation and are always
+# segregated into data/test_images/ — they are never mixed into the training
+# pool.  Five have confirmed lesions (positive) and five are negative.
+# ---------------------------------------------------------------------------
+TEST_CASE_IDS=(
+    11377_1001400   # positive
+    10418_1000426   # positive
+    10059_1000059   # positive
+    10760_1000776   # positive
+    10726_1000742   # positive
+    10352_1000358   # negative
+    10189_1000192   # negative
+    11221_1001244   # negative
+    10142_1000144   # negative
+    11151_1001174   # negative
+)
+
+# ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,10 +121,56 @@ info "Using downloader: $DOWNLOADER"
 # Prepare directories
 # ---------------------------------------------------------------------------
 IMAGES_DIR="$OUT_DIR/images"
+TEST_IMAGES_DIR="$OUT_DIR/test_images"
 
 if [[ "$DRY_RUN" == false ]]; then
     mkdir -p "$IMAGES_DIR"
+    mkdir -p "$TEST_IMAGES_DIR"
 fi
+
+# ---------------------------------------------------------------------------
+# segregate_test_cases — move fixed test-set images into test_images/
+#
+# Called (1) before the download loop to handle cases that were already
+# extracted into data/images/, and (2) after each fold extraction to
+# immediately relocate any newly extracted test-case files.
+#
+# Labels are NOT moved — they remain in data/labels/ and are looked up by
+# case ID as usual.
+# ---------------------------------------------------------------------------
+segregate_test_cases() {
+    [[ "$DRY_RUN" == true ]] && return
+
+    local moved=0
+    local already=0
+
+    for case_id in "${TEST_CASE_IDS[@]}"; do
+        # Already in the right place — nothing to do
+        local existing
+        existing=$(find "$TEST_IMAGES_DIR" -maxdepth 1 -name "${case_id}_*.mha" 2>/dev/null | wc -l)
+        if (( existing > 0 )); then
+            (( already++ )) || true
+            continue
+        fi
+
+        # Present in the training pool — move them over
+        local files
+        files=$(ls "$IMAGES_DIR/${case_id}_"*.mha 2>/dev/null || true)
+        if [[ -n "$files" ]]; then
+            mv $files "$TEST_IMAGES_DIR/"
+            info "Test case $case_id  →  test_images/  (moved ${existing:-$(echo "$files" | wc -w)} files)"
+            (( moved++ )) || true
+        fi
+    done
+
+    if (( moved > 0 || already > 0 )); then
+        success "Test-set segregation: $moved case(s) moved, $already already in test_images/"
+    fi
+}
+
+# Run immediately so any cases already present in data/images/ are moved
+# before the download loop (or before training accidentally picks them up).
+segregate_test_cases
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -205,6 +270,9 @@ PYEOF
 
     success "Extracted fold${i} to $IMAGES_DIR"
 
+    # Immediately move any test-set cases that landed in data/images/
+    segregate_test_cases
+
     # ---- Cleanup ----
     if [[ "$KEEP_ZIP" == false ]]; then
         rm -f "$ZIP_PATH"
@@ -227,6 +295,10 @@ else
     success "All $N_FOLDS fold(s) now available in: $IMAGES_DIR"
     echo "  Newly downloaded : $n_downloaded fold(s)"
     echo "  Already cached   : $n_cached fold(s)"
+    echo ""
+    echo "  Fixed test cases (${#TEST_CASE_IDS[@]} IDs) are in: $TEST_IMAGES_DIR"
+    echo "  Run evaluation with:"
+    echo "  python scripts/evaluate_checkpoint.py --checkpoint <path/to/best.pt>"
     echo ""
     echo "  Next step: download the labels (csPCa lesion masks):"
     echo "  https://zenodo.org/records/6667655"

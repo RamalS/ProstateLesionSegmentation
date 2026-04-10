@@ -10,7 +10,7 @@ for arg in "$@"; do
     --local)
       USE_LOCAL=true
       ;;
-    train|tensorboard|smoke-test|shell)
+    train|tensorboard|smoke-test|shell|evaluate)
       MODE="$arg"
       ;;
     *)
@@ -46,6 +46,11 @@ case "$MODE" in
     cd "$PROJECT_ROOT"
     PYTHONPATH="$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/smoke_test.py"
     ;;
+  evaluate)
+    echo "Running checkpoint evaluation..."
+    cd "$PROJECT_ROOT"
+    PYTHONPATH="$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/evaluate_checkpoint.py" "${EXTRA_ARGS[@]}"
+    ;;
   shell)
     echo "Opening shell..."
     cd "$PROJECT_ROOT"
@@ -53,7 +58,7 @@ case "$MODE" in
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Available modes: train | tensorboard | smoke-test | shell"
+    echo "Available modes: train | tensorboard | smoke-test | evaluate | shell"
     exit 1
     ;;
 esac

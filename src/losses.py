@@ -97,24 +97,26 @@ class DiceBCELoss(nn.Module):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
-        self.pos_weight = pos_weight
+        # Register as a buffer so it moves to the correct device automatically
+        # with .to(device) / .cuda(), and is not treated as a trainable parameter.
+        # This avoids re-creating a new tensor on every forward pass.
+        self.register_buffer("_pw", torch.tensor([pos_weight]))
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
         d_loss = dice_loss(logits, targets)
-        # Build pos_weight tensor on the same device/dtype as the logits so
-        # the loss function works on both CPU and CUDA without manual moves.
-        pw = torch.tensor(
-            [self.pos_weight], device=logits.device, dtype=logits.dtype
-        )
+        # Cast _pw to match logits device and dtype (important for BF16 autocast and
+        # cases where the criterion is not explicitly moved to the target device).
+        pw: Tensor = self._pw.to(device=logits.device, dtype=logits.dtype)  # type: ignore[union-attr]
         b_loss = F.binary_cross_entropy_with_logits(
             logits, targets, pos_weight=pw
         )
         return self.dice_weight * d_loss + self.bce_weight * b_loss
 
     def __repr__(self) -> str:
+        pw_val = float(self._pw.item()) if hasattr(self, "_pw") else "?"  # type: ignore[union-attr]
         return (
             f"{self.__class__.__name__}("
             f"dice_weight={self.dice_weight}, "
             f"bce_weight={self.bce_weight}, "
-            f"pos_weight={self.pos_weight})"
+            f"pos_weight={pw_val})"
         )

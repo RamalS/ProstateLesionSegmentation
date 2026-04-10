@@ -17,6 +17,8 @@ val_fraction: 0.2
 # Patch sampling
 patch_size: [20, 128, 128]
 pos_fraction: 0.75
+num_samples: 2                     # patches extracted per volume per __getitem__ call
+                                   # effective batch size = batch_size × num_samples
 
 # Model
 in_channels: 3
@@ -32,7 +34,22 @@ bce_pos_weight: 10.0
 sw_overlap: 0.5
 sw_batch_size: 2
 
+# Training speed optimizations
+use_amp: true                     # BF16 automatic mixed precision (requires CUDA)
+use_compile: false                # torch.compile — enable manually after verifying convergence
+cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
+cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
+
 # Checkpointing
 keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep (0 = keep all)
 # resume_checkpoint:              # uncomment and set path to resume from a checkpoint
                                   # e.g. resume_checkpoint: outputs/runs/my_run/checkpoints/epoch_0003.pt
+
+# Best checkpoint selection (composite score)
+best_ckpt_w_sensitivity: 0.5
+best_ckpt_w_dice: 0.3
+best_ckpt_w_hd95: 0.2
+
+# Early stopping (disabled for short local dev runs)
+early_stopping_patience: 0
+early_stopping_min_delta: 0.001

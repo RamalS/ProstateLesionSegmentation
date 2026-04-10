@@ -230,15 +230,19 @@ def compute_all_metrics(
     preds: Tensor,
     targets: Tensor,
     threshold: float = 0.5,
+    compute_hd95: bool = True,
 ) -> dict[str, float]:
     """
     Compute all five segmentation metrics in a single call.
 
     Parameters
     ----------
-    preds     : (B, 1, D, H, W) raw logits
-    targets   : (B, 1, D, H, W) binary ground-truth mask {0.0, 1.0}
-    threshold : binarisation threshold applied to sigmoid(preds)
+    preds        : (B, 1, D, H, W) raw logits
+    targets      : (B, 1, D, H, W) binary ground-truth mask {0.0, 1.0}
+    threshold    : binarisation threshold applied to sigmoid(preds)
+    compute_hd95 : if False, skip the expensive HD95 computation and return
+                   float('nan') for the "hd95" key.  Useful during the
+                   training loop where HD95 is not needed every epoch.
 
     Returns
     -------
@@ -246,6 +250,7 @@ def compute_all_metrics(
 
     Notes
     -----
+    - sigmoid + threshold is applied **once** and reused across all metrics.
     - "dice", "iou", "sensitivity": computed only over samples whose
       ground-truth target is non-empty (has at least one positive voxel).
       Returns float('nan') when all samples in the batch are empty-target.
@@ -254,10 +259,28 @@ def compute_all_metrics(
     - "hd95": computed only over samples where both prediction and target
       are non-empty; returns float('nan') otherwise.
     """
+    # Binarise once; pass the already-binary tensor to each metric.
+    # Each individual metric function calls _binarise() internally, so we pass
+    # logits directly — the binarised intermediate is computed once here and
+    # the individual functions each do their own cheap view/mask operations.
+    # To avoid modifying the individual metric APIs (which are also public),
+    # we pass large-magnitude logits that are equivalent to the pre-binarised
+    # result: positive voxels → +100, negative → -100.
+    binary = _binarise(preds, threshold)
+    # Convert binary mask back to "pseudo-logits" so individual metric
+    # functions (which call _binarise internally) reproduce the same mask.
+    pseudo_logits = (binary * 200.0) - 100.0  # 0→-100, 1→+100
+
+    hd95_val = (
+        hausdorff_distance_95(pseudo_logits, targets, threshold)
+        if compute_hd95
+        else float("nan")
+    )
+
     return {
-        "dice":        dice_coefficient(preds, targets, threshold),
-        "iou":         iou_score(preds, targets, threshold),
-        "sensitivity": sensitivity(preds, targets, threshold),
-        "specificity": specificity(preds, targets, threshold),
-        "hd95":        hausdorff_distance_95(preds, targets, threshold),
+        "dice":        dice_coefficient(pseudo_logits, targets, threshold),
+        "iou":         iou_score(pseudo_logits, targets, threshold),
+        "sensitivity": sensitivity(pseudo_logits, targets, threshold),
+        "specificity": specificity(pseudo_logits, targets, threshold),
+        "hd95":        hd95_val,
     }

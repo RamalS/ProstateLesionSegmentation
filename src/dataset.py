@@ -33,6 +33,7 @@ The dataset binarises labels by default: 0 = background, 1 = any lesion.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 from pathlib import Path
@@ -346,6 +347,7 @@ def stratified_train_val_split(
     cases: list[dict],
     val_fraction: float = 0.2,
     seed: int = 42,
+    cache_path: Path | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Split *cases* into train and validation subsets while preserving the
@@ -360,16 +362,50 @@ def stratified_train_val_split(
     cases        : full list of case dicts from `discover_cases`
     val_fraction : fraction of cases to reserve for validation [0, 1)
     seed         : random seed for reproducibility
+    cache_path   : optional path to a JSON sidecar file that stores
+                   ``{case_id: has_lesion}`` flags across runs.  When
+                   provided, the file is read on startup (avoiding
+                   ``sitk.ReadImage`` for already-seen cases) and written
+                   back after any new cases are processed.
 
     Returns
     -------
     (train_cases, val_cases) — both lists preserve the dataset's
     positive/negative ratio within ±1 case.
     """
-    # Annotate cases with positivity flag (reads label files once).
+    # Load cached lesion flags from JSON sidecar (if available).
+    flag_cache: dict[str, bool] = {}
+    if cache_path is not None and cache_path.exists():
+        try:
+            with cache_path.open() as fh:
+                flag_cache = {k: bool(v) for k, v in json.load(fh).items()}
+            logger.info(
+                "Loaded %d cached lesion flags from %s", len(flag_cache), cache_path
+            )
+        except Exception as exc:
+            logger.warning("Could not read lesion flag cache %s: %s", cache_path, exc)
+
+    # Annotate cases with positivity flag (reads label files only for cache misses).
+    new_flags = False
     for case in cases:
         if "has_lesion" not in case:
-            case["has_lesion"] = _case_has_lesion(case)
+            cid = case["case_id"]
+            if cid in flag_cache:
+                case["has_lesion"] = flag_cache[cid]
+            else:
+                case["has_lesion"] = _case_has_lesion(case)
+                flag_cache[cid] = case["has_lesion"]
+                new_flags = True
+
+    # Persist updated flag cache if anything new was computed.
+    if new_flags and cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with cache_path.open("w") as fh:
+                json.dump(flag_cache, fh)
+            logger.info("Saved %d lesion flags to %s", len(flag_cache), cache_path)
+        except Exception as exc:
+            logger.warning("Could not write lesion flag cache %s: %s", cache_path, exc)
 
     pos_cases = [c for c in cases if c["has_lesion"]]
     neg_cases = [c for c in cases if not c["has_lesion"]]
@@ -439,6 +475,8 @@ class PiCaiDataset(Dataset):
         target_spacing: tuple[float, ...] = (3.0, 0.5, 0.5),
         transform: Optional[Callable] = None,
         cases: Optional[Sequence[dict]] = None,
+        use_cache: bool = False,
+        cache_rate: float = 1.0,
     ) -> None:
         """
         Parameters
@@ -453,22 +491,45 @@ class PiCaiDataset(Dataset):
                         Intended for MONAI-style random augmentations.
         cases           Pre-computed case list (skips discovery if provided).
                         Useful for passing pre-split train/val subsets.
+        use_cache       If True, cache preprocessed (image, label) tensor pairs
+                        in worker memory after the first access.  Subsequent
+                        epochs skip all SimpleITK I/O and resampling for cached
+                        cases.  Requires ``persistent_workers=True`` in
+                        DataLoader so the worker processes (and their caches)
+                        survive across epochs.
+        cache_rate      Fraction of cases to cache, in [0.0, 1.0].  Cases are
+                        selected deterministically (first ``ceil(N * rate)``
+                        cases by index).  Default 1.0 caches the full dataset.
         """
         self.images_dir = Path(images_dir)
         self.labels_dir = Path(labels_dir)
         self.target_spacing = target_spacing
         self.transform = transform
+        self.use_cache = use_cache
+        self.cache_rate = float(cache_rate)
 
         if cases is not None:
             self.cases = list(cases)
         else:
             self.cases = discover_cases(self.images_dir, self.labels_dir)
 
+        # Determine which indices are eligible for caching.
+        import math as _math
+        n_cache = _math.ceil(len(self.cases) * self.cache_rate) if use_cache else 0
+        self._cache_indices: set[int] = set(range(n_cache))
+        # Mapping from case index → (image_tensor, label_tensor).
+        # Populated lazily on first __getitem__ access per worker.
+        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
         logger.info(
-            "PiCaiDataset ready: %d cases, spacing=%s, transform=%s",
+            "PiCaiDataset ready: %d cases, spacing=%s, transform=%s, "
+            "cache=%s (%.0f%% = %d cases)",
             len(self.cases),
             target_spacing,
             type(transform).__name__ if transform is not None else "None",
+            use_cache,
+            self.cache_rate * 100,
+            n_cache,
         )
 
     # ------------------------------------------------------------------
@@ -476,10 +537,59 @@ class PiCaiDataset(Dataset):
     def __len__(self) -> int:
         return len(self.cases)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx: int) -> dict | list[dict]:
         case = self.cases[idx]
         case_id: str = case["case_id"]
 
+        # ---------------------------------------------------------------------------
+        # In-memory cache lookup
+        # ---------------------------------------------------------------------------
+        if self.use_cache and idx in self._cache_indices:
+            if idx in self._cache:
+                # Cache hit: return cloned tensors to prevent in-place transform
+                # mutations from corrupting the stored originals.
+                image, label = self._cache[idx]
+                image = image.clone()
+                label = label.clone()
+            else:
+                # Cache miss on first access: run full I/O + preprocessing,
+                # then store the result before applying transforms.
+                image, label = self._load_and_preprocess(case)
+                self._cache[idx] = (image.clone(), label.clone())
+        else:
+            image, label = self._load_and_preprocess(case)
+
+        sample: dict = {
+            "image": image,
+            "label": label,
+            "case_id": case_id,
+        }
+
+        if self.transform is not None:
+            result = self.transform(sample)
+            # RandCropByPosNegLabeld with num_samples > 1 always returns a list
+            # of dicts.  Return the full list so list_data_collate in the
+            # DataLoader can assemble a proper batched tensor with shape
+            # (B * num_samples, C, D, H, W).
+            return result  # type: ignore[return-value]
+
+        return sample
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _load_and_preprocess(
+        self, case: dict
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run full SimpleITK I/O, co-registration, resampling, and
+        z-score normalisation for one case.
+
+        Returns
+        -------
+        (image, label) as float32 tensors shaped (3, D, H, W) and (1, D, H, W).
+        """
         # 1. Load raw volumes
         t2w_sitk = _load_volume(case["t2w"])
         adc_sitk = _load_volume(case["adc"])
@@ -500,7 +610,7 @@ class PiCaiDataset(Dataset):
         hbv = _zscore_normalize(_to_numpy(hbv_sitk))
 
         # 5. Stack → (3, D, H, W)
-        image = np.stack([t2w, adc, hbv], axis=0)
+        image_np = np.stack([t2w, adc, hbv], axis=0)
 
         # 6. Load and binarise label
         # Resample the label into the *resampled* T2w's exact voxel grid rather
@@ -518,25 +628,12 @@ class PiCaiDataset(Dataset):
                 interpolator=sitk.sitkNearestNeighbor,
                 default_value=0.0,
             )
-            label = _to_numpy(lbl_sitk)
-            label = (label > 0).astype(np.float32)  # binarise
+            label_np = _to_numpy(lbl_sitk)
+            label_np = (label_np > 0).astype(np.float32)  # binarise
         else:
             # Inference / unlabelled case: return all-zero mask
-            label = np.zeros(image.shape[1:], dtype=np.float32)
+            label_np = np.zeros(image_np.shape[1:], dtype=np.float32)
 
-        label = label[np.newaxis]  # (1, D, H, W)
+        label_np = label_np[np.newaxis]  # (1, D, H, W)
 
-        sample: dict = {
-            "image": torch.from_numpy(image),
-            "label": torch.from_numpy(label),
-            "case_id": case_id,
-        }
-
-        if self.transform is not None:
-            result = self.transform(sample)
-            # RandCropByPosNegLabeld always returns a list regardless of
-            # num_samples; pick the first patch so __getitem__ always
-            # returns a single dict for the standard PyTorch DataLoader.
-            sample = result[0] if isinstance(result, list) else result
-
-        return sample
+        return torch.from_numpy(image_np), torch.from_numpy(label_np)

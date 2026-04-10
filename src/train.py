@@ -77,6 +77,7 @@ def validate(
     sw_overlap: float,
     sw_batch_size: int,
     use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.bfloat16,
     compute_hd95: bool = True,
 ) -> dict[str, float]:
     """
@@ -90,7 +91,9 @@ def validate(
 
     Parameters
     ----------
-    use_amp      : enable BF16 autocast around sliding-window inference.
+    use_amp      : enable autocast around sliding-window inference.
+    amp_dtype    : dtype to use for autocast — ``torch.float16`` for Volta/Turing,
+                   ``torch.bfloat16`` for Ampere+/Blackwell.
     compute_hd95 : if False, skip the expensive HD95 calculation and log
                    float('nan') for "hd95".  Useful during the training loop
                    where HD95 is not needed every epoch.
@@ -107,7 +110,7 @@ def validate(
 
     hd95_values: list[float] = []
 
-    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16) if use_amp else torch.amp.autocast(device_type="cpu", enabled=False)  # type: ignore[attr-defined]
+    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype) if use_amp else torch.amp.autocast(device_type="cpu", enabled=False)  # type: ignore[attr-defined]
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
@@ -365,14 +368,20 @@ def main() -> None:
     epochs = cfg["epochs"]
     keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
 
-    # BF16 autocast: enabled by default when a CUDA device is available.
-    # No GradScaler needed: BF16 has sufficient dynamic range unlike FP16.
+    # AMP dtype: "fp16" for Volta/Turing (TITAN V, V100), "bf16" for Ampere+/Blackwell.
+    # FP16 requires GradScaler (limited exponent range); BF16 does not.
+    amp_dtype_str: str = cfg.get("amp_dtype", "bf16")
+    _dtype_map: dict[str, torch.dtype] = {"fp16": torch.float16, "bf16": torch.bfloat16}
+    amp_dtype: torch.dtype = _dtype_map.get(amp_dtype_str, torch.bfloat16)
     use_amp: bool = cfg.get("use_amp", True) and device.type == "cuda"
     amp_ctx = (
-        torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)  # type: ignore[attr-defined]
+        torch.amp.autocast(device_type="cuda", dtype=amp_dtype)  # type: ignore[attr-defined]
         if use_amp
         else torch.amp.autocast(device_type="cpu", enabled=False)  # type: ignore[attr-defined]
     )
+    # GradScaler: required for FP16 (prevents underflow), must be disabled for BF16/FP32.
+    use_fp16: bool = use_amp and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)  # type: ignore[attr-defined]
 
     # ---- Composite score weights ----
     w_sensitivity: float = cfg.get("best_ckpt_w_sensitivity", 0.5)
@@ -393,6 +402,7 @@ def main() -> None:
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
+            scaler=scaler,
             device=device,
         )
         start_epoch = ckpt["epoch"] + 1
@@ -405,7 +415,7 @@ def main() -> None:
         )
 
     logger.info("Device: %s", device)
-    logger.info("AMP (BF16): %s", use_amp)
+    logger.info("AMP (%s): %s", amp_dtype_str.upper(), use_amp)
     logger.info("torch.compile: %s", cfg.get("use_compile", False))
     logger.info("Experiment: %s", cfg["experiment_name"])
     logger.info("Run directory: %s", run_dir)
@@ -438,8 +448,9 @@ def main() -> None:
             with amp_ctx:
                 logits = model(images)
                 loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += loss.item()
             batch_bar.set_postfix(loss=f"{loss.item():.4f}")
@@ -460,6 +471,7 @@ def main() -> None:
             model, optimizer, epoch,
             str(checkpoint_dir / f"epoch_{epoch:04d}.pt"),
             scheduler=scheduler,
+            scaler=scaler,
             best_val_dice=best_val_dice,
             best_composite_score=best_composite_score,
         )
@@ -474,6 +486,7 @@ def main() -> None:
             sw_overlap=sw_overlap,
             sw_batch_size=sw_batch_size,
             use_amp=use_amp,
+            amp_dtype=amp_dtype,
             compute_hd95=False,   # HD95 skipped during training; use evaluate_checkpoint.py for final eval
         )
 
@@ -529,6 +542,7 @@ def main() -> None:
                 model, optimizer, epoch,
                 str(checkpoint_dir / "best.pt"),
                 scheduler=scheduler,
+                scaler=scaler,
                 best_val_dice=best_val_dice,
                 best_composite_score=best_composite_score,
             )

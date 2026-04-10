@@ -104,11 +104,12 @@ def save_checkpoint(
     epoch: int,
     path: str,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    scaler: torch.amp.GradScaler | None = None,
     best_val_dice: float = 0.0,
     best_composite_score: float = 0.0,
 ) -> None:
     """
-    Persist model, optimizer, and (optionally) scheduler state to *path*.
+    Persist model, optimizer, and (optionally) scheduler/scaler state to *path*.
 
     Parameters
     ----------
@@ -117,6 +118,9 @@ def save_checkpoint(
     epoch                 : current epoch number (1-indexed), stored in the checkpoint
     path                  : destination file path (will be created or overwritten)
     scheduler             : learning-rate scheduler; its state is saved when provided
+    scaler                : ``torch.amp.GradScaler``; its state is saved when provided
+                            so FP16 loss-scaling factors survive across resume.
+                            Pass ``None`` when using BF16 or no AMP.
     best_val_dice         : best validation Dice seen so far, stored for resuming
     best_composite_score  : best composite score seen so far, stored for resuming
     """
@@ -129,6 +133,8 @@ def save_checkpoint(
     }
     if scheduler is not None:
         state["scheduler_state_dict"] = scheduler.state_dict()
+    if scaler is not None:
+        state["scaler_state_dict"] = scaler.state_dict()
     torch.save(state, path)
 
 
@@ -137,11 +143,12 @@ def load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    scaler: torch.amp.GradScaler | None = None,
     device: torch.device | None = None,
 ) -> dict:
     """
     Load a checkpoint file and restore state into *model* (and optionally
-    *optimizer* / *scheduler*).
+    *optimizer* / *scheduler* / *scaler*).
 
     Parameters
     ----------
@@ -149,6 +156,9 @@ def load_checkpoint(
     model     : model to restore weights into
     optimizer : if provided, optimizer state is restored from the checkpoint
     scheduler : if provided, scheduler state is restored from the checkpoint
+    scaler    : if provided and a ``scaler_state_dict`` key exists in the
+                checkpoint, the GradScaler loss-scale state is restored.
+                Pass ``None`` when using BF16 or no AMP.
     device    : map_location for ``torch.load``; defaults to CPU
 
     Returns
@@ -164,6 +174,8 @@ def load_checkpoint(
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler is not None and "scheduler_state_dict" in ckpt:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    if scaler is not None and "scaler_state_dict" in ckpt:
+        scaler.load_state_dict(ckpt["scaler_state_dict"])
     logger.info("Loaded checkpoint from %s (epoch %d)", path, ckpt.get("epoch", "?"))
     return ckpt
 

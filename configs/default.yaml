@@ -1,9 +1,9 @@
 experiment_name: baseline_run
 epochs: 100
-batch_size: 4
-learning_rate: 1.0e-4
+batch_size: 16
+learning_rate: 4.0e-4
 weight_decay: 1.0e-5
-num_workers: 4
+num_workers: 5
 device: cuda
 base_output_dir: /outputs/runs
 random_seed: 42
@@ -36,11 +36,13 @@ bce_pos_weight: 3.0
 
 # Validation (sliding window)
 sw_overlap: 0.5                   # overlap fraction for sliding window inference
-sw_batch_size: 4                  # number of patches processed per SW step
+sw_batch_size: 8                  # number of patches processed per SW step
 
 # Training speed optimizations
-use_amp: true                     # BF16 automatic mixed precision (requires CUDA + Blackwell/Ampere)
-use_compile: false                # torch.compile — enable manually after verifying convergence
+use_amp: true                     # automatic mixed precision (see amp_dtype below)
+amp_dtype: fp16                   # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
+                                  # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
+use_compile: true                 # torch.compile (Triton): safe with fixed patch_size
 cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
 cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
 

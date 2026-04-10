@@ -36,7 +36,9 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import random
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -537,13 +539,22 @@ class PiCaiDataset(Dataset):
         # before DataLoader forks workers.  Workers inherit the populated dict and
         # achieve a 100% hit rate from the very first epoch without any per-worker
         # duplication of I/O.
+        # ThreadPoolExecutor overlaps I/O and resampling across cases — SimpleITK
+        # and numpy both release the GIL during their compute-heavy operations.
         if use_cache and n_cache > 0:
+            warmup_workers = min(n_cache, os.cpu_count() or 4)
             logger.info(
-                "Warming cache: loading %d/%d cases into RAM …",
-                n_cache, len(self.cases),
+                "Warming cache (%d threads): loading %d/%d cases into RAM …",
+                warmup_workers, n_cache, len(self.cases),
             )
-            for i in range(n_cache):
-                self._cache[i] = self._load_and_preprocess(self.cases[i])
+
+            def _load_one(i: int) -> tuple[int, tuple[torch.Tensor, torch.Tensor]]:
+                return i, self._load_and_preprocess(self.cases[i])
+
+            with ThreadPoolExecutor(max_workers=warmup_workers) as pool:
+                for idx, tensors in pool.map(_load_one, range(n_cache)):
+                    self._cache[idx] = tensors
+
             logger.info("Cache warmup complete (%d cases loaded).", n_cache)
 
     # ------------------------------------------------------------------

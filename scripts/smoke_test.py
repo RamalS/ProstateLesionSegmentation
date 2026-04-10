@@ -10,11 +10,14 @@ What this tests (no real data required):
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
   8. Checkpoint save/load round-trip (save_checkpoint + load_checkpoint),
-     including best_composite_score persistence
-  9. evaluate_checkpoint helpers: _normalize_vol_for_display, _segmentation_overlay,
-     save_visualization (synthetic PNG round-trip)
+     including best_composite_score persistence and GradScaler state
+   9. evaluate_checkpoint helpers: _normalize_vol_for_display, _segmentation_overlay,
+      save_visualization (synthetic PNG round-trip)
  10. compute_composite_score: normal case, HD95=NaN redistribution,
-     sensitivity=NaN guard, early stopping counter simulation
+      sensitivity=NaN guard, early stopping counter simulation
+ 11. PiCaiDataset in-memory cache (use_cache=True)
+ 12. compute_all_metrics(compute_hd95=False)
+ 13. AMP forward+backward: FP16+GradScaler (Volta/Turing) and BF16 (Ampere+/Blackwell)
 
 Run inside the Docker container:
     python scripts/smoke_test.py
@@ -482,25 +485,38 @@ try:
     with tempfile.TemporaryDirectory() as tmp:
         ckpt_path = Path(tmp) / "test_epoch_0001.pt"
 
-        # Save
+        # Build a GradScaler (enabled only when CUDA is available; FP16 mode)
+        _ckpt_scaler = torch.amp.GradScaler("cuda", enabled=cuda_ok)  # type: ignore[attr-defined]
+
+        # Save (with scaler)
         save_checkpoint(
             _ckpt_model, _ckpt_opt, epoch=1,
             path=str(ckpt_path),
             scheduler=_ckpt_sched,
+            scaler=_ckpt_scaler,
             best_val_dice=0.42,
             best_composite_score=0.57,
         )
         ok(f"save_checkpoint wrote {ckpt_path.name}")
 
-        # Load into a fresh model/optimizer/scheduler
+        # Verify scaler_state_dict is present in the raw checkpoint file
+        _raw = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+        if "scaler_state_dict" in _raw:
+            ok("scaler_state_dict key present in checkpoint file")
+        else:
+            fail("scaler_state_dict missing from saved checkpoint")
+
+        # Load into a fresh model/optimizer/scheduler/scaler
         _new_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16)).to(DEVICE)
         _new_opt = torch.optim.AdamW(_new_model.parameters(), lr=1e-4)
         _new_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
             _new_opt, T_max=10, eta_min=1e-6
         )
+        _new_scaler = torch.amp.GradScaler("cuda", enabled=cuda_ok)  # type: ignore[attr-defined]
 
         ckpt = load_checkpoint(
-            ckpt_path, _new_model, _new_opt, _new_sched, device=DEVICE
+            ckpt_path, _new_model, _new_opt, _new_sched,
+            scaler=_new_scaler, device=DEVICE,
         )
 
         assert ckpt["epoch"] == 1, f"epoch mismatch: {ckpt['epoch']}"
@@ -510,7 +526,7 @@ try:
         ok(f"load_checkpoint restored epoch={ckpt['epoch']}, "
            f"best_val_dice={ckpt['best_val_dice']:.2f}, "
            f"best_composite_score={ckpt['best_composite_score']:.2f}, "
-           f"scheduler state present")
+           f"scheduler+scaler state present")
 
 except Exception as exc:
     fail("Checkpoint round-trip test failed", exc)
@@ -806,44 +822,64 @@ except Exception as exc:
     fail("compute_hd95=False test failed", exc)
 
 # ---------------------------------------------------------------------------
-# 13. BF16 autocast forward pass
+# 13. AMP forward pass: FP16 + GradScaler (Volta/Turing) and BF16 (Ampere+)
 # ---------------------------------------------------------------------------
-section("13. BF16 autocast (AMP) forward pass")
+section("13. AMP forward pass — FP16+GradScaler and BF16")
 
 if not cuda_ok:
-    skip("CUDA not available — skipping BF16 autocast test")
+    skip("CUDA not available — skipping AMP autocast tests")
 else:
     try:
         amp_model = UNet3D(in_channels=3, out_channels=1, features=(16, 32, 64, 128))
         amp_model = amp_model.to(DEVICE)
 
-        dummy = torch.randn(1, 3, 20, 64, 64, device=DEVICE)
-
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            out_amp = amp_model(dummy)
-
-        if out_amp.shape == (1, 1, 20, 64, 64):
-            ok(
-                f"BF16 autocast forward pass OK — output dtype={out_amp.dtype}, "
-                f"shape={tuple(out_amp.shape)}"
-            )
-        else:
-            fail(f"BF16 autocast: unexpected output shape {tuple(out_amp.shape)}")
-
-        # Loss must also be finite under BF16 autocast.
         from losses import DiceBCELoss
         amp_criterion = DiceBCELoss().to(DEVICE)
         tgt = (torch.rand(1, 1, 20, 64, 64, device=DEVICE) > 0.8).float()
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            amp_loss = amp_criterion(out_amp, tgt)
+        dummy = torch.randn(1, 3, 20, 64, 64, device=DEVICE)
 
-        if torch.isfinite(amp_loss):
-            ok(f"DiceBCELoss under BF16 autocast: loss={amp_loss.item():.4f} (finite)")
+        # --- FP16 + GradScaler (server path: TITAN V / Volta) -----------------
+        fp16_scaler = torch.amp.GradScaler("cuda", enabled=True)  # type: ignore[attr-defined]
+        amp_model.zero_grad()
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):  # type: ignore[attr-defined]
+            out_fp16 = amp_model(dummy)
+            loss_fp16 = amp_criterion(out_fp16, tgt)
+
+        fp16_scaler.scale(loss_fp16).backward()
+        fp16_scaler.step(torch.optim.AdamW(amp_model.parameters(), lr=1e-4))
+        fp16_scaler.update()
+
+        if out_fp16.shape == (1, 1, 20, 64, 64) and torch.isfinite(loss_fp16):
+            ok(
+                f"FP16+GradScaler forward+backward OK — "
+                f"output dtype={out_fp16.dtype}, loss={loss_fp16.item():.4f}"
+            )
         else:
-            fail(f"DiceBCELoss under BF16 autocast returned non-finite value: {amp_loss.item()}")
+            fail(
+                f"FP16+GradScaler: shape={tuple(out_fp16.shape)}, "
+                f"loss={loss_fp16.item()}"
+            )
+
+        # --- BF16 (laptop path: RTX 5070 / Blackwell) -------------------------
+        amp_model.zero_grad()
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore[attr-defined]
+            out_bf16 = amp_model(dummy)
+            loss_bf16 = amp_criterion(out_bf16, tgt)
+
+        loss_bf16.backward()   # no scaler needed for BF16
+
+        if out_bf16.shape == (1, 1, 20, 64, 64) and torch.isfinite(loss_bf16):
+            ok(
+                f"BF16 forward+backward OK — "
+                f"output dtype={out_bf16.dtype}, loss={loss_bf16.item():.4f}"
+            )
+        else:
+            fail(
+                f"BF16: shape={tuple(out_bf16.shape)}, loss={loss_bf16.item()}"
+            )
 
     except Exception as exc:
-        fail("BF16 autocast test failed", exc)
+        fail("AMP autocast test failed", exc)
 
 # ---------------------------------------------------------------------------
 # Summary

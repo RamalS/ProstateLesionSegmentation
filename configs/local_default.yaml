@@ -1,7 +1,7 @@
 experiment_name: baseline_run
 epochs: 5
-batch_size: 2
-learning_rate: 1.0e-4
+batch_size: 4
+learning_rate: 2.0e-4
 weight_decay: 1.0e-5
 num_workers: 2
 device: cuda
@@ -35,8 +35,9 @@ sw_overlap: 0.5
 sw_batch_size: 2
 
 # Training speed optimizations
-use_amp: true                     # BF16 automatic mixed precision (requires CUDA)
-use_compile: false                # torch.compile — enable manually after verifying convergence
+use_amp: true                     # automatic mixed precision (see amp_dtype below)
+amp_dtype: bf16                   # RTX 5070 (Blackwell) has native BF16 tensor cores
+use_compile: false                # torch.compile — disable for dev; enable for longer runs
 cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
 cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
 

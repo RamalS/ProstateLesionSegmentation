@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -514,11 +515,11 @@ class PiCaiDataset(Dataset):
             self.cases = discover_cases(self.images_dir, self.labels_dir)
 
         # Determine which indices are eligible for caching.
-        import math as _math
-        n_cache = _math.ceil(len(self.cases) * self.cache_rate) if use_cache else 0
+        n_cache = math.ceil(len(self.cases) * self.cache_rate) if use_cache else 0
         self._cache_indices: set[int] = set(range(n_cache))
         # Mapping from case index → (image_tensor, label_tensor).
-        # Populated lazily on first __getitem__ access per worker.
+        # Pre-populated eagerly in the main process so all DataLoader workers
+        # inherit a fully-warmed cache via fork() — 100% hit rate from epoch 1.
         self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
         logger.info(
@@ -531,6 +532,19 @@ class PiCaiDataset(Dataset):
             self.cache_rate * 100,
             n_cache,
         )
+
+        # Eager cache warmup: load all cacheable cases now, in the main process,
+        # before DataLoader forks workers.  Workers inherit the populated dict and
+        # achieve a 100% hit rate from the very first epoch without any per-worker
+        # duplication of I/O.
+        if use_cache and n_cache > 0:
+            logger.info(
+                "Warming cache: loading %d/%d cases into RAM …",
+                n_cache, len(self.cases),
+            )
+            for i in range(n_cache):
+                self._cache[i] = self._load_and_preprocess(self.cases[i])
+            logger.info("Cache warmup complete (%d cases loaded).", n_cache)
 
     # ------------------------------------------------------------------
 
@@ -552,8 +566,10 @@ class PiCaiDataset(Dataset):
                 image = image.clone()
                 label = label.clone()
             else:
-                # Cache miss on first access: run full I/O + preprocessing,
-                # then store the result before applying transforms.
+                # Defensive fallback — should never reach here after eager warmup.
+                logger.debug(
+                    "Cache miss for idx=%d after eager warmup — loading from disk.", idx
+                )
                 image, label = self._load_and_preprocess(case)
                 self._cache[idx] = (image.clone(), label.clone())
         else:

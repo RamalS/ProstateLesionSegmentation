@@ -227,7 +227,7 @@ def main() -> None:
         all_cases,
         val_fraction=cfg.get("val_fraction", 0.2),
         seed=seed,
-        cache_path=Path(cfg["labels_dir"]) / "lesion_flags.json",
+        cache_path=Path(cfg["base_output_dir"]) / "lesion_flags.json",
     )
     logger.info("Split: %d train | %d val", len(train_cases), len(val_cases))
 

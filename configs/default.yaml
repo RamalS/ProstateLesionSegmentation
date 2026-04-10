@@ -17,7 +17,7 @@ val_fraction: 0.2
 # Patch sampling
 patch_size: [20, 128, 128]         # (D, H, W) in voxels
 pos_fraction: 0.75                 # fraction of patches containing a lesion
-num_samples: 2                     # patches extracted per volume per __getitem__ call
+num_samples: 1                     # patches extracted per volume per __getitem__ call
                                    # effective batch size = batch_size × num_samples
 
 # Model

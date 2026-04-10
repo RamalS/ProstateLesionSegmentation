@@ -38,9 +38,12 @@ import logging
 import math
 import os
 import random
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional, Sequence
+
+from tqdm import tqdm
 
 import numpy as np
 import SimpleITK as sitk
@@ -552,7 +555,13 @@ class PiCaiDataset(Dataset):
                 return i, self._load_and_preprocess(self.cases[i])
 
             with ThreadPoolExecutor(max_workers=warmup_workers) as pool:
-                for idx, tensors in pool.map(_load_one, range(n_cache)):
+                for idx, tensors in tqdm(
+                    pool.map(_load_one, range(n_cache)),
+                    total=n_cache,
+                    desc="Cache warmup",
+                    unit="case",
+                    disable=not sys.stdout.isatty(),
+                ):
                     self._cache[idx] = tensors
 
             logger.info("Cache warmup complete (%d cases loaded).", n_cache)

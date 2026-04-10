@@ -254,6 +254,8 @@ def main() -> None:
         target_spacing=target_spacing,
         transform=get_val_transforms(),
         cases=val_cases,
+        use_cache=cfg.get("cache_dataset", False),
+        cache_rate=cfg.get("cache_rate", 1.0),
     )
 
     # ---- Weighted sampler: over-sample positive cases ----
@@ -367,6 +369,7 @@ def main() -> None:
     sw_batch_size = cfg.get("sw_batch_size", 4)
     epochs = cfg["epochs"]
     keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
+    val_every: int = max(1, cfg.get("val_every", 1))
 
     # AMP dtype: "fp16" for Volta/Turing (TITAN V, V100), "bf16" for Ampere+/Blackwell.
     # FP16 requires GradScaler (limited exponent range); BF16 does not.
@@ -478,95 +481,102 @@ def main() -> None:
         rotate_checkpoints(checkpoint_dir, keep_last_n)
 
         # ---- Validate ----
-        val_metrics = validate(
-            model=model,
-            loader=val_loader,
-            device=device,
-            patch_size=patch_size,
-            sw_overlap=sw_overlap,
-            sw_batch_size=sw_batch_size,
-            use_amp=use_amp,
-            amp_dtype=amp_dtype,
-            compute_hd95=False,   # HD95 skipped during training; use evaluate_checkpoint.py for final eval
-        )
+        run_val = (epoch % val_every == 0) or (epoch == epochs)
+        if run_val:
+            val_metrics = validate(
+                model=model,
+                loader=val_loader,
+                device=device,
+                patch_size=patch_size,
+                sw_overlap=sw_overlap,
+                sw_batch_size=sw_batch_size,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                compute_hd95=False,   # HD95 skipped during training; use evaluate_checkpoint.py for final eval
+            )
 
-        writer.add_scalar("val/dice",        val_metrics["dice"],        epoch)
-        writer.add_scalar("val/iou",         val_metrics["iou"],         epoch)
-        writer.add_scalar("val/sensitivity", val_metrics["sensitivity"], epoch)
-        writer.add_scalar("val/specificity", val_metrics["specificity"], epoch)
-        if not math.isnan(val_metrics["hd95"]):
-            writer.add_scalar("val/hd95", val_metrics["hd95"], epoch)
+            writer.add_scalar("val/dice",        val_metrics["dice"],        epoch)
+            writer.add_scalar("val/iou",         val_metrics["iou"],         epoch)
+            writer.add_scalar("val/sensitivity", val_metrics["sensitivity"], epoch)
+            writer.add_scalar("val/specificity", val_metrics["specificity"], epoch)
+            if not math.isnan(val_metrics["hd95"]):
+                writer.add_scalar("val/hd95", val_metrics["hd95"], epoch)
 
-        n_pos = int(val_metrics["n_pos"])
-        n_all = int(val_metrics["n_all"])
+            n_pos = int(val_metrics["n_pos"])
+            n_all = int(val_metrics["n_all"])
 
-        def _fmt(v: float) -> str:
-            return f"{v:.4f}" if not math.isnan(v) else "n/a"
+            def _fmt(v: float) -> str:
+                return f"{v:.4f}" if not math.isnan(v) else "n/a"
 
-        hd95_str = _fmt(val_metrics["hd95"])
-        logger.info(
-            "Epoch %d/%d | val_dice=%s | val_iou=%s"
-            " | val_sens=%s | val_spec=%.4f | val_hd95=%s"
-            " | pos_cases=%d/%d",
-            epoch, epochs,
-            _fmt(val_metrics["dice"]),
-            _fmt(val_metrics["iou"]),
-            _fmt(val_metrics["sensitivity"]),
-            val_metrics["specificity"],
-            hd95_str,
-            n_pos, n_all,
-        )
-
-        # ---- Composite score: best.pt selection + early stopping ----
-        composite_score = compute_composite_score(
-            val_metrics,
-            w_sensitivity=w_sensitivity,
-            w_dice=w_dice,
-            w_hd95=w_hd95,
-        )
-
-        if not math.isnan(composite_score):
-            writer.add_scalar("val/composite_score", composite_score, epoch)
+            hd95_str = _fmt(val_metrics["hd95"])
             logger.info(
-                "Epoch %d/%d | composite_score=%.4f (best=%.4f)",
-                epoch, epochs, composite_score, best_composite_score,
+                "Epoch %d/%d | val_dice=%s | val_iou=%s"
+                " | val_sens=%s | val_spec=%.4f | val_hd95=%s"
+                " | pos_cases=%d/%d",
+                epoch, epochs,
+                _fmt(val_metrics["dice"]),
+                _fmt(val_metrics["iou"]),
+                _fmt(val_metrics["sensitivity"]),
+                val_metrics["specificity"],
+                hd95_str,
+                n_pos, n_all,
             )
 
-        # Save best model checkpoint when composite score improves
-        if not math.isnan(composite_score) and composite_score > best_composite_score + es_min_delta:
-            best_composite_score = composite_score
-            # Also track best dice for logging convenience
-            if not math.isnan(val_metrics["dice"]):
-                best_val_dice = val_metrics["dice"]
-            save_checkpoint(
-                model, optimizer, epoch,
-                str(checkpoint_dir / "best.pt"),
-                scheduler=scheduler,
-                scaler=scaler,
-                best_val_dice=best_val_dice,
-                best_composite_score=best_composite_score,
+            # ---- Composite score: best.pt selection + early stopping ----
+            composite_score = compute_composite_score(
+                val_metrics,
+                w_sensitivity=w_sensitivity,
+                w_dice=w_dice,
+                w_hd95=w_hd95,
             )
-            logger.info(
-                "New best model at epoch %d (composite_score=%.4f, val_dice=%s) → %s",
-                epoch, best_composite_score, _fmt(val_metrics["dice"]),
-                checkpoint_dir / "best.pt",
-            )
-            es_counter = 0
-        else:
-            if es_enabled and not math.isnan(composite_score):
-                es_counter += 1
+
+            if not math.isnan(composite_score):
+                writer.add_scalar("val/composite_score", composite_score, epoch)
                 logger.info(
-                    "Early stopping counter: %d / %d",
-                    es_counter, es_patience,
+                    "Epoch %d/%d | composite_score=%.4f (best=%.4f)",
+                    epoch, epochs, composite_score, best_composite_score,
                 )
 
-        if es_enabled and es_counter >= es_patience:
+            # Save best model checkpoint when composite score improves
+            if not math.isnan(composite_score) and composite_score > best_composite_score + es_min_delta:
+                best_composite_score = composite_score
+                # Also track best dice for logging convenience
+                if not math.isnan(val_metrics["dice"]):
+                    best_val_dice = val_metrics["dice"]
+                save_checkpoint(
+                    model, optimizer, epoch,
+                    str(checkpoint_dir / "best.pt"),
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    best_val_dice=best_val_dice,
+                    best_composite_score=best_composite_score,
+                )
+                logger.info(
+                    "New best model at epoch %d (composite_score=%.4f, val_dice=%s) → %s",
+                    epoch, best_composite_score, _fmt(val_metrics["dice"]),
+                    checkpoint_dir / "best.pt",
+                )
+                es_counter = 0
+            else:
+                if es_enabled and not math.isnan(composite_score):
+                    es_counter += 1
+                    logger.info(
+                        "Early stopping counter: %d / %d",
+                        es_counter, es_patience,
+                    )
+
+            if es_enabled and es_counter >= es_patience:
+                logger.info(
+                    "Early stopping triggered at epoch %d — no improvement in composite score "
+                    "for %d consecutive epochs (min_delta=%.4f).",
+                    epoch, es_patience, es_min_delta,
+                )
+                break
+        else:
             logger.info(
-                "Early stopping triggered at epoch %d — no improvement in composite score "
-                "for %d consecutive epochs (min_delta=%.4f).",
-                epoch, es_patience, es_min_delta,
+                "Epoch %d/%d | validation skipped (val_every=%d)",
+                epoch, epochs, val_every,
             )
-            break
 
     writer.close()
     logger.info("Training complete.")

@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -52,10 +52,10 @@ RUN mkdir -p /workspace /data /outputs /cache && \
 
 WORKDIR /workspace
 
-# Install PyTorch explicitly first (cu126 wheels support sm_70 Volta, e.g. TITAN V)
+# Install PyTorch explicitly first (cu128 wheels support sm_70 Volta through sm_120 Blackwell)
 RUN pip install --no-cache-dir \
-    torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
-    --index-url https://download.pytorch.org/whl/cu126
+    torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # Install the rest of requirements, but WITHOUT torch/torchvision/torchaudio in requirements.txt
 COPY requirements.txt /workspace/requirements.txt

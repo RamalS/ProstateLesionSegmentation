@@ -1,4 +1,4 @@
-experiment_name: baseline_run
+experiment_name: v2_pos_weight_fixed
 epochs: 100
 batch_size: 16
 learning_rate: 4.0e-4
@@ -16,7 +16,7 @@ val_fraction: 0.2
 
 # Patch sampling
 patch_size: [20, 128, 128]         # (D, H, W) in voxels
-pos_fraction: 0.75                 # fraction of patches containing a lesion
+pos_fraction: 0.85                 # fraction of patches containing a lesion
 num_samples: 1                     # patches extracted per volume per __getitem__ call
                                    # effective batch size = batch_size × num_samples
 
@@ -26,16 +26,16 @@ out_channels: 1                   # binary segmentation
 features: [32, 64, 128, 256]      # encoder feature map sizes
 
 # Loss
-dice_weight: 1.0
+dice_weight: 2.0
 bce_weight: 1.0
 # Positive-voxel weight for the BCE term. Compensates for class imbalance
 # (lesion voxels are ~1-2% of a prostate volume). Rule of thumb: set to
 # roughly (background voxels) / (lesion voxels). Start with 10.0 and tune
 # upward if the model still predicts all-background after a few epochs.
-bce_pos_weight: 3.0
+bce_pos_weight: 10.0
 
 # Validation (sliding window)
-sw_overlap: 0.5                   # overlap fraction for sliding window inference
+sw_overlap: 0.75                  # overlap fraction for sliding window inference
 sw_batch_size: 8                  # number of patches processed per SW step
 val_every: 5                      # run validation every N epochs (also always runs on the final epoch)
 
@@ -64,7 +64,7 @@ best_ckpt_w_hd95: 0.2
 # Training halts when the composite score does not improve by more than
 # early_stopping_min_delta for early_stopping_patience consecutive epochs.
 # Set early_stopping_patience to 0 to disable early stopping.
-early_stopping_patience: 20
+early_stopping_patience: 40
 early_stopping_min_delta: 0.001
 
 # ntfy push notifications

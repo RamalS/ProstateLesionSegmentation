@@ -36,6 +36,7 @@ from src.dataset import PiCaiDataset, discover_cases, stratified_train_val_split
 from src.losses import DiceBCELoss
 from src.metrics import compute_all_metrics
 from src.models import UNet3D
+from src.notify import send_ntfy
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     compute_composite_score,
@@ -436,6 +437,19 @@ def main() -> None:
     else:
         logger.info("Early stopping: disabled")
 
+    send_ntfy(
+        cfg,
+        title=f"Training started: {cfg['experiment_name']}",
+        message=(
+            f"Epochs: {epochs}\n"
+            f"Train cases: {len(train_cases)} | Val cases: {len(val_cases)}\n"
+            f"Device: {device} | AMP: {amp_dtype_str.upper() if use_amp else 'off'}\n"
+            f"Run dir: {run_dir}"
+        ),
+        tags=["rocket"],
+        priority="default",
+    )
+
     for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs", unit="epoch"):
 
         # ---- Train ----
@@ -556,6 +570,20 @@ def main() -> None:
                     epoch, best_composite_score, _fmt(val_metrics["dice"]),
                     checkpoint_dir / "best.pt",
                 )
+                if cfg.get("ntfy_notify_best_model", True):
+                    send_ntfy(
+                        cfg,
+                        title=f"New best model: {cfg['experiment_name']}",
+                        message=(
+                            f"Epoch {epoch}/{epochs}\n"
+                            f"Composite: {best_composite_score:.4f}\n"
+                            f"Dice: {_fmt(val_metrics['dice'])} | "
+                            f"Sensitivity: {_fmt(val_metrics['sensitivity'])} | "
+                            f"Specificity: {val_metrics['specificity']:.4f}"
+                        ),
+                        tags=["trophy"],
+                        priority="default",
+                    )
                 es_counter = 0
             else:
                 if es_enabled and not math.isnan(composite_score):
@@ -571,6 +599,19 @@ def main() -> None:
                     "for %d consecutive epochs (min_delta=%.4f).",
                     epoch, es_patience, es_min_delta,
                 )
+                send_ntfy(
+                    cfg,
+                    title=f"Training stopped early: {cfg['experiment_name']}",
+                    message=(
+                        f"Early stopping at epoch {epoch}/{epochs}\n"
+                        f"No improvement for {es_patience} consecutive epochs "
+                        f"(min_delta={es_min_delta})\n"
+                        f"Best composite: {best_composite_score:.4f} | "
+                        f"Best dice: {best_val_dice:.4f}"
+                    ),
+                    tags=["warning"],
+                    priority="high",
+                )
                 break
         else:
             logger.info(
@@ -584,6 +625,41 @@ def main() -> None:
     logger.info("Best validation Dice: %.4f", best_val_dice)
     logger.info("Artifacts saved to: %s", run_dir)
 
+    send_ntfy(
+        cfg,
+        title=f"Training complete: {cfg['experiment_name']}",
+        message=(
+            f"Best composite score: {best_composite_score:.4f}\n"
+            f"Best val dice: {best_val_dice:.4f}\n"
+            f"Artifacts: {run_dir}"
+        ),
+        tags=["white_check_mark"],
+        priority="default",
+    )
+
 
 if __name__ == "__main__":
-    main()
+    # Pre-load config for the failure notification.  parse_known_args lets us
+    # extract --config without duplicating the full argument parser.
+    _pre_parser = argparse.ArgumentParser(add_help=False)
+    _pre_parser.add_argument("--config", type=str, default=None)
+    _known, _ = _pre_parser.parse_known_args()
+
+    _ntfy_cfg: dict = {}
+    if _known.config:
+        try:
+            _ntfy_cfg = load_config(_known.config)
+        except Exception:
+            pass
+
+    try:
+        main()
+    except Exception as _exc:
+        send_ntfy(
+            _ntfy_cfg,
+            title=f"Training FAILED: {_ntfy_cfg.get('experiment_name', 'unknown')}",
+            message=f"{type(_exc).__name__}: {_exc}",
+            tags=["x", "rotating_light"],
+            priority="urgent",
+        )
+        raise

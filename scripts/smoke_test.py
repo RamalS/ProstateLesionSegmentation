@@ -18,6 +18,7 @@ What this tests (no real data required):
  11. PiCaiDataset in-memory cache (use_cache=True)
  12. compute_all_metrics(compute_hd95=False)
  13. AMP forward+backward: FP16+GradScaler (Volta/Turing) and BF16 (Ampere+/Blackwell)
+ 14. ntfy notifications: send_ntfy no-op, URL/header/body correctness, error handling
 
 Run inside the Docker container:
     python scripts/smoke_test.py
@@ -880,6 +881,109 @@ else:
 
     except Exception as exc:
         fail("AMP autocast test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 14. ntfy notifications (send_ntfy)
+# ---------------------------------------------------------------------------
+section("14. ntfy notifications (send_ntfy)")
+
+try:
+    from unittest.mock import MagicMock, call, patch
+
+    from notify import send_ntfy
+
+    # --- 14a. No-op when ntfy_url / ntfy_topic are absent --------------------
+    cfg_no_ntfy: dict = {"experiment_name": "test"}
+    send_ntfy(cfg_no_ntfy, title="Test", message="should be silently ignored")
+    ok("send_ntfy is a no-op when ntfy_url/ntfy_topic are absent")
+
+    # --- 14b. No-op when values are empty strings ----------------------------
+    cfg_empty: dict = {"ntfy_url": "", "ntfy_topic": "", "experiment_name": "test"}
+    send_ntfy(cfg_empty, title="Test", message="should also be silently ignored")
+    ok("send_ntfy is a no-op when ntfy_url/ntfy_topic are empty strings")
+
+    # --- 14c. Correct URL, headers, and body when configured -----------------
+    cfg_ntfy: dict = {
+        "ntfy_url": "https://ntfy.sh",
+        "ntfy_topic": "test-training-alerts",
+        "experiment_name": "smoke_test_run",
+    }
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("notify.requests") as mock_requests:
+        mock_requests.post.return_value = mock_response
+        send_ntfy(
+            cfg_ntfy,
+            title="Training started: smoke_test_run",
+            message="Epochs: 5\nTrain cases: 40 | Val cases: 10",
+            tags=["rocket"],
+            priority="default",
+        )
+        mock_requests.post.assert_called_once()
+        _call_args = mock_requests.post.call_args
+        _url = _call_args[0][0]
+        _headers = _call_args[1]["headers"]
+        _body = _call_args[1]["data"]
+
+    if _url == "https://ntfy.sh/test-training-alerts":
+        ok(f"send_ntfy builds correct endpoint URL: {_url}")
+    else:
+        fail(f"URL mismatch: got '{_url}', expected 'https://ntfy.sh/test-training-alerts'")
+
+    if _headers.get("Title") == "Training started: smoke_test_run":
+        ok("send_ntfy sets Title header correctly")
+    else:
+        fail(f"Title header mismatch: {_headers.get('Title')!r}")
+
+    if _headers.get("Tags") == "rocket":
+        ok("send_ntfy sets Tags header correctly")
+    else:
+        fail(f"Tags header mismatch: {_headers.get('Tags')!r}")
+
+    if _headers.get("Priority") == "default":
+        ok("send_ntfy sets Priority header correctly")
+    else:
+        fail(f"Priority header mismatch: {_headers.get('Priority')!r}")
+
+    if b"Epochs: 5" in _body:
+        ok("send_ntfy encodes message body as UTF-8 bytes")
+    else:
+        fail(f"Body encoding unexpected: {_body!r}")
+
+    # --- 14d. Multiple tags are comma-joined ---------------------------------
+    with patch("notify.requests") as mock_requests:
+        mock_requests.post.return_value = mock_response
+        send_ntfy(cfg_ntfy, title="T", message="m", tags=["x", "rotating_light"])
+        _tags_hdr = mock_requests.post.call_args[1]["headers"].get("Tags", "")
+    if _tags_hdr == "x,rotating_light":
+        ok("send_ntfy joins multiple tags with comma")
+    else:
+        fail(f"Multi-tag header mismatch: {_tags_hdr!r}")
+
+    # --- 14e. URL trailing slash is stripped properly ------------------------
+    cfg_slash = dict(cfg_ntfy)
+    cfg_slash["ntfy_url"] = "https://ntfy.sh/"
+    with patch("notify.requests") as mock_requests:
+        mock_requests.post.return_value = mock_response
+        send_ntfy(cfg_slash, title="T", message="m")
+        _slashed_url = mock_requests.post.call_args[0][0]
+    if _slashed_url == "https://ntfy.sh/test-training-alerts":
+        ok("send_ntfy strips trailing slash from ntfy_url")
+    else:
+        fail(f"Trailing-slash URL mismatch: {_slashed_url!r}")
+
+    # --- 14f. Network errors are swallowed, training continues ---------------
+    with patch("notify.requests") as mock_requests:
+        mock_requests.post.side_effect = Exception("Connection refused")
+        try:
+            send_ntfy(cfg_ntfy, title="T", message="m")
+            ok("send_ntfy swallows network errors (training continues)")
+        except Exception as e:
+            fail(f"send_ntfy propagated a network error: {e}")
+
+except Exception as exc:
+    fail("ntfy notification test failed", exc)
 
 # ---------------------------------------------------------------------------
 # Summary

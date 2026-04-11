@@ -66,3 +66,14 @@ best_ckpt_w_hd95: 0.2
 # Set early_stopping_patience to 0 to disable early stopping.
 early_stopping_patience: 20
 early_stopping_min_delta: 0.001
+
+# ntfy push notifications
+# Leave ntfy_url or ntfy_topic empty (or omit them entirely) to disable all
+# notifications.  ntfy_notify_best_model can be set to false to suppress the
+# per-checkpoint notification while keeping the others.
+# Example:
+#   ntfy_url: https://ntfy.sh
+#   ntfy_topic: my-training-alerts
+ntfy_url: "https://ntfy.sh"
+ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"
+ntfy_notify_best_model: true

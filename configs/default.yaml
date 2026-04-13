@@ -36,8 +36,8 @@ bce_pos_weight: 10.0
 
 # Validation (sliding window)
 sw_overlap: 0.75                  # overlap fraction for sliding window inference
-sw_batch_size: 8                  # number of patches processed per SW step
-val_every: 1                      # run validation every N epochs (also always runs on the final epoch)
+sw_batch_size: 12                  # number of patches processed per SW step
+val_every: 2                      # run validation every N epochs (also always runs on the final epoch)
 
 # Training speed optimizations
 use_amp: true                     # automatic mixed precision (see amp_dtype below)

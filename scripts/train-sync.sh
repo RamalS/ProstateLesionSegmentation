@@ -15,10 +15,37 @@ fi
 
 cd "${PROJECT_DIR}"
 
+echo "Discarding local repository changes..."
+
+# Abort in-progress git operations so reset/checkout can proceed cleanly.
+if [ -f .git/MERGE_HEAD ]; then
+  git merge --abort || true
+fi
+
+if [ -d .git/rebase-apply ] || [ -d .git/rebase-merge ]; then
+  git rebase --abort || true
+fi
+
+if [ -f .git/CHERRY_PICK_HEAD ]; then
+  git cherry-pick --abort || true
+fi
+
+if [ -f .git/REVERT_HEAD ]; then
+  git revert --abort || true
+fi
+
+if [ -f .git/BISECT_LOG ]; then
+  git bisect reset || true
+fi
+
+git reset --hard
+git clean -fd
+
 echo "Fetching latest code..."
-git fetch origin
-git checkout "${BRANCH}"
-git pull origin "${BRANCH}"
+git fetch --prune origin
+git checkout -B "${BRANCH}" "origin/${BRANCH}"
+git reset --hard "origin/${BRANCH}"
+git clean -fd
 
 echo "Checking if Docker image needs rebuilding..."
 # Hash the two files that affect the built image (Dockerfile and requirements.txt).

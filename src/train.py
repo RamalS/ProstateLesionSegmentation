@@ -19,12 +19,15 @@ Pipeline
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import math
+import random
 import warnings
 from pathlib import Path
 
 import monai.data.utils
+import numpy as np
 import torch
 from monai.inferers import sliding_window_inference
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -64,6 +67,54 @@ warnings.filterwarnings(
     module="monai",
 )
 logger = logging.getLogger(__name__)
+
+
+def _fmt(v: float) -> str:
+    """Format a float metric for logging; returns 'n/a' when the value is NaN."""
+    return f"{v:.4f}" if not math.isnan(v) else "n/a"
+
+
+# ---------------------------------------------------------------------------
+# Runtime helpers
+# ---------------------------------------------------------------------------
+
+def _seed_worker(worker_id: int) -> None:
+    """
+    Seed Python and NumPy RNGs inside each DataLoader worker process.
+    """
+    worker_seed = (torch.initial_seed() + worker_id) % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def _is_cuda_oom(exc: RuntimeError) -> bool:
+    """
+    Return True if *exc* represents a CUDA out-of-memory error.
+    """
+    msg = str(exc).lower()
+    return "cuda" in msg and "out of memory" in msg
+
+
+def _log_cuda_memory(stage: str, device: torch.device) -> None:
+    """
+    Log current and peak CUDA memory usage in GiB.
+    """
+    if device.type != "cuda":
+        return
+
+    alloc_gib = torch.cuda.memory_allocated(device) / (1024 ** 3)
+    reserv_gib = torch.cuda.memory_reserved(device) / (1024 ** 3)
+    peak_alloc_gib = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+    peak_reserv_gib = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
+
+    logger.info(
+        "%s | CUDA alloc=%.2f GiB reserved=%.2f GiB peak_alloc=%.2f GiB peak_reserved=%.2f GiB",
+        stage,
+        alloc_gib,
+        reserv_gib,
+        peak_alloc_gib,
+        peak_reserv_gib,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -111,14 +162,18 @@ def validate(
 
     hd95_values: list[float] = []
 
-    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype) if use_amp else torch.amp.autocast(device_type="cpu", enabled=False)  # type: ignore[attr-defined]
+    autocast_device = "cuda" if device.type == "cuda" else "cpu"
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
-            images = batch["image"].to(device)   # (1, 3, D, H, W)
-            labels = batch["label"].to(device)   # (1, 1, D, H, W)
+            images = batch["image"].to(device, non_blocking=True)   # (1, 3, D, H, W)
+            labels = batch["label"].to(device, non_blocking=True)   # (1, 1, D, H, W)
 
-            with amp_ctx:
+            with torch.autocast(
+                device_type=autocast_device,
+                dtype=amp_dtype,
+                enabled=use_amp,
+            ):
                 logits = sliding_window_inference(
                     inputs=images,
                     roi_size=patch_size,
@@ -147,6 +202,8 @@ def validate(
             if not math.isnan(m["hd95"]):
                 hd95_values.append(m["hd95"])
 
+            del logits, images, labels, m
+
     if n_all == 0:
         return {"dice": float("nan"), "iou": float("nan"),
                 "sensitivity": float("nan"), "specificity": 0.0,
@@ -167,6 +224,63 @@ def validate(
         result["sensitivity"] = float("nan")
 
     return result
+
+
+def validate_with_oom_retry(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    patch_size: tuple[int, ...],
+    sw_overlap: float,
+    sw_batch_size: int,
+    min_sw_batch_size: int,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.bfloat16,
+    compute_hd95: bool = True,
+) -> tuple[dict[str, float], int]:
+    """
+    Run validation and retry with smaller sw_batch_size on CUDA OOM.
+
+    Returns
+    -------
+    (metrics, used_sw_batch_size)
+    """
+    current_sw_batch_size = sw_batch_size
+
+    while True:
+        try:
+            metrics = validate(
+                model=model,
+                loader=loader,
+                device=device,
+                patch_size=patch_size,
+                sw_overlap=sw_overlap,
+                sw_batch_size=current_sw_batch_size,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                compute_hd95=compute_hd95,
+            )
+            return metrics, current_sw_batch_size
+        except RuntimeError as exc:
+            if (
+                device.type != "cuda"
+                or not _is_cuda_oom(exc)
+                or current_sw_batch_size <= min_sw_batch_size
+            ):
+                raise
+
+            next_sw_batch_size = max(min_sw_batch_size, current_sw_batch_size // 2)
+            if next_sw_batch_size == current_sw_batch_size:
+                raise
+
+            logger.warning(
+                "CUDA OOM during validation with sw_batch_size=%d; retrying with sw_batch_size=%d.",
+                current_sw_batch_size,
+                next_sw_batch_size,
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
+            current_sw_batch_size = next_sw_batch_size
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +304,17 @@ def main() -> None:
 
     # ---- Reproducibility ----
     seed = cfg.get("random_seed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    deterministic: bool = bool(cfg.get("deterministic", False))
+    torch.use_deterministic_algorithms(deterministic, warn_only=True)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = not deterministic
+        torch.backends.cudnn.deterministic = deterministic
 
     device = torch.device(
         "cuda" if torch.cuda.is_available() and cfg["device"] == "cuda" else "cpu"
@@ -259,6 +383,12 @@ def main() -> None:
         cache_rate=cfg.get("cache_rate", 1.0),
     )
 
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(seed)
+
+    sampler_generator = torch.Generator()
+    sampler_generator.manual_seed(seed)
+
     # ---- Weighted sampler: over-sample positive cases ----
     # Each positive case gets weight 1/n_pos; each negative gets 1/n_neg.
     # This gives each batch a roughly balanced mix without duplicating data.
@@ -282,6 +412,8 @@ def main() -> None:
             pin_memory=(device.type == "cuda"),
             persistent_workers=use_persistent,
             prefetch_factor=2 if use_persistent else None,
+            worker_init_fn=_seed_worker,
+            generator=loader_generator,
             collate_fn=monai.data.utils.list_data_collate,
         )
     else:
@@ -295,6 +427,7 @@ def main() -> None:
             weights=sample_weights,
             num_samples=len(train_cases),
             replacement=True,
+            generator=sampler_generator,
         )
         logger.info(
             "WeightedRandomSampler: %d pos (w=%.4f) / %d neg (w=%.4f)",
@@ -308,6 +441,8 @@ def main() -> None:
             pin_memory=(device.type == "cuda"),
             persistent_workers=use_persistent,
             prefetch_factor=2 if use_persistent else None,
+            worker_init_fn=_seed_worker,
+            generator=loader_generator,
             collate_fn=monai.data.utils.list_data_collate,
         )
 
@@ -320,6 +455,8 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
         persistent_workers=use_persistent,
         prefetch_factor=2 if use_persistent else None,
+        worker_init_fn=_seed_worker,
+        generator=loader_generator,
     )
 
     # ---- Model ----
@@ -368,6 +505,8 @@ def main() -> None:
     start_epoch = 1
     sw_overlap = cfg.get("sw_overlap", 0.5)
     sw_batch_size = cfg.get("sw_batch_size", 4)
+    val_min_sw_batch_size: int = max(1, int(cfg.get("val_min_sw_batch_size", 1)))
+    val_compute_hd95_every: int = max(0, int(cfg.get("val_compute_hd95_every", 0)))
     epochs = cfg["epochs"]
     keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
     val_every: int = max(1, cfg.get("val_every", 1))
@@ -391,6 +530,12 @@ def main() -> None:
     w_sensitivity: float = cfg.get("best_ckpt_w_sensitivity", 0.5)
     w_dice: float = cfg.get("best_ckpt_w_dice", 0.3)
     w_hd95: float = cfg.get("best_ckpt_w_hd95", 0.2)
+    if val_compute_hd95_every == 0 and w_hd95 > 0.0:
+        logger.warning(
+            "best_ckpt_w_hd95=%.2f but val_compute_hd95_every=0; "
+            "HD95 will not affect in-training best checkpoint selection.",
+            w_hd95,
+        )
 
     # ---- Early stopping ----
     es_patience: int = cfg.get("early_stopping_patience", 20)
@@ -434,6 +579,12 @@ def main() -> None:
             "Early stopping: patience=%d, min_delta=%.4f",
             es_patience, es_min_delta,
         )
+        if val_every > 1:
+            logger.warning(
+                "val_every=%d — early stopping patience counts validation epochs, "
+                "so no improvement for %d epochs = %d training epochs.",
+                val_every, es_patience, es_patience * val_every,
+            )
     else:
         logger.info("Early stopping: disabled")
 
@@ -457,20 +608,35 @@ def main() -> None:
         epoch_loss = 0.0
 
         batch_bar = tqdm(train_loader, desc=f"Train {epoch}/{epochs}", leave=False, unit="batch")
-        for batch in batch_bar:
-            images = batch["image"].to(device)   # (B, 3, D, H, W)
-            labels = batch["label"].to(device)   # (B, 1, D, H, W)
+        for step, batch in enumerate(batch_bar, start=1):
+            images = batch["image"].to(device, non_blocking=True)   # (B, 3, D, H, W)
+            labels = batch["label"].to(device, non_blocking=True)   # (B, 1, D, H, W)
 
             optimizer.zero_grad(set_to_none=True)
             with amp_ctx:
                 logits = model(images)
                 loss = criterion(logits, labels)
+
+            if not torch.isfinite(loss):
+                loss_value = float(loss.detach().cpu().item())
+                logger.error(
+                    "Non-finite loss at epoch %d, batch %d: %s",
+                    epoch,
+                    step,
+                    loss_value,
+                )
+                raise FloatingPointError(
+                    f"Non-finite loss at epoch={epoch}, batch={step}: {loss_value}"
+                )
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
             epoch_loss += loss.item()
             batch_bar.set_postfix(loss=f"{loss.item():.4f}")
+
+            del logits, images, labels, loss
 
         scheduler.step()
 
@@ -494,20 +660,42 @@ def main() -> None:
         )
         rotate_checkpoints(checkpoint_dir, keep_last_n)
 
+        if device.type == "cuda":
+            _log_cuda_memory(f"Epoch {epoch} after train", device)
+
         # ---- Validate ----
         run_val = (epoch % val_every == 0) or (epoch == epochs)
         if run_val:
-            val_metrics = validate(
+            # Free leftover train grads/cache before validation.
+            optimizer.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats(device)
+
+            compute_hd95_now = (
+                val_compute_hd95_every > 0
+                and ((epoch % val_compute_hd95_every == 0) or (epoch == epochs))
+            )
+
+            val_metrics, used_sw_batch_size = validate_with_oom_retry(
                 model=model,
                 loader=val_loader,
                 device=device,
                 patch_size=patch_size,
                 sw_overlap=sw_overlap,
                 sw_batch_size=sw_batch_size,
+                min_sw_batch_size=val_min_sw_batch_size,
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
-                compute_hd95=False,   # HD95 skipped during training; use evaluate_checkpoint.py for final eval
+                compute_hd95=compute_hd95_now,
             )
+
+            if used_sw_batch_size != sw_batch_size:
+                logger.info(
+                    "Validation used reduced sw_batch_size=%d (configured=%d).",
+                    used_sw_batch_size,
+                    sw_batch_size,
+                )
 
             writer.add_scalar("val/dice",        val_metrics["dice"],        epoch)
             writer.add_scalar("val/iou",         val_metrics["iou"],         epoch)
@@ -516,11 +704,8 @@ def main() -> None:
             if not math.isnan(val_metrics["hd95"]):
                 writer.add_scalar("val/hd95", val_metrics["hd95"], epoch)
 
-            n_pos = int(val_metrics["n_pos"])
-            n_all = int(val_metrics["n_all"])
-
-            def _fmt(v: float) -> str:
-                return f"{v:.4f}" if not math.isnan(v) else "n/a"
+            n_pos_val = int(val_metrics["n_pos"])
+            n_all_val = int(val_metrics["n_all"])
 
             hd95_str = _fmt(val_metrics["hd95"])
             logger.info(
@@ -533,16 +718,20 @@ def main() -> None:
                 _fmt(val_metrics["sensitivity"]),
                 val_metrics["specificity"],
                 hd95_str,
-                n_pos, n_all,
+                 n_pos_val, n_all_val,
             )
 
             # ---- Composite score: best.pt selection + early stopping ----
+            w_hd95_for_score = w_hd95 if compute_hd95_now else 0.0
             composite_score = compute_composite_score(
                 val_metrics,
                 w_sensitivity=w_sensitivity,
                 w_dice=w_dice,
-                w_hd95=w_hd95,
+                w_hd95=w_hd95_for_score,
             )
+
+            if device.type == "cuda":
+                _log_cuda_memory(f"Epoch {epoch} after val", device)
 
             if not math.isnan(composite_score):
                 writer.add_scalar("val/composite_score", composite_score, epoch)

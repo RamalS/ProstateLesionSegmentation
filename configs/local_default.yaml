@@ -7,6 +7,7 @@ num_workers: 2
 device: cuda
 base_output_dir: outputs/runs
 random_seed: 42
+deterministic: false
 
 # Data
 images_dir: data/images
@@ -33,6 +34,8 @@ bce_pos_weight: 10.0
 # Validation (sliding window)
 sw_overlap: 0.5
 sw_batch_size: 2
+val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
+val_compute_hd95_every: 0          # 0 = skip HD95 during training-time validation
 val_every: 1                        # run validation every N epochs (also always runs on the final epoch)
 
 # Training speed optimizations
@@ -50,7 +53,7 @@ keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep
 # Best checkpoint selection (composite score)
 best_ckpt_w_sensitivity: 0.5
 best_ckpt_w_dice: 0.3
-best_ckpt_w_hd95: 0.2
+best_ckpt_w_hd95: 0.0
 
 # Early stopping (disabled for short local dev runs)
 early_stopping_patience: 0

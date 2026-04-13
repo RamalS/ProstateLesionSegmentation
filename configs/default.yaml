@@ -7,6 +7,7 @@ num_workers: 5
 device: cuda
 base_output_dir: /outputs/runs
 random_seed: 42
+deterministic: false
 
 # Data
 images_dir: /data/images
@@ -36,7 +37,9 @@ bce_pos_weight: 10.0
 
 # Validation (sliding window)
 sw_overlap: 0.75                  # overlap fraction for sliding window inference
-sw_batch_size: 12                  # number of patches processed per SW step
+sw_batch_size: 40                 # number of patches processed per SW step
+val_min_sw_batch_size: 1          # lower bound if validation OOM fallback is triggered
+val_compute_hd95_every: 0         # 0 = skip HD95 during training-time validation
 val_every: 2                      # run validation every N epochs (also always runs on the final epoch)
 
 # Training speed optimizations
@@ -58,7 +61,7 @@ keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep
 # Weights are normalised internally so they do not need to sum to 1.0.
 best_ckpt_w_sensitivity: 0.5
 best_ckpt_w_dice: 0.3
-best_ckpt_w_hd95: 0.2
+best_ckpt_w_hd95: 0.0
 
 # Early stopping
 # Training halts when the composite score does not improve by more than

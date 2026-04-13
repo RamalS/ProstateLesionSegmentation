@@ -37,7 +37,7 @@ bce_pos_weight: 10.0
 # Validation (sliding window)
 sw_overlap: 0.75                  # overlap fraction for sliding window inference
 sw_batch_size: 8                  # number of patches processed per SW step
-val_every: 5                      # run validation every N epochs (also always runs on the final epoch)
+val_every: 1                      # run validation every N epochs (also always runs on the final epoch)
 
 # Training speed optimizations
 use_amp: true                     # automatic mixed precision (see amp_dtype below)
@@ -64,7 +64,7 @@ best_ckpt_w_hd95: 0.2
 # Training halts when the composite score does not improve by more than
 # early_stopping_min_delta for early_stopping_patience consecutive epochs.
 # Set early_stopping_patience to 0 to disable early stopping.
-early_stopping_patience: 40
+early_stopping_patience: 20
 early_stopping_min_delta: 0.001
 
 # ntfy push notifications

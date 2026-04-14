@@ -6,6 +6,7 @@ What this tests (no real data required):
   2. Optional dependency imports (SimpleITK, MONAI, nibabel, scipy)
   3. UNet3D: instantiation, parameter count, forward pass shape
   3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
+  3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
   4. DiceBCELoss: forward pass with random logits/targets
   5. All metrics: dice, iou, sensitivity, specificity, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
@@ -216,16 +217,17 @@ try:
         fail(f"AttentionUNet3D odd-dim: output shape {tuple(out_odd.shape)} != (1, 1, 5, 33, 33)")
 
     # --- build_model factory -----------------------------------------------
-    m_unet = build_model({"model": "unet3d", "in_channels": 3, "out_channels": 1,
+    _all_flags = {"use_t2w": True, "use_adc": True, "use_hbv": True}
+    m_unet = build_model({"model": "unet3d", **_all_flags, "out_channels": 1,
                           "features": [16, 32]})
     ok(f"build_model('unet3d') → {type(m_unet).__name__}")
 
-    m_attn = build_model({"model": "attention_unet3d", "in_channels": 3, "out_channels": 1,
-                          "features": [16, 32]})
+    m_attn = build_model({"model": "attention_unet3d", **_all_flags,
+                          "out_channels": 1, "features": [16, 32]})
     ok(f"build_model('attention_unet3d') → {type(m_attn).__name__}")
 
-    # Default (no 'model' key) must produce UNet3D
-    m_default = build_model({"in_channels": 3, "out_channels": 1})
+    # Default (no 'model' key, no flags) must produce UNet3D with 3 channels
+    m_default = build_model({"out_channels": 1})
     if type(m_default).__name__ == "UNet3D":
         ok("build_model with no 'model' key defaults to UNet3D")
     else:
@@ -240,6 +242,74 @@ try:
 
 except Exception as exc:
     fail("AttentionUNet3D / build_model test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 3c. Modality flag selection: build_model derives in_channels from flags
+# ---------------------------------------------------------------------------
+section("3c. Modality flag selection (use_t2w / use_adc / use_hbv)")
+
+try:
+    from models import build_model as _bm
+
+    # --- All three enabled → in_channels = 3 ---------------------------------
+    m3 = _bm({"use_t2w": True, "use_adc": True, "use_hbv": True,
+               "out_channels": 1, "features": [16, 32]})
+    _enc0 = list(m3.encoders.children())[0] if hasattr(m3, "encoders") else None
+    _c3 = _enc0[0].in_channels if _enc0 is not None else None
+    if _c3 == 3:
+        ok("all flags True  → model in_channels = 3")
+    else:
+        fail(f"all flags True: expected in_channels=3, first Conv3d has {_c3}")
+
+    # --- T2w + ADC only (HBV disabled) → in_channels = 2 --------------------
+    m2 = _bm({"use_t2w": True, "use_adc": True, "use_hbv": False,
+               "out_channels": 1, "features": [16, 32]})
+    _enc0_2 = list(m2.encoders.children())[0] if hasattr(m2, "encoders") else None
+    _c2 = _enc0_2[0].in_channels if _enc0_2 is not None else None
+    if _c2 == 2:
+        ok("use_hbv=False   → model in_channels = 2")
+    else:
+        fail(f"use_hbv=False: expected in_channels=2, first Conv3d has {_c2}")
+
+    # A 2-channel model must also produce the correct output shape
+    B, C, D, H, W = 1, 2, 20, 32, 32
+    dummy2 = torch.randn(B, C, D, H, W, device=DEVICE)
+    m2 = m2.to(DEVICE)
+    with torch.no_grad():
+        out2 = m2(dummy2)
+    if out2.shape == (B, 1, D, H, W):
+        ok(f"2-channel forward pass OK — output shape {tuple(out2.shape)}")
+    else:
+        fail(f"2-channel forward: shape {tuple(out2.shape)} != {(B, 1, D, H, W)}")
+
+    # --- T2w only → in_channels = 1 ------------------------------------------
+    m1 = _bm({"use_t2w": True, "use_adc": False, "use_hbv": False,
+               "out_channels": 1, "features": [16, 32]})
+    _enc0_1 = list(m1.encoders.children())[0] if hasattr(m1, "encoders") else None
+    _c1 = _enc0_1[0].in_channels if _enc0_1 is not None else None
+    if _c1 == 1:
+        ok("use_adc=False, use_hbv=False → model in_channels = 1")
+    else:
+        fail(f"t2w-only: expected in_channels=1, first Conv3d has {_c1}")
+
+    # --- No flags set → defaults to all True (in_channels = 3) ---------------
+    m_defaults = _bm({"out_channels": 1, "features": [16, 32]})
+    _enc0_d = list(m_defaults.encoders.children())[0] if hasattr(m_defaults, "encoders") else None
+    _cd = _enc0_d[0].in_channels if _enc0_d is not None else None
+    if _cd == 3:
+        ok("no flags in config → all default True → in_channels = 3")
+    else:
+        fail(f"no flags: expected in_channels=3, first Conv3d has {_cd}")
+
+    # --- All flags False → must raise ValueError ------------------------------
+    try:
+        _bm({"use_t2w": False, "use_adc": False, "use_hbv": False})
+        fail("build_model should raise ValueError when all modality flags are False")
+    except ValueError as e:
+        ok(f"all flags False → ValueError raised: {e}")
+
+except Exception as exc:
+    fail("Modality flag selection test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 4. DiceBCELoss
@@ -410,6 +480,25 @@ try:
 
         train_c, val_c = train_val_split(cases, val_fraction=0.33, seed=0)
         ok(f"train_val_split → {len(train_c)} train / {len(val_c)} val")
+
+        # ---- 6b-partial. discover_cases with active_keys subset ----
+        # Only T2w + ADC active; HBV files exist but must not be required.
+        cases_partial = discover_cases(
+            images_dir, labels_dir, active_keys=["t2w", "adc"]
+        )
+        if len(cases_partial) == N_CASES:
+            ok(f"active_keys=['t2w','adc']: still found {len(cases_partial)} cases")
+        else:
+            fail(
+                f"active_keys=['t2w','adc']: expected {N_CASES}, "
+                f"got {len(cases_partial)}"
+            )
+        # Each case should have 't2w' and 'adc' but NOT 'hbv'
+        has_no_hbv = all("hbv" not in c for c in cases_partial)
+        if has_no_hbv:
+            ok("partial active_keys: 'hbv' absent from case dicts")
+        else:
+            fail("partial active_keys: 'hbv' unexpectedly present in case dicts")
 
 except Exception as exc:
     fail("Dataset helper test failed", exc)

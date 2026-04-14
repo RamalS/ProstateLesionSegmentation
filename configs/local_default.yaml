@@ -23,7 +23,9 @@ num_samples: 1                     # patches extracted per volume per __getitem_
 
 # Model
 model: unet3d                      # options: unet3d, attention_unet3d
-in_channels: 3
+use_t2w: true                      # include T2w channel
+use_adc: true                      # include ADC channel
+use_hbv: true                      # include HBV channel
 out_channels: 1
 features: [32, 64, 128, 256]
 

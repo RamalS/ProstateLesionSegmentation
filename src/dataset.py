@@ -58,6 +58,45 @@ MODALITY_KEYS = ("t2w", "adc", "hbv")
 LABEL_SUFFIX = ".nii.gz"
 
 
+def active_modality_pairs(cfg: dict) -> list[tuple[str, str]]:
+    """
+    Return ``(key, suffix)`` pairs for the modalities enabled in *cfg*.
+
+    Reads the ``use_t2w``, ``use_adc``, and ``use_hbv`` boolean flags
+    (all default to ``True`` when absent so that existing configs without
+    the flags continue to behave as before).  Pairs are returned in the
+    canonical channel order ``[T2w, ADC, HBV]``.
+
+    Parameters
+    ----------
+    cfg : dict
+        Training configuration dict with optional keys
+        ``use_t2w``, ``use_adc``, ``use_hbv``.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Each element is ``(modality_key, file_suffix)``, e.g.
+        ``[("t2w", "_t2w.mha"), ("adc", "_adc.mha")]``.
+
+    Raises
+    ------
+    ValueError
+        If all three flags are ``False`` (no modality would be loaded).
+    """
+    pairs = [
+        (key, suffix)
+        for key, suffix in zip(MODALITY_KEYS, MODALITY_SUFFIXES)
+        if cfg.get(f"use_{key}", True)
+    ]
+    if not pairs:
+        raise ValueError(
+            "No modalities enabled. At least one of use_t2w, use_adc, "
+            "use_hbv must be true in the config."
+        )
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # SimpleITK helpers
 # ---------------------------------------------------------------------------
@@ -165,6 +204,7 @@ def _is_flat_layout(images_dir: Path) -> bool:
 def _discover_cases_flat(
     images_dir: Path,
     labels_dir: Path,
+    active_keys: Sequence[str],
 ) -> list[dict]:
     """
     Discover cases from a flat layout::
@@ -176,16 +216,23 @@ def _discover_cases_flat(
             ...   (other modalities such as _cor/_sag are ignored)
 
     Case IDs are derived by stripping ``_t2w.mha`` from each T2w filename.
+    T2w is always required on disk (it is the co-registration reference
+    frame).  ADC and HBV files are only required when their respective
+    keys appear in *active_keys*.
     """
     t2w_suffix = MODALITY_SUFFIXES[0]  # "_t2w.mha"
     cases: list[dict] = []
 
     for t2w_path in sorted(images_dir.glob(f"*{t2w_suffix}")):
         case_id = t2w_path.name[: -len(t2w_suffix)]
+        # T2w is always included — it is the reference frame for
+        # co-registration and label resampling.
         paths: dict = {"case_id": case_id, "t2w": t2w_path}
         complete = True
 
-        for suffix, key in zip(MODALITY_SUFFIXES[1:], MODALITY_KEYS[1:]):
+        for key, suffix in zip(MODALITY_KEYS[1:], MODALITY_SUFFIXES[1:]):
+            if key not in active_keys:
+                continue  # modality disabled — skip existence check
             p = images_dir / f"{case_id}{suffix}"
             if not p.exists():
                 logger.warning("Case %s: missing modality '%s' (%s)", case_id, key, p)
@@ -210,6 +257,7 @@ def _discover_cases_flat(
 def _discover_cases_nested(
     images_dir: Path,
     labels_dir: Path,
+    active_keys: Sequence[str],
 ) -> list[dict]:
     """
     Discover cases from a nested layout::
@@ -220,6 +268,10 @@ def _discover_cases_nested(
                     <case_id>_t2w.mha
                     <case_id>_adc.mha
                     <case_id>_hbv.mha
+
+    T2w is always required on disk (it is the co-registration reference
+    frame).  ADC and HBV files are only required when their respective
+    keys appear in *active_keys*.
     """
     cases: list[dict] = []
 
@@ -234,7 +286,9 @@ def _discover_cases_nested(
             paths: dict = {"case_id": case_id}
             complete = True
 
-            for suffix, key in zip(MODALITY_SUFFIXES, MODALITY_KEYS):
+            for key, suffix in zip(MODALITY_KEYS, MODALITY_SUFFIXES):
+                if key != "t2w" and key not in active_keys:
+                    continue  # modality disabled — skip existence check
                 p = study_dir / f"{case_id}{suffix}"
                 if not p.exists():
                     logger.warning("Case %s: missing modality '%s' (%s)", case_id, key, p)
@@ -259,6 +313,7 @@ def _discover_cases_nested(
 def discover_cases(
     images_dir: Path,
     labels_dir: Path,
+    active_keys: Sequence[str] = MODALITY_KEYS,
 ) -> list[dict]:
     """
     Walk *images_dir* and return a list of case dicts.
@@ -281,21 +336,36 @@ def discover_cases(
                     10000_1000000_t2w.mha
                     ...
 
-    Each returned dict has keys:
+    T2w is always required on disk because it serves as the
+    co-registration reference frame for ADC/HBV and as the reference
+    grid for label resampling.  ADC and HBV files are required only when
+    their keys appear in *active_keys*.
+
+    Each returned dict always contains:
         case_id : str          e.g. ``"10000_1000000"``
         t2w     : Path
-        adc     : Path
-        hbv     : Path
         label   : Path | None  (None for unlabelled cases)
+
+    Plus, for each key in *active_keys* that is not ``"t2w"``:
+        adc     : Path         (present only when ``"adc"`` in active_keys)
+        hbv     : Path         (present only when ``"hbv"`` in active_keys)
+
+    Parameters
+    ----------
+    images_dir  : directory containing PI-CAI .mha image files.
+    labels_dir  : directory containing .nii.gz label masks.
+    active_keys : modality keys to load; defaults to all three
+                  ``("t2w", "adc", "hbv")``.  Files for inactive
+                  modalities are not checked for existence.
     """
     flat = _is_flat_layout(images_dir)
     layout = "flat" if flat else "nested"
     logger.info("Detected %s image layout in %s", layout, images_dir)
 
     if flat:
-        cases = _discover_cases_flat(images_dir, labels_dir)
+        cases = _discover_cases_flat(images_dir, labels_dir, active_keys)
     else:
-        cases = _discover_cases_nested(images_dir, labels_dir)
+        cases = _discover_cases_nested(images_dir, labels_dir, active_keys)
 
     logger.info("Discovered %d cases (%s layout)", len(cases), layout)
     return cases
@@ -458,19 +528,22 @@ class PiCaiDataset(Dataset):
     PyTorch Dataset for PI-CAI biparametric MRI prostate lesion segmentation.
 
     Each sample is loaded on-the-fly:
-      1. T2w, ADC, HBV volumes are read from .mha files.
-      2. ADC and HBV are resampled into the T2w physical space (registration).
-      3. All modalities are resampled to *target_spacing*.
+      1. T2w volume is always read from disk (co-registration reference).
+      2. Active non-T2w modalities (ADC, HBV) are co-registered into the
+         T2w physical space.
+      3. All active modalities are resampled to *target_spacing*.
       4. Each modality is z-score normalised independently.
-      5. Modalities are stacked into a (3, D, H, W) image tensor.
+      5. Active modalities are stacked into a ``(C, D, H, W)`` image tensor
+         in canonical order ``[T2w, ADC, HBV]``, where ``C`` equals the
+         number of enabled modalities.
       6. The label mask (.nii.gz) is resampled with nearest-neighbour
          interpolation and binarised (any grade > 0 → 1).
 
     Returns
     -------
     dict with keys:
-        "image"   : float32 tensor  (3, D, H, W)   [T2w, ADC, HBV]
-        "label"   : float32 tensor  (1, D, H, W)   [binary lesion mask]
+        "image"   : float32 tensor  (C, D, H, W)   active modalities in order
+        "label"   : float32 tensor  (1, D, H, W)   binary lesion mask
         "case_id" : str
     """
 
@@ -483,29 +556,36 @@ class PiCaiDataset(Dataset):
         cases: Optional[Sequence[dict]] = None,
         use_cache: bool = False,
         cache_rate: float = 1.0,
+        active_modalities: Optional[Sequence[str]] = None,
     ) -> None:
         """
         Parameters
         ----------
-        images_dir      Root directory of PI-CAI images.
-        labels_dir      Directory containing .nii.gz label masks.
-        target_spacing  Desired voxel spacing in (z, y, x) mm order.
-                        Default (3.0, 0.5, 0.5) preserves T2w in-plane
-                        resolution at typical PI-CAI slice thickness.
-        transform       Optional callable applied to the output dict.
-                        Receives and returns {"image": Tensor, "label": Tensor, ...}.
-                        Intended for MONAI-style random augmentations.
-        cases           Pre-computed case list (skips discovery if provided).
-                        Useful for passing pre-split train/val subsets.
-        use_cache       If True, cache preprocessed (image, label) tensor pairs
-                        in worker memory after the first access.  Subsequent
-                        epochs skip all SimpleITK I/O and resampling for cached
-                        cases.  Requires ``persistent_workers=True`` in
-                        DataLoader so the worker processes (and their caches)
-                        survive across epochs.
-        cache_rate      Fraction of cases to cache, in [0.0, 1.0].  Cases are
-                        selected deterministically (first ``ceil(N * rate)``
-                        cases by index).  Default 1.0 caches the full dataset.
+        images_dir        Root directory of PI-CAI images.
+        labels_dir        Directory containing .nii.gz label masks.
+        target_spacing    Desired voxel spacing in (z, y, x) mm order.
+                          Default (3.0, 0.5, 0.5) preserves T2w in-plane
+                          resolution at typical PI-CAI slice thickness.
+        transform         Optional callable applied to the output dict.
+                          Receives and returns {"image": Tensor, "label": Tensor, ...}.
+                          Intended for MONAI-style random augmentations.
+        cases             Pre-computed case list (skips discovery if provided).
+                          Useful for passing pre-split train/val subsets.
+        use_cache         If True, cache preprocessed (image, label) tensor pairs
+                          in worker memory after the first access.  Subsequent
+                          epochs skip all SimpleITK I/O and resampling for cached
+                          cases.  Requires ``persistent_workers=True`` in
+                          DataLoader so the worker processes (and their caches)
+                          survive across epochs.
+        cache_rate        Fraction of cases to cache, in [0.0, 1.0].  Cases are
+                          selected deterministically (first ``ceil(N * rate)``
+                          cases by index).  Default 1.0 caches the full dataset.
+        active_modalities Ordered sequence of modality keys to include in the
+                          output image tensor.  Must be a subset of
+                          ``("t2w", "adc", "hbv")``.  Defaults to all three
+                          when ``None``.  The canonical channel order
+                          ``[T2w, ADC, HBV]`` is always preserved regardless
+                          of the order supplied here.
         """
         self.images_dir = Path(images_dir)
         self.labels_dir = Path(labels_dir)
@@ -513,11 +593,20 @@ class PiCaiDataset(Dataset):
         self.transform = transform
         self.use_cache = use_cache
         self.cache_rate = float(cache_rate)
+        # Resolve active modalities: preserve canonical order, default to all.
+        self.active_modalities: tuple[str, ...] = (
+            tuple(k for k in MODALITY_KEYS if k in active_modalities)
+            if active_modalities is not None
+            else MODALITY_KEYS
+        )
 
         if cases is not None:
             self.cases = list(cases)
         else:
-            self.cases = discover_cases(self.images_dir, self.labels_dir)
+            self.cases = discover_cases(
+                self.images_dir, self.labels_dir,
+                active_keys=self.active_modalities,
+            )
 
         # Determine which indices are eligible for caching.
         n_cache = math.ceil(len(self.cases) * self.cache_rate) if use_cache else 0
@@ -528,9 +617,10 @@ class PiCaiDataset(Dataset):
         self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
         logger.info(
-            "PiCaiDataset ready: %d cases, spacing=%s, transform=%s, "
-            "cache=%s (%.0f%% = %d cases)",
+            "PiCaiDataset ready: %d cases, modalities=%s, spacing=%s, "
+            "transform=%s, cache=%s (%.0f%% = %d cases)",
             len(self.cases),
+            list(self.active_modalities),
             target_spacing,
             type(transform).__name__ if transform is not None else "None",
             use_cache,
@@ -622,33 +712,50 @@ class PiCaiDataset(Dataset):
         Run full SimpleITK I/O, co-registration, resampling, and
         z-score normalisation for one case.
 
+        T2w is always loaded as the co-registration reference frame for
+        any secondary modality and as the reference grid for label
+        resampling, regardless of whether ``"t2w"`` is in
+        ``self.active_modalities``.
+
         Returns
         -------
-        (image, label) as float32 tensors shaped (3, D, H, W) and (1, D, H, W).
+        (image, label) as float32 tensors shaped (C, D, H, W) and
+        (1, D, H, W), where C = ``len(self.active_modalities)``.
         """
-        # 1. Load raw volumes
+        # 1. Always load T2w — co-registration + label-resampling reference.
         t2w_sitk = _load_volume(case["t2w"])
-        adc_sitk = _load_volume(case["adc"])
-        hbv_sitk = _load_volume(case["hbv"])
 
-        # 2. Co-register ADC + HBV into T2w physical space
-        adc_sitk = _resample_to_reference(adc_sitk, t2w_sitk, sitk.sitkLinear)
-        hbv_sitk = _resample_to_reference(hbv_sitk, t2w_sitk, sitk.sitkLinear)
+        # 2. Load active non-T2w modalities and co-register to T2w space.
+        secondary: dict[str, sitk.Image] = {}
+        for key in self.active_modalities:
+            if key == "t2w":
+                continue
+            secondary[key] = _resample_to_reference(
+                _load_volume(case[key]), t2w_sitk, sitk.sitkLinear
+            )
 
-        # 3. Resample all modalities to target spacing
+        # 3. Resample T2w to target spacing (always needed for label grid).
         t2w_sitk = _resample(t2w_sitk, self.target_spacing, sitk.sitkLinear)
-        adc_sitk = _resample(adc_sitk, self.target_spacing, sitk.sitkLinear)
-        hbv_sitk = _resample(hbv_sitk, self.target_spacing, sitk.sitkLinear)
 
-        # 4. Convert to numpy and z-score normalise each modality
-        t2w = _zscore_normalize(_to_numpy(t2w_sitk))
-        adc = _zscore_normalize(_to_numpy(adc_sitk))
-        hbv = _zscore_normalize(_to_numpy(hbv_sitk))
+        # 4. Resample + normalise each active modality; collect in canonical
+        #    order (T2w → ADC → HBV) regardless of how active_modalities is
+        #    ordered.
+        arrays: list[np.ndarray] = []
+        for key in MODALITY_KEYS:
+            if key not in self.active_modalities:
+                continue
+            if key == "t2w":
+                arrays.append(_zscore_normalize(_to_numpy(t2w_sitk)))
+            else:
+                resampled = _resample(
+                    secondary[key], self.target_spacing, sitk.sitkLinear
+                )
+                arrays.append(_zscore_normalize(_to_numpy(resampled)))
 
-        # 5. Stack → (3, D, H, W)
-        image_np = np.stack([t2w, adc, hbv], axis=0)
+        # 5. Stack → (C, D, H, W)
+        image_np = np.stack(arrays, axis=0)
 
-        # 6. Load and binarise label
+        # 6. Load and binarise label.
         # Resample the label into the *resampled* T2w's exact voxel grid rather
         # than performing an independent global resample.  Independent resampling
         # can produce a slightly different integer output size (due to rounding in

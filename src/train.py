@@ -35,7 +35,12 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.config import load_config
-from src.dataset import PiCaiDataset, discover_cases, stratified_train_val_split
+from src.dataset import (
+    PiCaiDataset,
+    active_modality_pairs,
+    discover_cases,
+    stratified_train_val_split,
+)
 from src.losses import DiceBCELoss
 from src.metrics import compute_all_metrics
 from src.models import build_model
@@ -340,9 +345,13 @@ def main() -> None:
     patch_size: tuple[int, ...] = tuple(cfg.get("patch_size", [20, 128, 128]))
     target_spacing: tuple[float, ...] = tuple(cfg["target_spacing"])
 
+    # Resolve active modalities once; used for case discovery and dataset init.
+    _active_keys = [k for k, _ in active_modality_pairs(cfg)]
+
     all_cases = discover_cases(
         images_dir=Path(cfg["images_dir"]),
         labels_dir=Path(cfg["labels_dir"]),
+        active_keys=_active_keys,
     )
 
     if not all_cases:
@@ -371,6 +380,7 @@ def main() -> None:
         cases=train_cases,
         use_cache=cfg.get("cache_dataset", False),
         cache_rate=cfg.get("cache_rate", 1.0),
+        active_modalities=_active_keys,
     )
 
     val_ds = PiCaiDataset(
@@ -381,6 +391,7 @@ def main() -> None:
         cases=val_cases,
         use_cache=cfg.get("cache_dataset", False),
         cache_rate=cfg.get("cache_rate", 1.0),
+        active_modalities=_active_keys,
     )
 
     loader_generator = torch.Generator()

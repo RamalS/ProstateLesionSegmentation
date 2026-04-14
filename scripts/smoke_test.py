@@ -5,6 +5,7 @@ What this tests (no real data required):
   1. PyTorch + CUDA availability
   2. Optional dependency imports (SimpleITK, MONAI, nibabel, scipy)
   3. UNet3D: instantiation, parameter count, forward pass shape
+  3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
   4. DiceBCELoss: forward pass with random logits/targets
   5. All metrics: dice, iou, sensitivity, specificity, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
@@ -156,6 +157,89 @@ try:
 
 except Exception as exc:
     fail("UNet3D test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 3b. AttentionUNet3D + build_model factory
+# ---------------------------------------------------------------------------
+section("3b. AttentionUNet3D + build_model factory")
+
+try:
+    from models import AttentionUNet3D, build_model
+
+    # --- AttentionUNet3D instantiation + forward pass ----------------------
+    attn_model = AttentionUNet3D(in_channels=3, out_channels=1, features=(16, 32, 64, 128))
+    attn_model = attn_model.to(DEVICE)
+    n_attn = sum(p.numel() for p in attn_model.parameters())
+    ok(f"AttentionUNet3D instantiated — {n_attn:,} parameters")
+
+    # Attention gates add parameters; model must be strictly larger than UNet3D
+    try:
+        _baseline = UNet3D(in_channels=3, out_channels=1, features=(16, 32, 64, 128))
+        n_base = sum(p.numel() for p in _baseline.parameters())
+        if n_attn > n_base:
+            ok(
+                f"AttentionUNet3D has more parameters than UNet3D "
+                f"({n_attn:,} > {n_base:,})"
+            )
+        else:
+            fail(
+                f"AttentionUNet3D should have more params than UNet3D "
+                f"(got {n_attn:,} vs {n_base:,})"
+            )
+    except Exception:
+        pass  # UNet3D import may have failed in section 3; skip comparison
+
+    B, C, D, H, W = 2, 3, 20, 64, 64
+    dummy_attn = torch.randn(B, C, D, H, W, device=DEVICE)
+    with torch.no_grad():
+        out_attn = attn_model(dummy_attn)
+
+    expected_attn = (B, 1, D, H, W)
+    if out_attn.shape == expected_attn:
+        ok(f"AttentionUNet3D forward pass OK — output shape {tuple(out_attn.shape)}")
+    else:
+        fail(f"AttentionUNet3D: output shape {tuple(out_attn.shape)} != {expected_attn}")
+
+    # --- Odd spatial dimensions (off-by-one padding path) ------------------
+    # Use a 2-level model so D=5 survives two MaxPool3d ops (5→2→1).
+    # The upsampling path (1→2, 2→4) triggers the padding logic because
+    # 4 < 5, ensuring spatial alignment with the skip connections.
+    _odd_model = AttentionUNet3D(
+        in_channels=3, out_channels=1, features=(16, 32)
+    ).to(DEVICE)
+    odd_input = torch.randn(1, 3, 5, 33, 33, device=DEVICE)
+    with torch.no_grad():
+        out_odd = _odd_model(odd_input)
+    if out_odd.shape == (1, 1, 5, 33, 33):
+        ok(f"AttentionUNet3D odd-dim forward pass OK — output shape {tuple(out_odd.shape)}")
+    else:
+        fail(f"AttentionUNet3D odd-dim: output shape {tuple(out_odd.shape)} != (1, 1, 5, 33, 33)")
+
+    # --- build_model factory -----------------------------------------------
+    m_unet = build_model({"model": "unet3d", "in_channels": 3, "out_channels": 1,
+                          "features": [16, 32]})
+    ok(f"build_model('unet3d') → {type(m_unet).__name__}")
+
+    m_attn = build_model({"model": "attention_unet3d", "in_channels": 3, "out_channels": 1,
+                          "features": [16, 32]})
+    ok(f"build_model('attention_unet3d') → {type(m_attn).__name__}")
+
+    # Default (no 'model' key) must produce UNet3D
+    m_default = build_model({"in_channels": 3, "out_channels": 1})
+    if type(m_default).__name__ == "UNet3D":
+        ok("build_model with no 'model' key defaults to UNet3D")
+    else:
+        fail(f"Default model should be UNet3D, got {type(m_default).__name__}")
+
+    # Unknown model name must raise ValueError
+    try:
+        build_model({"model": "nonexistent_model"})
+        fail("build_model should raise ValueError for unknown model name")
+    except ValueError as e:
+        ok(f"build_model raises ValueError for unknown model: {e}")
+
+except Exception as exc:
+    fail("AttentionUNet3D / build_model test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 4. DiceBCELoss

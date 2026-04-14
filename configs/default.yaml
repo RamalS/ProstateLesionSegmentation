@@ -22,6 +22,7 @@ num_samples: 1                     # patches extracted per volume per __getitem_
                                    # effective batch size = batch_size × num_samples
 
 # Model
+model: unet3d                      # options: unet3d, attention_unet3d
 in_channels: 3                    # T2w + ADC + HBV
 out_channels: 1                   # binary segmentation
 features: [32, 64, 128, 256]      # encoder feature map sizes

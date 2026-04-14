@@ -9,7 +9,7 @@ Pipeline
 1. Load config and set up output directories / TensorBoard.
 2. Discover PI-CAI cases and split into train / validation sets.
 3. Build PiCaiDataset with MONAI augmentation transforms.
-4. Instantiate 3D U-Net, DiceBCELoss, AdamW + CosineAnnealingLR.
+4. Instantiate model via build_model(cfg), DiceBCELoss, AdamW + CosineAnnealingLR.
 5. Train: random-patch forward pass → Dice+BCE loss → backward.
 6. Validate: sliding-window inference over full volumes → Dice, IoU,
    Sensitivity, Specificity, HD95.
@@ -38,7 +38,7 @@ from src.config import load_config
 from src.dataset import PiCaiDataset, discover_cases, stratified_train_val_split
 from src.losses import DiceBCELoss
 from src.metrics import compute_all_metrics
-from src.models import UNet3D
+from src.models import build_model
 from src.notify import send_ntfy
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
@@ -460,14 +460,11 @@ def main() -> None:
     )
 
     # ---- Model ----
-    model = UNet3D(
-        in_channels=cfg.get("in_channels", 3),
-        out_channels=cfg.get("out_channels", 1),
-        features=tuple(cfg.get("features", [32, 64, 128, 256])),
-    ).to(device)
+    model = build_model(cfg).to(device)
 
+    model_name = cfg.get("model", "unet3d")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info("UNet3D | trainable parameters: %s", f"{n_params:,}")
+    logger.info("%s | trainable parameters: %s", model_name, f"{n_params:,}")
 
     # Optional: torch.compile (triton-based kernel fusion).  Disabled by default
     # until the user has verified convergence; enable via use_compile: true in

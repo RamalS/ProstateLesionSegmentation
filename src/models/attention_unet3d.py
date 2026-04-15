@@ -14,6 +14,20 @@ and produces a spatially reweighted skip:
   alpha = sigmoid( psi( relu( W_g(g) + W_x(x) ) ) )   shape (B, 1, D, H, W)
   output = x * alpha
 
+Deep Supervision
+----------------
+When ``deep_supervision=True`` the model attaches an auxiliary 1×1×1 output
+head to every decoder level except the finest.  ``forward`` then returns a
+``list[Tensor]`` ordered finest → coarsest:
+
+    [logits_full, logits_D/2, logits_D/4, logits_D/8]
+
+Use ``DeepSupervisionWrapper`` in ``src/losses.py`` to compute the weighted
+multi-scale loss during training.  At inference, extract ``output[0]``.
+
+When ``deep_supervision=False`` (default) ``forward`` returns a plain
+``Tensor`` and the model is a drop-in replacement for the original.
+
 References
 ----------
 Oktay et al. "Attention U-Net: Learning Where to Look for the Pancreas."
@@ -21,6 +35,9 @@ MIDL 2018.  https://arxiv.org/abs/1804.03999
 
 Çiçek et al. "3D U-Net: Learning Dense Volumetric Segmentation from
 Sparse Annotation." MICCAI 2016.
+
+Isensee et al. "nnU-Net: a self-configuring method for deep learning-based
+biomedical image segmentation." Nature Methods 2021.
 """
 
 from __future__ import annotations
@@ -142,10 +159,15 @@ class AttentionUNet3D(nn.Module):
 
     Parameters
     ----------
-    in_channels  : number of input channels (3 for T2w + ADC + HBV)
-    out_channels : number of output channels (1 for binary segmentation)
-    features     : feature map sizes at each encoder level.
-                   Length determines the number of pooling levels (depth).
+    in_channels      : number of input channels (3 for T2w + ADC + HBV)
+    out_channels     : number of output channels (1 for binary segmentation)
+    features         : feature map sizes at each encoder level.
+                       Length determines the number of pooling levels (depth).
+    deep_supervision : if True, attach auxiliary 1×1×1 output heads to all
+                       decoder levels except the finest and return a
+                       ``list[Tensor]`` ordered finest → coarsest from
+                       ``forward``.  Set to False (default) for standard
+                       single-output behaviour.
     """
 
     def __init__(
@@ -153,8 +175,11 @@ class AttentionUNet3D(nn.Module):
         in_channels: int = 3,
         out_channels: int = 1,
         features: tuple[int, ...] = (32, 64, 128, 256),
+        deep_supervision: bool = False,
     ) -> None:
         super().__init__()
+
+        self.deep_supervision = deep_supervision
 
         # ---- Encoder ----
         self.encoders = nn.ModuleList()
@@ -189,6 +214,17 @@ class AttentionUNet3D(nn.Module):
         # 1×1×1 conv to desired number of classes; no activation (raw logits)
         self.output_conv = nn.Conv3d(ch, out_channels, kernel_size=1)
 
+        # ---- Deep supervision auxiliary heads ----
+        # One 1×1×1 head per decoder level except the finest.
+        # reversed(features)[:-1] gives channel counts for the coarser levels,
+        # e.g. [256, 128, 64] for default features=(32, 64, 128, 256).
+        # Kaiming init in _init_weights covers these Conv3d layers automatically.
+        if deep_supervision:
+            self.deep_heads = nn.ModuleList([
+                nn.Conv3d(f, out_channels, kernel_size=1)
+                for f in list(reversed(features))[:-1]
+            ])
+
         self._init_weights()
 
     # ------------------------------------------------------------------
@@ -206,7 +242,7 @@ class AttentionUNet3D(nn.Module):
 
     # ------------------------------------------------------------------
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> list[Tensor] | Tensor:
         """
         Parameters
         ----------
@@ -214,7 +250,14 @@ class AttentionUNet3D(nn.Module):
 
         Returns
         -------
-        (B, out_channels, D, H, W) raw logits
+        deep_supervision=False (default)
+            (B, out_channels, D, H, W) raw logits — plain Tensor.
+
+        deep_supervision=True
+            list[Tensor] ordered finest → coarsest:
+            ``[logits_full, logits_D/2, logits_D/4, ...]``
+            Pass to ``DeepSupervisionWrapper`` during training;
+            at inference use ``output[0]``.
         """
         # --- Encoder: collect skip connections ---
         skips: list[Tensor] = []
@@ -227,6 +270,8 @@ class AttentionUNet3D(nn.Module):
         x = self.bottleneck(x)
 
         # --- Decoder: upsample + attention-gated skip concatenation ---
+        # Accumulate every decoder output; index 0 = coarsest, -1 = finest.
+        decoder_outputs: list[Tensor] = []
         for upconv, attention, decoder, skip in zip(
             self.upconvs, self.attentions, self.decoders, reversed(skips)
         ):
@@ -243,5 +288,20 @@ class AttentionUNet3D(nn.Module):
             attended_skip = attention(g=g, x=skip)
             x = torch.cat([attended_skip, g], dim=1)
             x = decoder(x)
+            decoder_outputs.append(x)
 
-        return self.output_conv(x)
+        # decoder_outputs[-1] is the finest resolution (full patch size).
+        main_logits = self.output_conv(decoder_outputs[-1])
+
+        if self.deep_supervision:
+            # Apply auxiliary heads to all but the finest decoder output.
+            # decoder_outputs[:-1] is [coarsest, ..., second-finest]; reversing
+            # gives [second-finest, ..., coarsest] so the final list is ordered
+            # finest → coarsest: [main(D), aux(D/2), aux(D/4), aux(D/8)].
+            aux_logits = [
+                head(feat)
+                for head, feat in zip(self.deep_heads, decoder_outputs[:-1])
+            ]
+            return [main_logits] + list(reversed(aux_logits))
+
+        return main_logits

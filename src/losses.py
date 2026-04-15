@@ -16,6 +16,12 @@ TverskyBCELoss (recommended for lesion segmentation)
     the model prefer sensitivity over precision — missing a lesion is
     penalised 2.3× more than a false alarm.  This is the right trade-off
     for csPCa detection.
+
+DeepSupervisionWrapper
+    Wraps any base loss to support deep supervision.  Accepts model outputs
+    as a list[Tensor] (finest → coarsest) and computes a geometrically
+    weighted sum of per-scale losses.  Transparently delegates to the base
+    criterion when given a plain Tensor (deep_supervision=False mode).
 """
 
 from __future__ import annotations
@@ -290,4 +296,94 @@ class TverskyBCELoss(nn.Module):
             f"bce_weight={self.bce_weight}, "
             f"alpha={self.alpha}, beta={self.beta}, "
             f"pos_weight={pw_val})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Deep supervision wrapper
+# ---------------------------------------------------------------------------
+
+class DeepSupervisionWrapper(nn.Module):
+    """
+    Wraps any base loss to support deep supervision.
+
+    When a model is trained with ``deep_supervision=True`` its ``forward``
+    returns a ``list[Tensor]`` ordered finest → coarsest (e.g.
+    ``[logits_full, logits_D/2, logits_D/4, logits_D/8]``).  This wrapper
+    accepts that list, downsamples the ground-truth label to each auxiliary
+    scale with nearest-neighbour interpolation, computes the base loss at
+    every scale independently, and returns a geometrically weighted sum.
+
+    Weights are ``[1, 1/2, 1/4, …]`` (finest → coarsest), normalised so
+    they sum to 1.  For the default 4-level model they become approximately
+    ``[0.533, 0.267, 0.133, 0.067]``.
+
+    When the model output is a plain ``Tensor`` (i.e. ``deep_supervision=False``
+    at construction time), the wrapper delegates directly to the base criterion
+    without modification.  This means the same ``criterion`` object works for
+    both modes and the training loop requires no conditional logic.
+
+    Parameters
+    ----------
+    base_criterion : nn.Module
+        Underlying loss instance, e.g. ``TverskyBCELoss`` or ``DiceBCELoss``.
+        Must accept ``(logits, targets)`` and return a scalar tensor.
+    num_levels : int
+        Total number of output scales (main + auxiliary).  Should equal
+        ``len(cfg["features"])``.  Default 4.
+    """
+
+    def __init__(self, base_criterion: nn.Module, num_levels: int = 4) -> None:
+        super().__init__()
+        self.base_criterion = base_criterion
+        raw: list[float] = [1.0 / (2 ** i) for i in range(num_levels)]
+        total = sum(raw)
+        self.weights: list[float] = [w / total for w in raw]
+
+    def forward(self, outputs: list[Tensor] | Tensor, targets: Tensor) -> Tensor:
+        """
+        Compute (weighted) deep-supervision loss.
+
+        Parameters
+        ----------
+        outputs : list[Tensor] | Tensor
+            Model output.  If a plain ``Tensor``, delegates to the base
+            criterion unchanged.  If a ``list[Tensor]``, index 0 must be the
+            finest-resolution logits (matching ``targets`` shape) and
+            subsequent indices progressively coarser.
+        targets : (B, 1, D, H, W)
+            Binary ground-truth mask; downsampled per scale as needed.
+
+        Returns
+        -------
+        Scalar loss tensor.
+        """
+        if isinstance(outputs, Tensor):
+            return self.base_criterion(outputs, targets)
+
+        total_loss: Tensor = torch.zeros(
+            1, device=targets.device, dtype=targets.dtype
+        ).squeeze()
+
+        for logits, weight in zip(outputs, self.weights):
+            if logits.shape[2:] != targets.shape[2:]:
+                # Nearest-neighbour downsampling preserves binary label values.
+                scaled_targets = F.interpolate(
+                    targets.float(),
+                    size=logits.shape[2:],
+                    mode="nearest",
+                )
+            else:
+                scaled_targets = targets
+
+            total_loss = total_loss + weight * self.base_criterion(logits, scaled_targets)
+
+        return total_loss
+
+    def __repr__(self) -> str:
+        weight_str = ", ".join(f"{w:.3f}" for w in self.weights)
+        return (
+            f"{self.__class__.__name__}("
+            f"base_criterion={self.base_criterion}, "
+            f"weights=[{weight_str}])"
         )

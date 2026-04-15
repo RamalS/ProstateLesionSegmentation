@@ -7,6 +7,7 @@ What this tests (no real data required):
   3. UNet3D: instantiation, parameter count, forward pass shape
   3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
   3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
+  3d. Deep supervision: list output, auxiliary shapes, build_model DS, DeepSupervisionWrapper
   4. DiceBCELoss: forward pass with random logits/targets
   4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
   4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
@@ -313,6 +314,161 @@ try:
 
 except Exception as exc:
     fail("Modality flag selection test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 3d. Deep supervision: UNet3D, AttentionUNet3D, build_model, DeepSupervisionWrapper
+# ---------------------------------------------------------------------------
+section("3d. Deep supervision (UNet3D, AttentionUNet3D, build_model, DeepSupervisionWrapper)")
+
+try:
+    from models import AttentionUNet3D as _AttnUNet, UNet3D as _UNet, build_model as _bm_ds
+    from losses import DeepSupervisionWrapper, DiceBCELoss as _DiceBCE
+
+    _B, _C, _D, _H, _W = 2, 3, 20, 64, 64
+    _FEATURES = (16, 32, 64, 128)                # 4 levels → 3 auxiliary heads
+    _N_LEVELS = len(_FEATURES)                   # 4
+
+    # --- 3d-i. UNet3D(deep_supervision=True) returns a list ------------------
+    ds_unet = _UNet(in_channels=_C, out_channels=1, features=_FEATURES,
+                    deep_supervision=True).to(DEVICE)
+    _inp = torch.randn(_B, _C, _D, _H, _W, device=DEVICE)
+    with torch.no_grad():
+        ds_out = ds_unet(_inp)
+
+    if isinstance(ds_out, list):
+        ok(f"UNet3D DS=True → list of {len(ds_out)} tensors")
+    else:
+        fail(f"UNet3D DS=True should return list, got {type(ds_out).__name__}")
+
+    # List length must equal number of feature levels
+    if len(ds_out) == _N_LEVELS:
+        ok(f"UNet3D DS list length == {_N_LEVELS} (== len(features))")
+    else:
+        fail(f"UNet3D DS list length {len(ds_out)} != {_N_LEVELS}")
+
+    # output[0] must be full resolution
+    if ds_out[0].shape == (_B, 1, _D, _H, _W):
+        ok(f"UNet3D DS output[0] full-res shape {tuple(ds_out[0].shape)}")
+    else:
+        fail(f"UNet3D DS output[0] shape {tuple(ds_out[0].shape)} != {(_B, 1, _D, _H, _W)}")
+
+    # Each subsequent output must be (approximately) half the spatial size
+    _ds_shapes_ok = True
+    for _lvl in range(1, len(ds_out)):
+        _prev = ds_out[_lvl - 1].shape[2:]
+        _curr = ds_out[_lvl].shape[2:]
+        # Allow for floor division (e.g. 20 // 2 = 10)
+        _expected = tuple(s // 2 for s in _prev)
+        if _curr != _expected:
+            fail(
+                f"UNet3D DS scale {_lvl}: shape {tuple(_curr)} "
+                f"!= expected half of {tuple(_prev)} = {_expected}"
+            )
+            _ds_shapes_ok = False
+    if _ds_shapes_ok:
+        ok("UNet3D DS: each auxiliary output is half the spatial resolution of the previous")
+
+    # --- 3d-ii. UNet3D(deep_supervision=False) regression guard ---------------
+    plain_unet = _UNet(in_channels=_C, out_channels=1, features=_FEATURES,
+                       deep_supervision=False).to(DEVICE)
+    with torch.no_grad():
+        plain_out = plain_unet(_inp)
+
+    if isinstance(plain_out, torch.Tensor) and not isinstance(plain_out, list):
+        ok(f"UNet3D DS=False still returns plain Tensor (regression guard)")
+    else:
+        fail(f"UNet3D DS=False should return Tensor, got {type(plain_out).__name__}")
+
+    # --- 3d-iii. AttentionUNet3D(deep_supervision=True) ----------------------
+    ds_attn = _AttnUNet(in_channels=_C, out_channels=1, features=_FEATURES,
+                        deep_supervision=True).to(DEVICE)
+    with torch.no_grad():
+        ds_attn_out = ds_attn(_inp)
+
+    if isinstance(ds_attn_out, list) and len(ds_attn_out) == _N_LEVELS:
+        ok(f"AttentionUNet3D DS=True → list of {len(ds_attn_out)} tensors")
+    else:
+        fail(
+            f"AttentionUNet3D DS=True: expected list[{_N_LEVELS}], "
+            f"got {type(ds_attn_out).__name__} len={len(ds_attn_out) if isinstance(ds_attn_out, list) else 'N/A'}"
+        )
+
+    if isinstance(ds_attn_out, list) and ds_attn_out[0].shape == (_B, 1, _D, _H, _W):
+        ok(f"AttentionUNet3D DS output[0] full-res shape {tuple(ds_attn_out[0].shape)}")
+    else:
+        _shape = tuple(ds_attn_out[0].shape) if isinstance(ds_attn_out, list) else "N/A"
+        fail(f"AttentionUNet3D DS output[0] shape {_shape} != {(_B, 1, _D, _H, _W)}")
+
+    # --- 3d-iv. build_model with deep_supervision=True -----------------------
+    _all_flags_ds = {"use_t2w": True, "use_adc": True, "use_hbv": True}
+    m_ds = _bm_ds({
+        "model": "unet3d", **_all_flags_ds,
+        "out_channels": 1,
+        "features": list(_FEATURES),
+        "deep_supervision": True,
+    }).to(DEVICE)
+    with torch.no_grad():
+        bm_out = m_ds(_inp)
+    if isinstance(bm_out, list) and len(bm_out) == _N_LEVELS:
+        ok(f"build_model(deep_supervision=True) → list of {len(bm_out)} tensors")
+    else:
+        fail(
+            f"build_model DS=True: expected list[{_N_LEVELS}], "
+            f"got {type(bm_out).__name__}"
+        )
+
+    # --- 3d-v. DeepSupervisionWrapper with list input -------------------------
+    _base_crit = _DiceBCE(dice_weight=1.0, bce_weight=1.0)
+    ds_crit = DeepSupervisionWrapper(_base_crit, num_levels=_N_LEVELS)
+
+    ds_unet.train()
+    _inp_t = torch.randn(_B, _C, _D, _H, _W, device=DEVICE, requires_grad=False)
+    _tgt = (torch.rand(_B, 1, _D, _H, _W, device=DEVICE) > 0.8).float()
+    _list_out = ds_unet(_inp_t)
+    _ds_loss = ds_crit(_list_out, _tgt)
+
+    if torch.isfinite(_ds_loss) and _ds_loss.shape == ():
+        ok(f"DeepSupervisionWrapper list input → scalar loss={_ds_loss.item():.4f}")
+    else:
+        fail(f"DeepSupervisionWrapper list input: loss={_ds_loss}, shape={_ds_loss.shape}")
+
+    # Backward must succeed
+    try:
+        _ds_loss.backward()
+        ok("DeepSupervisionWrapper backward pass OK")
+    except Exception as _bwd_exc:
+        fail("DeepSupervisionWrapper backward pass failed", _bwd_exc)
+
+    # --- 3d-vi. DeepSupervisionWrapper with plain Tensor (delegation) ---------
+    plain_unet.train()
+    _plain_out = plain_unet(_inp_t)
+    _plain_loss = ds_crit(_plain_out, _tgt)
+    _base_loss  = _base_crit(_plain_out.detach(), _tgt)
+
+    if torch.isfinite(_plain_loss) and abs(_plain_loss.item() - _base_loss.item()) < 1e-5:
+        ok(
+            f"DeepSupervisionWrapper delegates plain Tensor to base criterion "
+            f"(loss={_plain_loss.item():.4f})"
+        )
+    else:
+        fail(
+            f"DeepSupervisionWrapper Tensor delegation mismatch: "
+            f"wrapper={_plain_loss.item():.6f}, base={_base_loss.item():.6f}"
+        )
+
+    # --- 3d-vii. Weight vector sums to 1.0 and is decreasing -----------------
+    _w = ds_crit.weights
+    if abs(sum(_w) - 1.0) < 1e-6:
+        ok(f"DeepSupervisionWrapper weights sum to 1.0: {[f'{v:.3f}' for v in _w]}")
+    else:
+        fail(f"DeepSupervisionWrapper weights do not sum to 1: sum={sum(_w):.6f}")
+    if all(_w[i] >= _w[i + 1] for i in range(len(_w) - 1)):
+        ok("DeepSupervisionWrapper weights are decreasing (finest → coarsest)")
+    else:
+        fail(f"DeepSupervisionWrapper weights are not monotonically decreasing: {_w}")
+
+except Exception as exc:
+    fail("Deep supervision test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 4. DiceBCELoss

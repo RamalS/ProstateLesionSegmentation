@@ -40,12 +40,16 @@ def build_model(cfg: dict) -> nn.Module:
     cfg : dict
         Training configuration dict.  Relevant keys:
 
-        ``model``       — architecture name (see ``_MODEL_REGISTRY``).
-        ``use_t2w``     — include T2w channel (default ``True``).
-        ``use_adc``     — include ADC channel (default ``True``).
-        ``use_hbv``     — include HBV channel (default ``True``).
-        ``out_channels`` — number of segmentation output channels (default 1).
-        ``features``    — encoder feature sizes as a list (default [32,64,128,256]).
+        ``model``            — architecture name (see ``_MODEL_REGISTRY``).
+        ``use_t2w``          — include T2w channel (default ``True``).
+        ``use_adc``          — include ADC channel (default ``True``).
+        ``use_hbv``          — include HBV channel (default ``True``).
+        ``out_channels``     — number of segmentation output channels (default 1).
+        ``features``         — encoder feature sizes as a list (default [32,64,128,256]).
+        ``deep_supervision`` — enable auxiliary decoder heads (default ``False``).
+                               When True, ``model.forward`` returns ``list[Tensor]``
+                               (finest → coarsest); wrap the criterion with
+                               ``DeepSupervisionWrapper`` from ``src.losses``.
 
     Returns
     -------
@@ -83,6 +87,7 @@ def build_model(cfg: dict) -> nn.Module:
         in_channels=in_channels,
         out_channels=cfg.get("out_channels", 1),
         features=tuple(cfg.get("features", [32, 64, 128, 256])),
+        deep_supervision=cfg.get("deep_supervision", False),
     )
 
 

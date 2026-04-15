@@ -41,7 +41,7 @@ from src.dataset import (
     discover_cases,
     stratified_train_val_split,
 )
-from src.losses import DiceBCELoss, TverskyBCELoss
+from src.losses import DiceBCELoss, DeepSupervisionWrapper, TverskyBCELoss
 from src.metrics import compute_all_metrics
 from src.models import build_model
 from src.notify import send_ntfy
@@ -169,6 +169,14 @@ def validate(
 
     autocast_device = "cuda" if device.type == "cuda" else "cpu"
 
+    # When deep supervision is active the model returns list[Tensor].
+    # sliding_window_inference requires a callable that returns a single Tensor,
+    # so we wrap the model to extract the finest-resolution output (index 0).
+    # This is a no-op for standard (non-DS) models that already return a Tensor.
+    def _predictor(x):
+        out = model(x)
+        return out[0] if isinstance(out, list) else out
+
     with torch.inference_mode():
         for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
             images = batch["image"].to(device, non_blocking=True)   # (1, 3, D, H, W)
@@ -183,7 +191,7 @@ def validate(
                     inputs=images,
                     roi_size=patch_size,
                     sw_batch_size=sw_batch_size,
-                    predictor=model,
+                    predictor=_predictor,
                     overlap=sw_overlap,
                 )
 
@@ -542,6 +550,18 @@ def main() -> None:
             dice_weight=cfg.get("dice_weight", 1.0),
             bce_weight=cfg.get("bce_weight", 1.0),
             pos_weight=cfg.get("bce_pos_weight", 1.0),
+        )
+
+    # Wrap with DeepSupervisionWrapper when deep supervision is enabled.
+    # The wrapper accepts both list[Tensor] (DS mode) and plain Tensor (standard
+    # mode) outputs, so the training loop below is identical in either case.
+    if cfg.get("deep_supervision", False):
+        _num_ds_levels = len(cfg.get("features", [32, 64, 128, 256]))
+        criterion = DeepSupervisionWrapper(criterion, num_levels=_num_ds_levels)
+        logger.info(
+            "Deep supervision enabled: %d levels, weights %s",
+            _num_ds_levels,
+            [f"{w:.3f}" for w in criterion.weights],
         )
 
     # ---- Training loop ----

@@ -28,6 +28,7 @@ use_adc: true                      # include ADC channel — most discriminative
 use_hbv: true                      # include HBV channel — complementary DWI information
 out_channels: 1                    # binary segmentation
 features: [32, 64, 128, 256]       # encoder feature map sizes
+deep_supervision: false            # auxiliary losses at each decoder level (nnU-Net style)
 
 # Loss
 # loss_fn: "tversky_bce" uses TverskyBCELoss (penalises FN > FP via alpha < beta).

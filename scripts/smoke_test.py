@@ -10,6 +10,7 @@ What this tests (no real data required):
   4. DiceBCELoss: forward pass with random logits/targets
   4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
   4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
+  4d. Loss robustness: negative-sample exclusion + FP16 overflow guard
   5. All metrics: dice, iou, sensitivity, specificity, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
@@ -442,6 +443,119 @@ try:
 
 except Exception as exc:
     fail("TverskyBCELoss test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 4d. Loss robustness: negative-sample exclusion + FP16 overflow guard
+# ---------------------------------------------------------------------------
+section("4d. Loss robustness — negative-sample exclusion + FP16 overflow guard")
+
+try:
+    from losses import dice_loss, tversky_loss  # noqa: F811 (re-import is fine)
+
+    # --- 4d-i. Mixed batch: negative samples must be excluded ----------------
+    # Create a 4-sample batch: samples 0,1 have lesion labels,
+    # samples 2,3 have all-zero labels (negative cases).
+    # The loss on the mixed batch must equal the loss on the positive
+    # subset alone — negative samples must not contribute any gradient.
+    torch.manual_seed(42)
+    _pos_logits = torch.randn(2, 1, 20, 32, 32, device=DEVICE)
+    _pos_targets = (torch.rand(2, 1, 20, 32, 32, device=DEVICE) > 0.7).float()
+    _pos_targets[:, :, 10, 16, 16] = 1.0   # guarantee at least 1 positive voxel
+    _neg_logits  = torch.randn(2, 1, 20, 32, 32, device=DEVICE)
+    _neg_targets = torch.zeros(2, 1, 20, 32, 32, device=DEVICE)
+
+    _logits_all  = torch.cat([_pos_logits,  _neg_logits],  dim=0)
+    _targets_all = torch.cat([_pos_targets, _neg_targets], dim=0)
+
+    dl_mixed    = dice_loss(_logits_all,  _targets_all).item()
+    dl_pos_only = dice_loss(_pos_logits, _pos_targets).item()
+    if abs(dl_mixed - dl_pos_only) < 1e-5:
+        ok(
+            f"dice_loss: mixed batch == positive-only subset "
+            f"({dl_mixed:.6f} ≈ {dl_pos_only:.6f})"
+        )
+    else:
+        fail(
+            f"dice_loss: mixed batch ({dl_mixed:.6f}) != positive-only "
+            f"({dl_pos_only:.6f}); negative samples contaminate gradient"
+        )
+
+    tl_mixed    = tversky_loss(_logits_all,  _targets_all).item()
+    tl_pos_only = tversky_loss(_pos_logits, _pos_targets).item()
+    if abs(tl_mixed - tl_pos_only) < 1e-5:
+        ok(
+            f"tversky_loss: mixed batch == positive-only subset "
+            f"({tl_mixed:.6f} ≈ {tl_pos_only:.6f})"
+        )
+    else:
+        fail(
+            f"tversky_loss: mixed batch ({tl_mixed:.6f}) != positive-only "
+            f"({tl_pos_only:.6f}); negative samples contaminate gradient"
+        )
+
+    # --- 4d-ii. All-negative batch must return 0.0 (no spurious gradient) ---
+    _all_neg_logits  = torch.randn(4, 1, 10, 16, 16, device=DEVICE)
+    _all_neg_targets = torch.zeros(4, 1, 10, 16, 16, device=DEVICE)
+
+    dl_all_neg = dice_loss(_all_neg_logits, _all_neg_targets)
+    if dl_all_neg.item() == 0.0 and torch.isfinite(dl_all_neg):
+        ok("dice_loss: all-negative batch → 0.0 (no spurious gradient)")
+    else:
+        fail(
+            f"dice_loss: all-negative batch should return 0.0 "
+            f"but got {dl_all_neg.item():.6f}"
+        )
+
+    tl_all_neg = tversky_loss(_all_neg_logits, _all_neg_targets)
+    if tl_all_neg.item() == 0.0 and torch.isfinite(tl_all_neg):
+        ok("tversky_loss: all-negative batch → 0.0 (no spurious gradient)")
+    else:
+        fail(
+            f"tversky_loss: all-negative batch should return 0.0 "
+            f"but got {tl_all_neg.item():.6f}"
+        )
+
+    # --- 4d-iii. FP16 overflow guard (full training patch size) --------------
+    # At patch size 20×128×128 = 327,680 voxels, sigmoid(0) ≈ 0.5 per voxel.
+    # Summing ~0.5 × 327,680 ≈ 163,840 overflows FP16 max (≈65,504), producing
+    # inf and locking the loss at 1.0 for the entire training run.
+    # The .float() cast inside dice_loss / tversky_loss must prevent this.
+    if cuda_ok:
+        _fp16_logits  = torch.zeros(2, 1, 20, 128, 128,
+                                    device=DEVICE, dtype=torch.float16)
+        _fp16_targets = torch.zeros(2, 1, 20, 128, 128,
+                                    device=DEVICE, dtype=torch.float16)
+        # Guarantee positive voxels so the mask passes
+        _fp16_targets[:, :, 10, 64, 64] = 1.0
+
+        dl_fp16 = dice_loss(_fp16_logits, _fp16_targets)
+        if torch.isfinite(dl_fp16):
+            ok(
+                f"dice_loss FP16 patch 20×128×128: "
+                f"finite ({dl_fp16.item():.4f}), no overflow"
+            )
+        else:
+            fail(
+                f"dice_loss FP16 large-patch: non-finite {dl_fp16.item()} "
+                f"— FP16 overflow not prevented"
+            )
+
+        tl_fp16 = tversky_loss(_fp16_logits, _fp16_targets)
+        if torch.isfinite(tl_fp16):
+            ok(
+                f"tversky_loss FP16 patch 20×128×128: "
+                f"finite ({tl_fp16.item():.4f}), no overflow"
+            )
+        else:
+            fail(
+                f"tversky_loss FP16 large-patch: non-finite {tl_fp16.item()} "
+                f"— FP16 overflow not prevented"
+            )
+    else:
+        skip("CUDA not available — skipping FP16 overflow guard test")
+
+except Exception as exc:
+    fail("Loss robustness test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR

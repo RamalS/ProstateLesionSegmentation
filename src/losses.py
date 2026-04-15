@@ -39,9 +39,19 @@ def dice_loss(
     Soft Dice loss for binary segmentation.
 
     DSC = 2|P ∩ T| / (|P| + |T|)
-    loss = 1 - mean(DSC over batch)
+    loss = 1 - mean(DSC over positive samples in batch)
 
     Sigmoid is applied internally so logits are expected (not probabilities).
+
+    Samples whose ground-truth target is entirely empty (no positive voxels)
+    are excluded from the Dice computation.  For negative cases the Dice
+    gradient pushes the model toward predicting all-zero — the opposite of
+    what we want.  The BCE term (applied to all samples) is sufficient to
+    learn from negative cases.  This aligns the training signal with the
+    validation metrics, which also exclude empty-target samples.
+
+    Returns ``torch.tensor(0.0)`` when all samples in the batch have empty
+    targets (no Dice gradient is generated; only BCE contributes).
 
     Parameters
     ----------
@@ -54,11 +64,24 @@ def dice_loss(
     -------
     Scalar Dice loss in [0, 1].
     """
-    probs = torch.sigmoid(logits)
+    # Cast to FP32 before any reduction: sigmoid output summed over 327 K
+    # voxels (patch 20×128×128) overflows FP16 max (~65 k), producing inf
+    # and locking the loss at 1.0 for the entire training run.
+    probs = torch.sigmoid(logits).float()
 
     # Flatten spatial dimensions; keep batch dimension
     probs_flat = probs.view(probs.size(0), -1)
-    tgts_flat = targets.view(targets.size(0), -1)
+    tgts_flat = targets.view(targets.size(0), -1).float()
+
+    # Exclude negative samples (empty ground-truth) from the Dice term.
+    # For negative cases the gradient of the Dice numerator is zero while
+    # the denominator penalises any positive prediction, actively driving
+    # the model toward all-background.
+    has_positive = tgts_flat.sum(dim=1) > 0
+    if not has_positive.any():
+        return torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    probs_flat = probs_flat[has_positive]
+    tgts_flat = tgts_flat[has_positive]
 
     intersection = (probs_flat * tgts_flat).sum(dim=1)
     cardinality = probs_flat.sum(dim=1) + tgts_flat.sum(dim=1)
@@ -147,7 +170,7 @@ def tversky_loss(
     and false negatives (beta):
 
         TI  = TP / (TP + alpha·FP + beta·FN)
-        loss = 1 - mean(TI over batch)
+        loss = 1 - mean(TI over positive samples in batch)
 
     Setting alpha = beta = 0.5 recovers standard Dice loss.
 
@@ -155,6 +178,17 @@ def tversky_loss(
     lesion (FN) is penalised more heavily than predicting a false alarm (FP).
     The canonical choice is alpha=0.3, beta=0.7, which weights FN 2.3× more
     than FP.
+
+    Samples whose ground-truth target is entirely empty (no positive voxels)
+    are excluded from the Tversky computation.  For negative cases the
+    Tversky gradient penalises any positive prediction (FP), actively driving
+    the model toward all-background — the opposite of what we want.  The BCE
+    term (applied to all samples) is sufficient to learn from negative cases.
+    This aligns the training signal with the validation metrics, which also
+    exclude empty-target samples.
+
+    Returns ``torch.tensor(0.0)`` when all samples in the batch have empty
+    targets (no Tversky gradient is generated; only BCE contributes).
 
     Sigmoid is applied internally so raw logits are expected.
 
@@ -171,10 +205,23 @@ def tversky_loss(
     -------
     Scalar Tversky loss in [0, 1].
     """
-    probs = torch.sigmoid(logits)
+    # Cast to FP32 before any reduction: sigmoid output summed over 327 K
+    # voxels (patch 20×128×128) overflows FP16 max (~65 k), producing inf
+    # and locking the loss at 1.0 for the entire training run.
+    probs = torch.sigmoid(logits).float()
 
     probs_flat = probs.view(probs.size(0), -1)
-    tgts_flat = targets.view(targets.size(0), -1)
+    tgts_flat = targets.view(targets.size(0), -1).float()
+
+    # Exclude negative samples (empty ground-truth) from the Tversky term.
+    # For negative cases the gradient of the Tversky numerator is zero while
+    # the FP term in the denominator penalises any positive prediction,
+    # actively driving the model toward all-background.
+    has_positive = tgts_flat.sum(dim=1) > 0
+    if not has_positive.any():
+        return torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+    probs_flat = probs_flat[has_positive]
+    tgts_flat = tgts_flat[has_positive]
 
     tp = (probs_flat * tgts_flat).sum(dim=1)
     fp = (probs_flat * (1.0 - tgts_flat)).sum(dim=1)

@@ -23,26 +23,30 @@ def compute_composite_score(
     w_sensitivity: float = 0.5,
     w_dice: float = 0.3,
     w_hd95: float = 0.2,
+    hd95_scale: float = 10.0,
 ) -> float:
     """
     Compute a weighted composite validation score for best-checkpoint selection.
 
-    score = w_sens * sensitivity + w_dice * dice + w_hd95 * (1 / (1 + hd95))
+    score = w_sens * sensitivity + w_dice * dice + w_hd95 * (1 / (1 + hd95 / hd95_scale))
 
     Weights are normalised internally so they always sum to 1.0, making the
     score independent of whether the caller uses raw or pre-normalised values.
 
-    The HD95 term is inverted (lower HD95 → higher score) via ``1/(1+hd95)``,
-    which maps HD95 ∈ [0, ∞) to (0, 1].
+    The HD95 term is inverted (lower HD95 → higher score) via
+    ``1 / (1 + hd95 / hd95_scale)``, which maps HD95 ∈ [0, ∞) to (0, 1].
+    ``hd95_scale`` (default 10 mm) sets the midpoint: an HD95 equal to
+    ``hd95_scale`` produces a term of 0.5.  Choose a value near the expected
+    boundary between "acceptable" and "poor" HD95 for your dataset.
 
     NaN handling
     ------------
     - If ``sensitivity`` or ``dice`` is NaN (i.e. no positive cases were
       present in the validation set), the function returns ``float('nan')``.
       The caller should treat this as "no update" for best-checkpoint selection.
-    - If only ``hd95`` is NaN (prediction or target was empty for every case),
-      the HD95 term is dropped and its weight is redistributed proportionally
-      between sensitivity and dice.
+    - If only ``hd95`` is NaN (HD95 was not computed this epoch, or prediction
+      / target was empty for every case), the HD95 term is dropped and its
+      weight is redistributed proportionally between sensitivity and dice.
 
     Parameters
     ----------
@@ -50,6 +54,7 @@ def compute_composite_score(
     w_sensitivity : weight for sensitivity (TPR); default 0.5
     w_dice        : weight for Dice DSC; default 0.3
     w_hd95        : weight for inverted HD95; default 0.2
+    hd95_scale    : HD95 value (mm) that maps to a term of 0.5; default 10.0
 
     Returns
     -------
@@ -64,7 +69,7 @@ def compute_composite_score(
         return float("nan")
 
     if not math.isnan(hd95):
-        hd95_term: float | None = 1.0 / (1.0 + hd95)
+        hd95_term: float | None = 1.0 / (1.0 + hd95 / hd95_scale)
     else:
         hd95_term = None
 
@@ -107,6 +112,7 @@ def save_checkpoint(
     scaler: torch.amp.GradScaler | None = None,
     best_val_dice: float = 0.0,
     best_composite_score: float = 0.0,
+    last_hd95: float = float("nan"),
 ) -> None:
     """
     Persist model, optimizer, and (optionally) scheduler/scaler state to *path*.
@@ -123,6 +129,9 @@ def save_checkpoint(
                             Pass ``None`` when using BF16 or no AMP.
     best_val_dice         : best validation Dice seen so far, stored for resuming
     best_composite_score  : best composite score seen so far, stored for resuming
+    last_hd95             : most-recent finite HD95 value (mm), or NaN if HD95 has
+                            not yet been computed; stored so composite score formula
+                            remains consistent after a resume.
     """
     state: dict = {
         "epoch": epoch,
@@ -130,6 +139,7 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "best_val_dice": best_val_dice,
         "best_composite_score": best_composite_score,
+        "last_hd95": last_hd95,
     }
     if scheduler is not None:
         state["scheduler_state_dict"] = scheduler.state_dict()

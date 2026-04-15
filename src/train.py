@@ -567,6 +567,7 @@ def main() -> None:
     # ---- Training loop ----
     best_val_dice = 0.0
     best_composite_score = 0.0
+    last_hd95: float = float("nan")   # most-recent finite HD95; NaN until first computation
     start_epoch = 1
     sw_overlap = cfg.get("sw_overlap", 0.5)
     sw_batch_size = cfg.get("sw_batch_size", 4)
@@ -595,10 +596,12 @@ def main() -> None:
     w_sensitivity: float = cfg.get("best_ckpt_w_sensitivity", 0.5)
     w_dice: float = cfg.get("best_ckpt_w_dice", 0.3)
     w_hd95: float = cfg.get("best_ckpt_w_hd95", 0.2)
+    hd95_scale: float = float(cfg.get("best_ckpt_hd95_scale", 10.0))
     if val_compute_hd95_every == 0 and w_hd95 > 0.0:
         logger.warning(
             "best_ckpt_w_hd95=%.2f but val_compute_hd95_every=0; "
-            "HD95 will not affect in-training best checkpoint selection.",
+            "HD95 will never be computed, so the HD95 weight will always be "
+            "redistributed to sensitivity and dice.",
             w_hd95,
         )
 
@@ -622,10 +625,14 @@ def main() -> None:
         start_epoch = ckpt["epoch"] + 1
         best_val_dice = float(ckpt.get("best_val_dice", 0.0))
         best_composite_score = float(ckpt.get("best_composite_score", 0.0))
+        _ckpt_hd95 = ckpt.get("last_hd95", float("nan"))
+        last_hd95 = float(_ckpt_hd95) if _ckpt_hd95 is not None else float("nan")
         logger.info(
-            "Resuming from epoch %d (best_composite_score=%.4f, best_val_dice=%.4f)"
-            " → starting at epoch %d",
-            ckpt["epoch"], best_composite_score, best_val_dice, start_epoch,
+            "Resuming from epoch %d (best_composite_score=%.4f, best_val_dice=%.4f,"
+            " last_hd95=%s) → starting at epoch %d",
+            ckpt["epoch"], best_composite_score, best_val_dice,
+            "nan" if math.isnan(last_hd95) else f"{last_hd95:.2f}mm",
+            start_epoch,
         )
 
     logger.info("Device: %s", device)
@@ -642,8 +649,8 @@ def main() -> None:
     )
     logger.info(
         "Best checkpoint metric: composite score "
-        "(w_sensitivity=%.2f, w_dice=%.2f, w_hd95=%.2f)",
-        w_sensitivity, w_dice, w_hd95,
+        "(w_sensitivity=%.2f, w_dice=%.2f, w_hd95=%.2f, hd95_scale=%.1fmm)",
+        w_sensitivity, w_dice, w_hd95, hd95_scale,
     )
     if es_enabled:
         logger.info(
@@ -730,6 +737,7 @@ def main() -> None:
             scaler=scaler,
             best_val_dice=best_val_dice,
             best_composite_score=best_composite_score,
+            last_hd95=last_hd95,
         )
         rotate_checkpoints(checkpoint_dir, keep_last_n)
 
@@ -795,12 +803,18 @@ def main() -> None:
             )
 
             # ---- Composite score: best.pt selection + early stopping ----
-            w_hd95_for_score = w_hd95 if compute_hd95_now else 0.0
+            # Cache the most-recent finite HD95 so the score formula is
+            # consistent across epochs regardless of compute_hd95_now.
+            if compute_hd95_now and not math.isnan(val_metrics["hd95"]):
+                last_hd95 = val_metrics["hd95"]
+            score_metrics = dict(val_metrics)
+            score_metrics["hd95"] = last_hd95
             composite_score = compute_composite_score(
-                val_metrics,
+                score_metrics,
                 w_sensitivity=w_sensitivity,
                 w_dice=w_dice,
-                w_hd95=w_hd95_for_score,
+                w_hd95=w_hd95,
+                hd95_scale=hd95_scale,
             )
 
             if device.type == "cuda":
@@ -826,6 +840,7 @@ def main() -> None:
                     scaler=scaler,
                     best_val_dice=best_val_dice,
                     best_composite_score=best_composite_score,
+                    last_hd95=last_hd95,
                 )
                 logger.info(
                     "New best model at epoch %d (composite_score=%.4f, val_dice=%s) → %s",

@@ -9,34 +9,46 @@ prostate lesions from multi-parametric MRI (PI-CAI dataset).
 ## Project Layout
 
 ```
-src/              # All importable source code (PYTHONPATH=/workspace)
+src/              # All importable source code (PYTHONPATH=.)
   config.py       # YAML config loader
-  dataset.py      # PiCaiDataset, discover_cases, train_val_split
-  losses.py       # DiceBCELoss
-  metrics.py      # dice, iou, sensitivity, specificity, hd95
+  dataset.py      # PiCaiDataset, discover_cases, stratified_train_val_split
+  losses.py       # DiceBCELoss, TverskyBCELoss, DeepSupervisionWrapper
+  metrics.py      # dice, iou, sensitivity, specificity, hd95, compute_all_metrics
   models/
+    __init__.py   # build_model factory (selects unet3d or attention_unet3d)
     unet3d.py     # UNet3D (3-D encoder-decoder with skip connections)
+    attention_unet3d.py  # AttentionUNet3D (UNet3D + attention gates on skip connections)
+  notify.py       # ntfy push notification helper
   train.py        # Training + validation loop (entry point)
   transforms.py   # MONAI augmentation pipelines
-  utils.py        # Shared helpers
+  utils.py        # Shared helpers (checkpointing, run dirs, composite score)
 scripts/
-  smoke_test.py   # Manual integration smoke test (see below)
-  start.sh        # Docker entrypoint dispatcher
+  smoke_test.py          # Manual integration smoke test (see below)
+  start.sh               # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|shell)
+  evaluate_checkpoint.py # Evaluate a saved checkpoint on the hold-out test set
+  count_positives.py     # Print dataset statistics (positive/negative case counts)
+  download_dataset.sh    # Download PI-CAI image folds from zenodo
+  download_labels.sh     # Download PI-CAI annotation labels
+  list_checkpoints.sh    # List saved checkpoints for a run
+  select_checkpoint.py   # Interactive checkpoint selection helper
+  select_checkpoint.sh   # Shell wrapper for select_checkpoint.py
+  train-sync.sh          # Sync code to the remote training machine
+  update_repo.sh         # Pull latest code on the remote machine
 configs/
-  default.yaml          # Production / Docker paths
-  local_default.yaml    # Local dev paths (epochs: 5)
+  default.yaml          # Production / Docker paths (300 epochs)
+  local_default.yaml    # Local dev paths (5 epochs, relative paths)
 ```
 
 ---
 
 ## Environment Setup
 
-### Local (Python 3.14 venv)
+### Local (Python venv)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 pip install -r requirements.txt
 export PYTHONPATH=$(pwd)
 ```
@@ -61,6 +73,8 @@ PyTorch 2.6.0 + CUDA 12.6 wheels pinned in the Dockerfile.
 | Train (Docker) | `docker compose run --rm trainer train` |
 | Train (local) | `PYTHONPATH=. python src/train.py --config configs/local_default.yaml` |
 | TensorBoard | `tensorboard --logdir outputs/runs --port 6006` |
+| TensorBoard (Docker) | `docker compose run --rm --service-ports trainer tensorboard` |
+| Evaluate checkpoint | `docker compose run --rm trainer evaluate --checkpoint <path>` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
 ---
@@ -81,10 +95,21 @@ The smoke test verifies:
 - PyTorch + CUDA availability
 - Optional imports (SimpleITK, MONAI, nibabel, scipy)
 - `UNet3D` instantiation, parameter count, forward-pass shape
-- `DiceBCELoss` forward pass
+- `AttentionUNet3D` instantiation, forward pass, `build_model` factory
+- Modality flag selection: `build_model` derives `in_channels` from `use_t2w/use_adc/use_hbv`
+- Deep supervision: list output, auxiliary shapes, `DeepSupervisionWrapper`
+- `DiceBCELoss` and `TverskyBCELoss` forward passes
+- LR warmup: `LinearLR` warm-up + `CosineAnnealingLR` via `SequentialLR`
+- Loss robustness: negative-sample exclusion + FP16 overflow guard
 - All five metrics functions (dice, iou, sensitivity, specificity, hd95)
-- `discover_cases` / `train_val_split` with synthetic tempfile fixtures
+- `discover_cases` / `stratified_train_val_split` with synthetic tempfile fixtures
 - `get_train_transforms` / `get_val_transforms` on a dummy batch
+- Checkpoint save/load round-trip (including `best_composite_score` and `GradScaler` state)
+- `evaluate_checkpoint` helpers: visualization, overlay, PNG round-trip
+- `compute_composite_score`: HD95=NaN redistribution, early stopping counter simulation
+- `PiCaiDataset` in-memory cache (`use_cache=True`)
+- AMP forward+backward: FP16+GradScaler (Volta/Turing) and BF16 (Ampere+/Blackwell)
+- `send_ntfy`: no-op, URL/header/body correctness, error handling
 
 When adding new functionality, add a corresponding block to `scripts/smoke_test.py`
 and ensure `python scripts/smoke_test.py` exits with code 0.

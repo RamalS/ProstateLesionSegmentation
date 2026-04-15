@@ -55,7 +55,7 @@ warmup_epochs: 10                  # linear warm-up from 10 % → 100 % of learn
 sw_overlap: 0.50                   # overlap fraction for sliding window inference
 sw_batch_size: 40                  # number of patches processed per SW step
 val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
-val_compute_hd95_every: 0          # 0 = skip HD95 during training-time validation
+val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
 val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
 
 # Training speed optimizations
@@ -73,11 +73,18 @@ keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to kee
 
 # Best checkpoint selection (composite score)
 # best.pt is saved when the composite score improves:
-#   score = w_sensitivity * sensitivity + w_dice * dice + w_hd95 * (1 / (1 + hd95))
+#   score = w_sensitivity * sensitivity + w_dice * dice
+#           + w_hd95 * (1 / (1 + hd95 / hd95_scale))
 # Weights are normalised internally so they do not need to sum to 1.0.
+# hd95_scale (mm) sets the midpoint of the HD95 term: an HD95 equal to
+# hd95_scale produces a term of 0.5.  Use a value near the boundary between
+# "acceptable" and "poor" HD95 for your dataset (default: 10 mm).
+# HD95 is cached across epochs so the formula is consistent even when
+# val_compute_hd95_every > 1.
 best_ckpt_w_sensitivity: 0.5
 best_ckpt_w_dice: 0.3
 best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
 
 # Early stopping
 # Training halts when the composite score does not improve by more than

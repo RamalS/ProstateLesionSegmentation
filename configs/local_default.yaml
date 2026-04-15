@@ -58,6 +58,7 @@ keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep
 best_ckpt_w_sensitivity: 0.5
 best_ckpt_w_dice: 0.3
 best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
 
 # Early stopping (disabled for short local dev runs)
 early_stopping_patience: 0

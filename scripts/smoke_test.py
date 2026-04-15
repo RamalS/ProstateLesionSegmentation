@@ -16,11 +16,10 @@ What this tests (no real data required):
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
   8. Checkpoint save/load round-trip (save_checkpoint + load_checkpoint),
-     including best_composite_score persistence and GradScaler state
-   9. evaluate_checkpoint helpers: _normalize_vol_for_display, _segmentation_overlay,
-      save_visualization (synthetic PNG round-trip)
- 10. compute_composite_score: normal case, HD95=NaN redistribution,
-      sensitivity=NaN guard, early stopping counter simulation
+     including best_composite_score, last_hd95 persistence, and GradScaler state
+ 10. compute_composite_score: normal case, hd95_scale parameter, HD95=NaN
+      redistribution, sensitivity=NaN guard, cached-HD95 consistency,
+      early stopping counter simulation
  11. PiCaiDataset in-memory cache (use_cache=True)
  12. compute_all_metrics(compute_hd95=False)
  13. AMP forward+backward: FP16+GradScaler (Volta/Turing) and BF16 (Ampere+/Blackwell)
@@ -1121,7 +1120,7 @@ try:
         # Build a GradScaler (enabled only when CUDA is available; FP16 mode)
         _ckpt_scaler = torch.amp.GradScaler("cuda", enabled=cuda_ok)  # type: ignore[attr-defined]
 
-        # Save (with scaler)
+        # Save (with scaler and last_hd95)
         save_checkpoint(
             _ckpt_model, _ckpt_opt, epoch=1,
             path=str(ckpt_path),
@@ -1129,6 +1128,7 @@ try:
             scaler=_ckpt_scaler,
             best_val_dice=0.42,
             best_composite_score=0.57,
+            last_hd95=12.5,
         )
         ok(f"save_checkpoint wrote {ckpt_path.name}")
 
@@ -1155,10 +1155,12 @@ try:
         assert ckpt["epoch"] == 1, f"epoch mismatch: {ckpt['epoch']}"
         assert abs(ckpt.get("best_val_dice", -1) - 0.42) < 1e-6, "best_val_dice mismatch"
         assert abs(ckpt.get("best_composite_score", -1) - 0.57) < 1e-6, "best_composite_score mismatch"
+        assert abs(ckpt.get("last_hd95", float("nan")) - 12.5) < 1e-6, "last_hd95 mismatch"
         assert "scheduler_state_dict" in ckpt, "scheduler_state_dict missing"
         ok(f"load_checkpoint restored epoch={ckpt['epoch']}, "
            f"best_val_dice={ckpt['best_val_dice']:.2f}, "
            f"best_composite_score={ckpt['best_composite_score']:.2f}, "
+           f"last_hd95={ckpt['last_hd95']:.1f}mm, "
            f"scheduler+scaler state present")
 
 except Exception as exc:
@@ -1248,7 +1250,7 @@ try:
 
     from utils import compute_composite_score
 
-    # --- 10a. Normal case: all metrics finite ---------------------------------
+    # --- 10a. Normal case: all metrics finite, hd95_scale=1.0 (legacy scale) --
     metrics_full = {
         "sensitivity": 0.80,
         "dice":        0.70,
@@ -1257,27 +1259,57 @@ try:
         "specificity": 0.95,
     }
     score_full = compute_composite_score(
-        metrics_full, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2
+        metrics_full, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2, hd95_scale=1.0
     )
     if not _math_cs.isnan(score_full) and 0.0 <= score_full <= 1.0:
         ok(f"all-finite metrics → composite_score={score_full:.4f} (in [0,1])")
     else:
         fail(f"all-finite metrics: unexpected score={score_full}")
 
-    # Verify manual calculation matches
-    hd95_term = 1.0 / (1.0 + 5.0)   # = 1/6 ≈ 0.1667
-    total_w = 0.5 + 0.3 + 0.2       # = 1.0 (normalised)
+    # Verify manual calculation matches (hd95_scale=1.0 → 1/(1+hd95/1.0))
+    hd95_term = 1.0 / (1.0 + 5.0 / 1.0)   # = 1/6 ≈ 0.1667
+    total_w = 0.5 + 0.3 + 0.2              # = 1.0 (normalised)
     expected = (0.5 * 0.80 + 0.3 * 0.70 + 0.2 * hd95_term) / total_w
     if abs(score_full - expected) < 1e-6:
         ok(f"composite score matches manual calculation ({expected:.6f})")
     else:
         fail(f"composite score mismatch: got {score_full:.6f}, expected {expected:.6f}")
 
+    # --- 10a'. Default scale (hd95_scale=10.0): better discrimination at 5mm --
+    score_scale10 = compute_composite_score(
+        metrics_full, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2, hd95_scale=10.0
+    )
+    # hd95=5mm with scale=10mm → term = 1/(1 + 5/10) = 1/1.5 ≈ 0.6667
+    hd95_term_10 = 1.0 / (1.0 + 5.0 / 10.0)
+    expected_10 = (0.5 * 0.80 + 0.3 * 0.70 + 0.2 * hd95_term_10) / 1.0
+    if abs(score_scale10 - expected_10) < 1e-6:
+        ok(
+            f"hd95_scale=10mm: hd95=5mm → term={hd95_term_10:.4f}, "
+            f"composite_score={score_scale10:.4f} (expected {expected_10:.4f})"
+        )
+    else:
+        fail(
+            f"hd95_scale=10mm mismatch: got {score_scale10:.6f}, "
+            f"expected {expected_10:.6f}"
+        )
+    # Sanity: scale=10 should give a higher score than scale=1 for the same HD95,
+    # because a 5mm HD95 is rated as more favourable relative to the midpoint.
+    if score_scale10 > score_full:
+        ok(
+            f"hd95_scale=10mm ({score_scale10:.4f}) > "
+            f"hd95_scale=1mm ({score_full:.4f}) for hd95=5mm ✓"
+        )
+    else:
+        fail(
+            f"expected scale=10mm score > scale=1mm for hd95=5mm; "
+            f"got {score_scale10:.4f} vs {score_full:.4f}"
+        )
+
     # --- 10b. HD95 = NaN: weight redistributed to sensitivity + dice ----------
     metrics_no_hd95 = dict(metrics_full)
     metrics_no_hd95["hd95"] = float("nan")
     score_no_hd95 = compute_composite_score(
-        metrics_no_hd95, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2
+        metrics_no_hd95, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2, hd95_scale=1.0
     )
     if not _math_cs.isnan(score_no_hd95) and 0.0 <= score_no_hd95 <= 1.0:
         ok(f"hd95=nan → weight redistributed, composite_score={score_no_hd95:.4f}")
@@ -1299,7 +1331,7 @@ try:
     metrics_no_sens["sensitivity"] = float("nan")
     metrics_no_sens["dice"] = float("nan")
     score_no_sens = compute_composite_score(
-        metrics_no_sens, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2
+        metrics_no_sens, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2, hd95_scale=1.0
     )
     if _math_cs.isnan(score_no_sens):
         ok("sensitivity=nan → composite_score=nan (no best.pt update)")
@@ -1335,6 +1367,75 @@ try:
         ok(f"early stopping counter: triggered at epoch {stopped_at} (patience={patience})")
     else:
         fail(f"early stopping counter: expected stop at epoch 9, got {stopped_at}")
+
+    # --- 10e. Cached HD95: score is consistent across HD95 and non-HD95 epochs -
+    # Simulates the train.py fix: last_hd95 is carried forward so the effective
+    # weights stay constant epoch-to-epoch.
+    cached_hd95 = float("nan")
+
+    # Epoch A: HD95 is computed → cache it
+    metrics_epoch_a = {"sensitivity": 0.75, "dice": 0.65, "hd95": 8.0,
+                       "iou": 0.50, "specificity": 0.92}
+    cached_hd95 = metrics_epoch_a["hd95"]   # 8.0 mm
+    score_metrics_a = dict(metrics_epoch_a)
+    score_metrics_a["hd95"] = cached_hd95
+    score_a = compute_composite_score(
+        score_metrics_a, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2, hd95_scale=10.0
+    )
+
+    # Epoch B: HD95 is NOT re-computed; use cached value from epoch A
+    metrics_epoch_b = {"sensitivity": 0.76, "dice": 0.66, "hd95": float("nan"),
+                       "iou": 0.51, "specificity": 0.93}
+    score_metrics_b_cached = dict(metrics_epoch_b)
+    score_metrics_b_cached["hd95"] = cached_hd95   # inject cached value
+    score_b_cached = compute_composite_score(
+        score_metrics_b_cached, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2,
+        hd95_scale=10.0,
+    )
+
+    # Old behaviour (zeroing out w_hd95 on non-HD95 epochs)
+    score_b_old = compute_composite_score(
+        metrics_epoch_b, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.0, hd95_scale=10.0
+    )
+
+    # Both new scores must be in [0, 1]
+    if 0.0 <= score_a <= 1.0 and 0.0 <= score_b_cached <= 1.0:
+        ok(
+            f"cached-HD95 path: epoch_a={score_a:.4f}, "
+            f"epoch_b (cached)={score_b_cached:.4f}"
+        )
+    else:
+        fail(
+            f"cached-HD95 path: scores out of range "
+            f"({score_a:.4f}, {score_b_cached:.4f})"
+        )
+
+    # Verify cached path and old path are NOT the same (they differ in formula)
+    if abs(score_b_cached - score_b_old) > 1e-6:
+        ok(
+            f"cached score ({score_b_cached:.4f}) differs from old zeroed-weight "
+            f"score ({score_b_old:.4f}) — formulas correctly diverge"
+        )
+    else:
+        fail(
+            f"cached and old scores are identical ({score_b_cached:.4f}); "
+            "expected divergence due to different effective HD95 weighting"
+        )
+
+    # Verify cached score uses the same weights as epoch A (HD95 term active)
+    # Manual: hd95=8mm, scale=10 → term=1/(1+0.8)=1/1.8≈0.5556
+    hd95_term_b = 1.0 / (1.0 + cached_hd95 / 10.0)
+    expected_b = (0.5 * 0.76 + 0.3 * 0.66 + 0.2 * hd95_term_b) / 1.0
+    if abs(score_b_cached - expected_b) < 1e-6:
+        ok(
+            f"cached-HD95 manual check: hd95=8mm term={hd95_term_b:.4f}, "
+            f"score={score_b_cached:.4f} (expected {expected_b:.4f})"
+        )
+    else:
+        fail(
+            f"cached-HD95 manual mismatch: got {score_b_cached:.6f}, "
+            f"expected {expected_b:.6f}"
+        )
 
 except Exception as exc:
     fail("compute_composite_score test failed", exc)

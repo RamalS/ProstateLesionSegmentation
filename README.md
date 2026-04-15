@@ -15,19 +15,31 @@ Evaluation is performed using standard metrics such as Dice, IoU, Sensitivity, S
 ```
 src/                        # All importable source code (PYTHONPATH=.)
   config.py                 # YAML config loader
-  dataset.py                # PiCaiDataset, discover_cases, train_val_split
-  losses.py                 # DiceBCELoss (Dice + BCE combined loss)
-  metrics.py                # dice, iou, sensitivity, specificity, hd95
+  dataset.py                # PiCaiDataset, discover_cases, stratified_train_val_split
+  losses.py                 # DiceBCELoss, TverskyBCELoss, DeepSupervisionWrapper
+  metrics.py                # dice, iou, sensitivity, specificity, hd95, compute_all_metrics
   models/
+    __init__.py             # build_model factory (selects unet3d or attention_unet3d)
     unet3d.py               # UNet3D (3D encoder-decoder with skip connections)
+    attention_unet3d.py     # AttentionUNet3D (UNet3D + attention gates on skip connections)
+  notify.py                 # ntfy push notification helper
   train.py                  # Training + validation loop (entry point)
   transforms.py             # MONAI augmentation pipelines
-  utils.py                  # Shared helpers (checkpointing, run directories)
+  utils.py                  # Shared helpers (checkpointing, run directories, composite score)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher
+  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|shell)
+  evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
+  count_positives.py        # Print dataset statistics (positive/negative case counts)
+  download_dataset.sh       # Download PI-CAI image folds from zenodo
+  download_labels.sh        # Download PI-CAI annotation labels
+  list_checkpoints.sh       # List saved checkpoints for a run
+  select_checkpoint.py      # Interactive checkpoint selection helper
+  select_checkpoint.sh      # Shell wrapper for select_checkpoint.py
+  train-sync.sh             # Sync code to the remote training machine
+  update_repo.sh            # Pull latest code on the remote machine
 configs/
-  default.yaml              # Production / Docker paths (100 epochs)
+  default.yaml              # Production / Docker paths (300 epochs)
   local_default.yaml        # Local dev paths (5 epochs, relative paths)
 ```
 
@@ -42,7 +54,13 @@ configs/
 - **Decoder**: ConvTranspose3d upsampling + skip-connection concatenation + 2× conv block
 - **Output**: 1×1×1 Conv3d producing raw logits (sigmoid applied externally)
 
-Default configuration: feature sizes `[32, 64, 128, 256]` with a 512-channel bottleneck, 3 input channels (T2w + ADC + HBV), 1 output channel (binary segmentation).
+**AttentionUNet3D** — identical to UNet3D with Attention Gates (Oktay et al., MIDL 2018) on every skip connection:
+
+- Each gate reweights the encoder feature map by a spatially learned alpha mask before concatenation in the decoder
+- Supports **deep supervision**: when `deep_supervision: true`, auxiliary output heads are attached at each decoder level (nnU-Net style); `forward` returns a `list[Tensor]` ordered finest → coarsest
+- Selected at runtime via the `model` config key (`unet3d` or `attention_unet3d`)
+
+Default configuration: feature sizes `[32, 64, 128, 256]` with a 512-channel bottleneck, up to 3 input channels (T2w + ADC + HBV, controlled by `use_t2w/use_adc/use_hbv` flags), 1 output channel (binary segmentation).
 
 ---
 
@@ -56,14 +74,14 @@ Requires Docker Engine + Compose v2 and the NVIDIA Container Toolkit.
 docker compose build
 ```
 
-The image is based on `nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04` with PyTorch 2.7.0 + CUDA 12.8 wheels.
+The image is based on `nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04` with PyTorch 2.6.0 + CUDA 12.6 wheels.
 
 ### Local (Python venv)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 pip install -r requirements.txt
 export PYTHONPATH=$(pwd)
 ```
@@ -179,6 +197,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Train | `docker compose run --rm trainer train` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
 | TensorBoard | `docker compose run --rm --service-ports trainer tensorboard` |
+| Evaluate checkpoint | `docker compose run --rm trainer evaluate --checkpoint <path>` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
 ### Local
@@ -195,33 +214,45 @@ PYTHONPATH=. python scripts/count_positives.py \
 
 All hyperparameters and paths are defined in YAML config files. Key parameters:
 
-| Parameter | Default | Description |
-|---|---|---|
-| `epochs` | 100 (5 local) | Number of training epochs |
-| `batch_size` | 2 | Training batch size |
-| `learning_rate` | 1e-4 | Initial AdamW learning rate |
-| `weight_decay` | 1e-5 | AdamW weight decay |
-| `patch_size` | `[20, 128, 128]` | (D, H, W) random crop size for training |
-| `pos_fraction` | 0.75 | Fraction of patches containing a lesion |
-| `target_spacing` | `[3.0, 0.5, 0.5]` | Voxel spacing (z, y, x) in mm after resampling |
-| `val_fraction` | 0.2 | Fraction of data held out for validation |
-| `in_channels` | 3 | Input MRI channels (T2w + ADC + HBV) |
-| `features` | `[32, 64, 128, 256]` | Encoder feature map sizes |
-| `dice_weight` | 1.0 | Weight on the Dice term in DiceBCELoss |
-| `bce_weight` | 1.0 | Weight on the BCE term in DiceBCELoss |
-| `sw_overlap` | 0.5 | Sliding-window overlap fraction during validation |
+| Parameter | Default (Docker) | Local dev | Description |
+|---|---|---|---|
+| `epochs` | 300 | 5 | Number of training epochs |
+| `batch_size` | 16 | 4 | Training batch size |
+| `learning_rate` | 4e-4 | 2e-4 | Initial AdamW learning rate |
+| `weight_decay` | 1e-5 | 1e-5 | AdamW weight decay |
+| `patch_size` | `[20, 128, 128]` | `[20, 128, 128]` | (D, H, W) random crop size for training |
+| `pos_fraction` | 0.85 | 0.75 | Fraction of patches containing a lesion |
+| `target_spacing` | `[3.0, 0.5, 0.5]` | `[3.0, 0.5, 0.5]` | Voxel spacing (z, y, x) in mm after resampling |
+| `val_fraction` | 0.2 | 0.2 | Fraction of data held out for validation |
+| `model` | `attention_unet3d` | `unet3d` | Model architecture (`unet3d` or `attention_unet3d`) |
+| `use_t2w / use_adc / use_hbv` | `true` | `true` | Modality flags (control number of input channels) |
+| `features` | `[32, 64, 128, 256]` | `[32, 64, 128, 256]` | Encoder feature map sizes |
+| `deep_supervision` | `false` | `false` | Auxiliary losses at each decoder level |
+| `loss_fn` | `tversky_bce` | `dice_bce` | Loss function (`dice_bce` or `tversky_bce`) |
+| `tversky_alpha / beta` | 0.3 / 0.7 | — | FP / FN penalty weights for TverskyBCELoss |
+| `dice_weight` | 3.0 | 1.0 | Weight on the Dice/Tversky term |
+| `bce_weight` | 1.0 | 1.0 | Weight on the BCE term |
+| `bce_pos_weight` | 50.0 | 10.0 | BCE positive-voxel weight (class imbalance) |
+| `warmup_epochs` | 10 | — | Linear LR warm-up epochs before cosine annealing |
+| `sw_overlap` | 0.5 | 0.5 | Sliding-window overlap fraction during validation |
+| `val_every` | 2 | 1 | Run validation every N epochs |
+| `keep_last_checkpoints` | 3 | 3 | Recent `epoch_NNNN.pt` files to keep (0 = keep all) |
+| `early_stopping_patience` | 30 | 0 | Consecutive val epochs without improvement before stopping (0 = disabled) |
+| `amp_dtype` | `fp16` | `bf16` | AMP dtype (`fp16` for Volta/Turing, `bf16` for Ampere+/Blackwell) |
+| `ntfy_url / ntfy_topic` | set | `""` | ntfy push notification server URL and topic (empty = disabled) |
 
 ---
 
 ## Training Pipeline
 
 1. Load YAML config and set up output directories + TensorBoard.
-2. Discover PI-CAI cases and split into train/validation sets (stratified by `val_fraction`).
-3. Build `PiCaiDataset` with MONAI augmentation transforms.
-4. Instantiate `UNet3D`, `DiceBCELoss`, AdamW + CosineAnnealingLR.
-5. **Train**: random-patch forward pass → Dice+BCE loss → backward.
-6. **Validate**: sliding-window inference over full volumes → Dice, IoU, Sensitivity, Specificity, HD95.
-7. Save per-epoch checkpoints and a `best.pt` checkpoint by validation Dice.
+2. Discover PI-CAI cases and split into train/validation sets (`stratified_train_val_split` preserves positive/negative ratio).
+3. Build `PiCaiDataset` with MONAI augmentation transforms; optionally cache preprocessed volumes in RAM.
+4. Instantiate model via `build_model(cfg)` (UNet3D or AttentionUNet3D), loss (`DiceBCELoss` or `TverskyBCELoss`), AdamW + linear warm-up + CosineAnnealingLR.
+5. **Train**: random-patch forward pass → loss → backward; `WeightedRandomSampler` equalises positive/negative case frequency per epoch.
+6. **Validate** (every `val_every` epochs): sliding-window inference over full volumes → Dice, IoU, Sensitivity, Specificity, HD95.
+7. Save per-epoch checkpoints (rotating, keep last N) and a `best.pt` checkpoint by composite score (weighted sensitivity + Dice + HD95).
+8. Send ntfy push notifications on training events when `ntfy_url` / `ntfy_topic` are set.
 
 Training artifacts are written to `./outputs/runs/<experiment_name>_<timestamp>/`:
 
@@ -262,7 +293,7 @@ docker compose run --rm trainer smoke-test
 PYTHONPATH=. python scripts/smoke_test.py
 ```
 
-Checks: PyTorch + CUDA availability, optional imports, `UNet3D` forward pass, `DiceBCELoss`, all five metrics, `discover_cases` / `train_val_split` with synthetic fixtures, and MONAI transforms on a dummy batch.
+Checks (14 test groups): PyTorch + CUDA availability, optional imports, `UNet3D` and `AttentionUNet3D` forward passes, `build_model` factory and modality flags, deep supervision, `DiceBCELoss` and `TverskyBCELoss`, LR warm-up schedule, loss robustness (negative-sample exclusion + FP16 overflow guard), all five metrics, `discover_cases` / `stratified_train_val_split` with synthetic fixtures, MONAI transforms on a dummy batch, checkpoint save/load round-trip, `evaluate_checkpoint` helpers, `compute_composite_score`, `PiCaiDataset` in-memory cache, AMP (FP16 + BF16), and `send_ntfy` no-op / error handling.
 
 ---
 
@@ -270,4 +301,4 @@ Checks: PyTorch + CUDA availability, optional imports, `UNet3D` forward pass, `D
 
 - The `train` branch triggers a GitHub Actions self-hosted runner that syncs code to the remote training machine. Do **not** push directly to `train` unless you intend to start a training run.
 - Main development happens on `main` (or feature branches merged to `main`).
-- Persistent Docker volumes: `./data` → `/data`, `./outputs` → `/outputs`, `./cache` → `/cache`.
+- Docker volumes: `./` → `/workspace` (full project), `./data` → `/data`, `./outputs` → `/outputs`, `./cache` → `/cache`.

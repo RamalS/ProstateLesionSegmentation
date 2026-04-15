@@ -1,5 +1,5 @@
-experiment_name: v2_pos_weight_fixed
-epochs: 100
+experiment_name: v3_multimodal
+epochs: 300
 batch_size: 16
 learning_rate: 4.0e-4
 weight_decay: 1.0e-5
@@ -24,39 +24,51 @@ num_samples: 1                     # patches extracted per volume per __getitem_
 # Model
 model: attention_unet3d            # options: unet3d, attention_unet3d
 use_t2w: true                      # include T2w channel
-use_adc: false                     # include ADC channel
-use_hbv: false                     # include HBV channel
-out_channels: 1                   # binary segmentation
-features: [32, 64, 128, 256]      # encoder feature map sizes
+use_adc: true                      # include ADC channel — most discriminative for csPCa
+use_hbv: true                      # include HBV channel — complementary DWI information
+out_channels: 1                    # binary segmentation
+features: [32, 64, 128, 256]       # encoder feature map sizes
 
 # Loss
-dice_weight: 2.0
+# loss_fn: "tversky_bce" uses TverskyBCELoss (penalises FN > FP via alpha < beta).
+# loss_fn: "dice_bce"    uses the original DiceBCELoss (FP = FN penalty).
+loss_fn: tversky_bce
+tversky_alpha: 0.3                 # FP penalty weight (lower → more FP-tolerant)
+tversky_beta: 0.7                  # FN penalty weight (higher → fewer missed lesions)
+dice_weight: 3.0                   # weight on Tversky/Dice term  (was 2.0)
 bce_weight: 1.0
-# Positive-voxel weight for the BCE term. Compensates for class imbalance
-# (lesion voxels are ~1-2% of a prostate volume). Rule of thumb: set to
-# roughly (background voxels) / (lesion voxels). Start with 10.0 and tune
-# upward if the model still predicts all-background after a few epochs.
-bce_pos_weight: 10.0
+# Positive-voxel weight for the BCE term. Compensates for class imbalance.
+# At target_spacing [3.0, 0.5, 0.5] a typical prostate is ~80 k voxels;
+# lesions ≈ 1–2 % → background/foreground ratio ≈ 50–100:1.
+# Rule of thumb: (background voxels) / (lesion voxels). Start at 50 and
+# tune upward toward 100 if the model still predicts all-background.
+bce_pos_weight: 50.0               # was: 10.0
+
+# LR schedule
+# warmup_epochs > 0 inserts a linear warm-up phase before cosine annealing.
+# Helps BatchNorm layers stabilise before the full learning rate is applied,
+# reducing the risk of early collapse into the all-background local minimum.
+warmup_epochs: 10                  # linear warm-up from 10 % → 100 % of learning_rate
 
 # Validation (sliding window)
-sw_overlap: 0.75                  # overlap fraction for sliding window inference
-sw_batch_size: 40                 # number of patches processed per SW step
-val_min_sw_batch_size: 1          # lower bound if validation OOM fallback is triggered
-val_compute_hd95_every: 0         # 0 = skip HD95 during training-time validation
-val_every: 2                      # run validation every N epochs (also always runs on the final epoch)
+sw_overlap: 0.50                   # overlap fraction for sliding window inference
+sw_batch_size: 40                  # number of patches processed per SW step
+val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
+val_compute_hd95_every: 0          # 0 = skip HD95 during training-time validation
+val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
 
 # Training speed optimizations
-use_amp: true                     # automatic mixed precision (see amp_dtype below)
-amp_dtype: fp16                   # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
-                                  # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
-use_compile: false                # torch.compile requires sm_75+ (Triton); TITAN V is sm_70
-cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
-cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
+use_amp: true                      # automatic mixed precision (see amp_dtype below)
+amp_dtype: fp16                    # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
+                                   # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
+use_compile: false                 # torch.compile requires sm_75+ (Triton); TITAN V is sm_70
+cache_dataset: true                # cache preprocessed volumes in worker RAM after first epoch
+cache_rate: 1.0                    # fraction of dataset to cache (1.0 = all cases)
 
 # Checkpointing
-keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep (0 = keep all)
-# resume_checkpoint:              # uncomment and set path to resume from a checkpoint
-                                  # e.g. resume_checkpoint: /outputs/runs/my_run/checkpoints/epoch_0050.pt
+keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to keep (0 = keep all)
+# resume_checkpoint:               # uncomment and set path to resume from a checkpoint
+                                   # e.g. resume_checkpoint: /outputs/runs/my_run/checkpoints/epoch_0050.pt
 
 # Best checkpoint selection (composite score)
 # best.pt is saved when the composite score improves:
@@ -68,9 +80,10 @@ best_ckpt_w_hd95: 0.0
 
 # Early stopping
 # Training halts when the composite score does not improve by more than
-# early_stopping_min_delta for early_stopping_patience consecutive epochs.
+# early_stopping_min_delta for early_stopping_patience consecutive val epochs.
+# With val_every=2, patience=30 → no improvement for 60 training epochs.
 # Set early_stopping_patience to 0 to disable early stopping.
-early_stopping_patience: 20
+early_stopping_patience: 30        # was: 20
 early_stopping_min_delta: 0.001
 
 # ntfy push notifications

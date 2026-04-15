@@ -41,7 +41,7 @@ from src.dataset import (
     discover_cases,
     stratified_train_val_split,
 )
-from src.losses import DiceBCELoss
+from src.losses import DiceBCELoss, TverskyBCELoss
 from src.metrics import compute_all_metrics
 from src.models import build_model
 from src.notify import send_ntfy
@@ -493,19 +493,56 @@ def main() -> None:
         weight_decay=cfg.get("weight_decay", 1e-5),
     )
 
-    # Cosine annealing decays lr from initial down to lr * 1e-2 over all epochs
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=cfg["epochs"],
-        eta_min=cfg["learning_rate"] * 1e-2,
-    )
+    # Optional linear warm-up phase followed by cosine annealing.
+    # warmup_epochs=0 (default) falls back to pure cosine — backward compatible.
+    # During warm-up the LR rises linearly from 10 % → 100 % of learning_rate
+    # over the first warmup_epochs epochs.  This lets BatchNorm statistics
+    # stabilise before the full learning rate is applied, reducing the risk of
+    # early collapse into the all-background local minimum.
+    warmup_epochs: int = max(0, int(cfg.get("warmup_epochs", 0)))
+    cosine_t_max: int = max(1, cfg["epochs"] - warmup_epochs)
+
+    if warmup_epochs > 0:
+        _warmup_sched = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        _cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cosine_t_max,
+            eta_min=cfg["learning_rate"] * 1e-2,
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[_warmup_sched, _cosine_sched],
+            milestones=[warmup_epochs],
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg["epochs"],
+            eta_min=cfg["learning_rate"] * 1e-2,
+        )
 
     # ---- Loss ----
-    criterion = DiceBCELoss(
-        dice_weight=cfg.get("dice_weight", 1.0),
-        bce_weight=cfg.get("bce_weight", 1.0),
-        pos_weight=cfg.get("bce_pos_weight", 1.0),
-    )
+    _loss_fn: str = cfg.get("loss_fn", "dice_bce").lower()
+    criterion: torch.nn.Module
+    if _loss_fn == "tversky_bce":
+        criterion = TverskyBCELoss(
+            tversky_weight=cfg.get("dice_weight", 1.0),
+            bce_weight=cfg.get("bce_weight", 1.0),
+            alpha=cfg.get("tversky_alpha", 0.3),
+            beta=cfg.get("tversky_beta", 0.7),
+            pos_weight=cfg.get("bce_pos_weight", 1.0),
+        )
+    else:
+        criterion = DiceBCELoss(
+            dice_weight=cfg.get("dice_weight", 1.0),
+            bce_weight=cfg.get("bce_weight", 1.0),
+            pos_weight=cfg.get("bce_pos_weight", 1.0),
+        )
 
     # ---- Training loop ----
     best_val_dice = 0.0
@@ -577,6 +614,12 @@ def main() -> None:
     logger.info("Experiment: %s", cfg["experiment_name"])
     logger.info("Run directory: %s", run_dir)
     logger.info("Loss: %s", criterion)
+    logger.info(
+        "Scheduler: %s warmup → CosineAnnealing (T_max=%d, eta_min=%.2e)",
+        f"{warmup_epochs}-epoch linear" if warmup_epochs > 0 else "no",
+        cosine_t_max,
+        cfg["learning_rate"] * 1e-2,
+    )
     logger.info(
         "Best checkpoint metric: composite score "
         "(w_sensitivity=%.2f, w_dice=%.2f, w_hd95=%.2f)",

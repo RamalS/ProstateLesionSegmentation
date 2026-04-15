@@ -8,6 +8,8 @@ What this tests (no real data required):
   3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
   3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
   4. DiceBCELoss: forward pass with random logits/targets
+  4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
+  4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
   5. All metrics: dice, iou, sensitivity, specificity, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
@@ -351,6 +353,193 @@ try:
 
 except Exception as exc:
     fail("DiceBCELoss test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 4b. TverskyBCELoss: forward pass, tversky_loss function, FN-penalty bias
+# ---------------------------------------------------------------------------
+section("4b. TverskyBCELoss + tversky_loss function")
+
+try:
+    from losses import TverskyBCELoss, tversky_loss
+
+    # --- tversky_loss standalone function ------------------------------------
+    tv_logits  = torch.randn(2, 1, 20, 64, 64, device=DEVICE)
+    tv_targets = (torch.rand(2, 1, 20, 64, 64, device=DEVICE) > 0.8).float()
+
+    tv_scalar = tversky_loss(tv_logits, tv_targets, alpha=0.3, beta=0.7)
+    if torch.isfinite(tv_scalar) and 0.0 <= tv_scalar.item() <= 1.0:
+        ok(f"tversky_loss (alpha=0.3, beta=0.7) → {tv_scalar.item():.4f} (in [0,1])")
+    else:
+        fail(f"tversky_loss returned unexpected value: {tv_scalar.item()}")
+
+    # Verify alpha=beta=0.5 recovers a value close to Dice loss
+    from losses import dice_loss
+    dl_val = dice_loss(tv_logits, tv_targets).item()
+    tl_sym = tversky_loss(tv_logits, tv_targets, alpha=0.5, beta=0.5).item()
+    if abs(dl_val - tl_sym) < 1e-4:
+        ok(f"tversky_loss(alpha=0.5, beta=0.5) == dice_loss ({tl_sym:.6f} ≈ {dl_val:.6f})")
+    else:
+        fail(
+            f"tversky_loss(0.5,0.5) should equal dice_loss but got "
+            f"{tl_sym:.6f} vs {dl_val:.6f}"
+        )
+
+    # --- TverskyBCELoss class: basic forward pass ----------------------------
+    criterion_tv = TverskyBCELoss(
+        tversky_weight=3.0, bce_weight=1.0,
+        alpha=0.3, beta=0.7, pos_weight=50.0,
+    )
+    criterion_tv = criterion_tv.to(DEVICE)
+    loss_tv = criterion_tv(tv_logits, tv_targets)
+    if torch.isfinite(loss_tv):
+        ok(f"TverskyBCELoss forward pass — loss={loss_tv.item():.4f}")
+    else:
+        fail(f"TverskyBCELoss returned non-finite value: {loss_tv.item()}")
+
+    # --- FN-penalty bias: high-beta should penalise false negatives more ------
+    # Setup: logits strongly predict background (all-negative prediction)
+    # against an all-positive ground truth → all false negatives.
+    # High beta (FN weight) must produce a *higher* loss than high alpha (FP weight).
+    neg_logits_tv  = torch.full((2, 1, 20, 64, 64), -5.0, device=DEVICE)
+    pos_targets_tv = torch.ones(2, 1, 20, 64, 64, device=DEVICE)
+
+    # alpha=0.1, beta=0.9 → FN penalised 9× more than FP
+    loss_fn_heavy = tversky_loss(neg_logits_tv, pos_targets_tv, alpha=0.1, beta=0.9)
+    # alpha=0.9, beta=0.1 → FP penalised 9× more than FN
+    loss_fp_heavy = tversky_loss(neg_logits_tv, pos_targets_tv, alpha=0.9, beta=0.1)
+
+    if loss_fn_heavy.item() > loss_fp_heavy.item():
+        ok(
+            f"FN-penalty bias: beta=0.9 loss ({loss_fn_heavy.item():.4f}) "
+            f"> alpha=0.9 loss ({loss_fp_heavy.item():.4f})"
+        )
+    else:
+        fail(
+            f"FN-penalty bias: expected beta=0.9 loss > alpha=0.9 loss but got "
+            f"{loss_fn_heavy.item():.4f} vs {loss_fp_heavy.item():.4f}"
+        )
+
+    # --- pos_weight wired through BCE correctly --------------------------------
+    # Higher pos_weight should increase total loss on all-FN scenario
+    criterion_tv_pw_low  = TverskyBCELoss(
+        tversky_weight=1.0, bce_weight=1.0, pos_weight=1.0
+    ).to(DEVICE)
+    criterion_tv_pw_high = TverskyBCELoss(
+        tversky_weight=1.0, bce_weight=1.0, pos_weight=50.0
+    ).to(DEVICE)
+    loss_pw_low  = criterion_tv_pw_low(neg_logits_tv, pos_targets_tv)
+    loss_pw_high = criterion_tv_pw_high(neg_logits_tv, pos_targets_tv)
+    if loss_pw_high.item() > loss_pw_low.item():
+        ok(
+            f"TverskyBCELoss pos_weight=50 raises loss on FN voxels: "
+            f"{loss_pw_low.item():.4f} → {loss_pw_high.item():.4f}"
+        )
+    else:
+        fail(
+            f"TverskyBCELoss pos_weight did not raise loss as expected: "
+            f"pw=1 → {loss_pw_low.item():.4f}, pw=50 → {loss_pw_high.item():.4f}"
+        )
+
+except Exception as exc:
+    fail("TverskyBCELoss test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
+# ---------------------------------------------------------------------------
+section("4c. LR warmup — LinearLR → CosineAnnealingLR (SequentialLR)")
+
+try:
+    _lr_base      = 4e-4
+    _warmup_eps   = 10
+    _total_eps    = 50
+    _cosine_t_max = _total_eps - _warmup_eps  # 40
+    _eta_min      = _lr_base * 1e-2           # 4e-6
+
+    # Build a minimal model + optimizer to attach the scheduler to
+    _sched_model = torch.nn.Linear(8, 1)
+    _sched_opt   = torch.optim.AdamW(_sched_model.parameters(), lr=_lr_base)
+
+    _warmup_sched = torch.optim.lr_scheduler.LinearLR(
+        _sched_opt, start_factor=0.1, end_factor=1.0, total_iters=_warmup_eps
+    )
+    _cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        _sched_opt, T_max=_cosine_t_max, eta_min=_eta_min
+    )
+    _seq_sched = torch.optim.lr_scheduler.SequentialLR(
+        _sched_opt,
+        schedulers=[_warmup_sched, _cosine_sched],
+        milestones=[_warmup_eps],
+    )
+
+    # --- Epoch 1: LR should be at start_factor * lr_base = 0.1 * 4e-4 --------
+    # SequentialLR calls step() after construction, so LR at epoch 0 (before
+    # any step) is already set; we call get_last_lr() after the first step.
+    _seq_sched.step()   # epoch 1 → LinearLR step 1
+    lr_ep1 = _seq_sched.get_last_lr()[0]
+
+    # LinearLR: after step 1, LR = start + (end-start)*(1/total_iters)
+    #           = 0.1*lr + 0.9*lr*(1/10) = lr * (0.1 + 0.09) = lr * 0.19
+    # (The exact value depends on the LinearLR interpolation formula.)
+    # What we *do* know: it must be strictly less than lr_base (warmup not done)
+    # and strictly greater than start_factor * lr_base (already stepped once).
+    if _lr_base * 0.1 < lr_ep1 < _lr_base:
+        ok(f"Epoch 1: LR={lr_ep1:.2e} in warmup range (0.1×base, base)")
+    else:
+        fail(f"Epoch 1: LR={lr_ep1:.2e} outside expected warmup range")
+
+    # --- Step through remaining warmup epochs and verify LR reaches ~base -----
+    for _ in range(_warmup_eps - 1):  # already called step() once above
+        _seq_sched.step()
+    lr_end_warmup = _seq_sched.get_last_lr()[0]
+
+    # After total_iters steps, LinearLR should have reached end_factor*lr_base
+    if abs(lr_end_warmup - _lr_base) < _lr_base * 0.01:   # within 1 % of base
+        ok(f"End of warmup ({_warmup_eps} epochs): LR≈base ({lr_end_warmup:.2e} ≈ {_lr_base:.2e})")
+    else:
+        fail(f"End of warmup: LR={lr_end_warmup:.2e}, expected ≈{_lr_base:.2e}")
+
+    # --- Cosine phase: LR must decrease monotonically toward eta_min ----------
+    _prev_lr = lr_end_warmup
+    _decay_ok = True
+    for ep in range(1, _cosine_t_max + 1):
+        _seq_sched.step()
+        _cur_lr = _seq_sched.get_last_lr()[0]
+        if _cur_lr > _prev_lr + 1e-12:  # allow tiny float noise
+            _decay_ok = False
+            fail(
+                f"Cosine phase: LR increased at step {ep}: "
+                f"{_prev_lr:.2e} → {_cur_lr:.2e}"
+            )
+            break
+        _prev_lr = _cur_lr
+
+    if _decay_ok:
+        ok(f"Cosine phase: LR decreases monotonically ({_lr_base:.2e} → {_prev_lr:.2e})")
+
+    # Final LR should be close to eta_min
+    if abs(_prev_lr - _eta_min) < _eta_min * 0.5:
+        ok(f"End of cosine phase: LR={_prev_lr:.2e} ≈ eta_min={_eta_min:.2e}")
+    else:
+        fail(f"End of cosine: LR={_prev_lr:.2e}, expected ≈eta_min={_eta_min:.2e}")
+
+    # --- warmup_epochs=0 falls back to pure cosine (backward compatibility) ---
+    _opt0 = torch.optim.AdamW(torch.nn.Linear(4, 1).parameters(), lr=_lr_base)
+    _cosine_only = torch.optim.lr_scheduler.CosineAnnealingLR(
+        _opt0, T_max=_total_eps, eta_min=_eta_min
+    )
+    _cosine_only.step()
+    lr_cosine_ep1 = _cosine_only.get_last_lr()[0]
+    # Pure cosine should start very close to lr_base (no warmup ramp)
+    if lr_cosine_ep1 > _lr_base * 0.95:
+        ok(f"warmup_epochs=0: pure cosine starts near base LR ({lr_cosine_ep1:.2e})")
+    else:
+        fail(
+            f"warmup_epochs=0: pure cosine LR at ep1={lr_cosine_ep1:.2e} "
+            f"is too low (expected > {_lr_base * 0.95:.2e})"
+        )
+
+except Exception as exc:
+    fail("LR warmup / SequentialLR test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 5. Metrics

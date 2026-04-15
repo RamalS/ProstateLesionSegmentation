@@ -2,7 +2,7 @@ torch
 torchvision
 torchaudio
 tensorboard
-setuptools
+setuptools<80
 numpy
 pandas
 matplotlib

@@ -41,7 +41,7 @@ RUN set -eux; \
 
 # Create Python virtual environment
 RUN python3 -m venv ${VENV_PATH} && \
-    pip install --upgrade pip setuptools wheel
+    pip install --upgrade pip "setuptools<80" wheel
 
 # Create non-root user
 RUN useradd -ms /bin/bash trainer
@@ -61,6 +61,11 @@ RUN pip install --no-cache-dir \
 COPY requirements.txt /workspace/requirements.txt
 RUN grep -viE '^(torch|torchvision|torchaudio)([<>=].*)?$' /workspace/requirements.txt > /tmp/requirements.no-torch.txt && \
     pip install --no-cache-dir -r /tmp/requirements.no-torch.txt
+
+# Re-install setuptools last to guarantee pkg_resources is available.
+# Pinned to <80 because setuptools 80+ removed pkg_resources as a top-level
+# site-packages module, which tensorboard still depends on.
+RUN pip install --no-cache-dir "setuptools<80"
 
 # Copy project files
 COPY src /workspace/src

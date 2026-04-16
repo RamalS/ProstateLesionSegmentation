@@ -28,7 +28,7 @@ use_adc: true                      # include ADC channel — most discriminative
 use_hbv: true                      # include HBV channel — complementary DWI information
 out_channels: 1                    # binary segmentation
 features: [32, 64, 128, 256]       # encoder feature map sizes
-deep_supervision: false            # auxiliary losses at each decoder level (nnU-Net style)
+deep_supervision: true             # auxiliary losses at each decoder level (nnU-Net style)
 
 # Loss
 # loss_fn: "tversky_bce" uses TverskyBCELoss (penalises FN > FP via alpha < beta).
@@ -36,14 +36,14 @@ deep_supervision: false            # auxiliary losses at each decoder level (nnU
 loss_fn: tversky_bce
 tversky_alpha: 0.3                 # FP penalty weight (lower → more FP-tolerant)
 tversky_beta: 0.7                  # FN penalty weight (higher → fewer missed lesions)
-dice_weight: 3.0                   # weight on Tversky/Dice term  (was 2.0)
+dice_weight: 1.0                   # weight on Tversky/Dice term  (was 3.0)
 bce_weight: 1.0
 # Positive-voxel weight for the BCE term. Compensates for class imbalance.
 # At target_spacing [3.0, 0.5, 0.5] a typical prostate is ~80 k voxels;
 # lesions ≈ 1–2 % → background/foreground ratio ≈ 50–100:1.
 # Rule of thumb: (background voxels) / (lesion voxels). Start at 50 and
 # tune upward toward 100 if the model still predicts all-background.
-bce_pos_weight: 50.0               # was: 10.0
+bce_pos_weight: 10.0               # was: 50.0
 
 # LR schedule
 # warmup_epochs > 0 inserts a linear warm-up phase before cosine annealing.
@@ -81,8 +81,8 @@ keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to kee
 # "acceptable" and "poor" HD95 for your dataset (default: 10 mm).
 # HD95 is cached across epochs so the formula is consistent even when
 # val_compute_hd95_every > 1.
-best_ckpt_w_sensitivity: 0.5
-best_ckpt_w_dice: 0.3
+best_ckpt_w_sensitivity: 0.4
+best_ckpt_w_dice: 0.6
 best_ckpt_w_hd95: 0.0
 best_ckpt_hd95_scale: 10.0
 
@@ -91,7 +91,7 @@ best_ckpt_hd95_scale: 10.0
 # early_stopping_min_delta for early_stopping_patience consecutive val epochs.
 # With val_every=2, patience=30 → no improvement for 60 training epochs.
 # Set early_stopping_patience to 0 to disable early stopping.
-early_stopping_patience: 30        # was: 20
+early_stopping_patience: 50        # was: 30
 early_stopping_min_delta: 0.001
 
 # ntfy push notifications

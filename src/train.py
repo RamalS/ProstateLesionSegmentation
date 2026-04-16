@@ -157,13 +157,10 @@ def validate(
     """
     model.eval()
 
-    # Positive-case accumulators (dice / iou / sensitivity)
-    pos_sums: dict[str, float] = {"dice": 0.0, "iou": 0.0, "sensitivity": 0.0}
+    # Positive-case accumulators (dice / iou / sensitivity / precision)
+    pos_sums: dict[str, float] = {"dice": 0.0, "iou": 0.0, "sensitivity": 0.0, "precision": 0.0}
     n_pos = 0   # volumes with ≥1 lesion voxel in ground truth
-
-    # All-case accumulators (specificity)
-    spec_sum = 0.0
-    n_all = 0
+    n_all = 0   # total volumes processed
 
     hd95_values: list[float] = []
 
@@ -201,11 +198,9 @@ def validate(
 
             m = compute_all_metrics(logits, labels, compute_hd95=compute_hd95)
 
-            # Specificity: meaningful for all cases
-            spec_sum += m["specificity"]
             n_all += 1
 
-            # Dice / IoU / sensitivity: only for positive cases
+            # Dice / IoU / sensitivity / precision: only for positive cases
             # compute_all_metrics returns nan when the target is empty
             if not math.isnan(m["dice"]):
                 for k in pos_sums:
@@ -219,11 +214,10 @@ def validate(
 
     if n_all == 0:
         return {"dice": float("nan"), "iou": float("nan"),
-                "sensitivity": float("nan"), "specificity": 0.0,
+                "sensitivity": float("nan"), "precision": float("nan"),
                 "hd95": float("nan"), "n_pos": 0, "n_all": 0}
 
     result: dict[str, float] = {
-        "specificity": spec_sum / n_all,
         "hd95": float(sum(hd95_values) / len(hd95_values)) if hd95_values else float("nan"),
         "n_pos": float(n_pos),
         "n_all": float(n_all),
@@ -235,6 +229,7 @@ def validate(
         result["dice"] = float("nan")
         result["iou"] = float("nan")
         result["sensitivity"] = float("nan")
+        result["precision"] = float("nan")
 
     return result
 
@@ -781,7 +776,7 @@ def main() -> None:
             writer.add_scalar("val/dice",        val_metrics["dice"],        epoch)
             writer.add_scalar("val/iou",         val_metrics["iou"],         epoch)
             writer.add_scalar("val/sensitivity", val_metrics["sensitivity"], epoch)
-            writer.add_scalar("val/specificity", val_metrics["specificity"], epoch)
+            writer.add_scalar("val/precision",   val_metrics["precision"],   epoch)
             if not math.isnan(val_metrics["hd95"]):
                 writer.add_scalar("val/hd95", val_metrics["hd95"], epoch)
 
@@ -791,13 +786,13 @@ def main() -> None:
             hd95_str = _fmt(val_metrics["hd95"])
             logger.info(
                 "Epoch %d/%d | val_dice=%s | val_iou=%s"
-                " | val_sens=%s | val_spec=%.4f | val_hd95=%s"
+                " | val_sens=%s | val_prec=%s | val_hd95=%s"
                 " | pos_cases=%d/%d",
                 epoch, epochs,
                 _fmt(val_metrics["dice"]),
                 _fmt(val_metrics["iou"]),
                 _fmt(val_metrics["sensitivity"]),
-                val_metrics["specificity"],
+                _fmt(val_metrics["precision"]),
                 hd95_str,
                  n_pos_val, n_all_val,
             )
@@ -856,7 +851,7 @@ def main() -> None:
                             f"Composite: {best_composite_score:.4f}\n"
                             f"Dice: {_fmt(val_metrics['dice'])} | "
                             f"Sensitivity: {_fmt(val_metrics['sensitivity'])} | "
-                            f"Specificity: {val_metrics['specificity']:.4f}"
+                            f"Precision: {_fmt(val_metrics['precision'])}"
                         ),
                         tags=["trophy"],
                         priority="default",

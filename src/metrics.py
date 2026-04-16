@@ -13,7 +13,7 @@ Metrics implemented
 dice_coefficient   : Dice Similarity Coefficient (DSC)
 iou_score          : Intersection over Union (Jaccard index)
 sensitivity        : True Positive Rate (Recall)
-specificity        : True Negative Rate
+precision_score    : Positive Predictive Value (Precision)
 hausdorff_distance_95 : 95th-percentile Hausdorff Distance (voxels)
 compute_all_metrics   : convenience wrapper returning all five metrics
 """
@@ -147,25 +147,39 @@ def sensitivity(
     return sens.mean().item()
 
 
-def specificity(
+def precision_score(
     preds: Tensor,
     targets: Tensor,
     threshold: float = 0.5,
     smooth: float = 1e-6,
 ) -> float:
     """
-    Specificity (True Negative Rate).
+    Precision (Positive Predictive Value).
 
-    Specificity = TN / (TN + FP)
+    Precision = TP / (TP + FP)
 
     Range: [0, 1]; higher is better.
+
+    Samples with empty ground-truth targets are excluded from the average
+    for consistency with sensitivity and dice.  For negative cases the
+    model should predict nothing; any positive prediction is a false
+    positive that inflates the denominator, making precision unreliable as
+    a per-case metric on empty-target volumes.
+
+    Returns float('nan') if all samples in the batch have empty targets.
     """
     p = _binarise(preds, threshold).view(preds.size(0), -1)
     t = targets.view(targets.size(0), -1)
-    tn = ((1.0 - p) * (1.0 - t)).sum(dim=1)
+
+    mask = t.sum(dim=1) > 0
+    if not mask.any():
+        return float("nan")
+    p, t = p[mask], t[mask]
+
+    tp = (p * t).sum(dim=1)
     fp = (p * (1.0 - t)).sum(dim=1)
-    spec = (tn + smooth) / (tn + fp + smooth)
-    return spec.mean().item()
+    prec = (tp + smooth) / (tp + fp + smooth)
+    return prec.mean().item()
 
 
 def hausdorff_distance_95(
@@ -246,16 +260,14 @@ def compute_all_metrics(
 
     Returns
     -------
-    dict with keys: "dice", "iou", "sensitivity", "specificity", "hd95"
+    dict with keys: "dice", "iou", "sensitivity", "precision", "hd95"
 
     Notes
     -----
     - sigmoid + threshold is applied **once** and reused across all metrics.
-    - "dice", "iou", "sensitivity": computed only over samples whose
-      ground-truth target is non-empty (has at least one positive voxel).
+    - "dice", "iou", "sensitivity", "precision": computed only over samples
+      whose ground-truth target is non-empty (has at least one positive voxel).
       Returns float('nan') when all samples in the batch are empty-target.
-    - "specificity": computed over all samples (meaningful for both positive
-      and negative cases — measures the false-positive rate).
     - "hd95": computed only over samples where both prediction and target
       are non-empty; returns float('nan') otherwise.
     """
@@ -281,6 +293,6 @@ def compute_all_metrics(
         "dice":        dice_coefficient(pseudo_logits, targets, threshold),
         "iou":         iou_score(pseudo_logits, targets, threshold),
         "sensitivity": sensitivity(pseudo_logits, targets, threshold),
-        "specificity": specificity(pseudo_logits, targets, threshold),
+        "precision":   precision_score(pseudo_logits, targets, threshold),
         "hd95":        hd95_val,
     }

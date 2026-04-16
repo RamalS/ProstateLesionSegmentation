@@ -483,7 +483,7 @@ def main() -> None:
     cid_w  = max(len(r["case_id"]) for r in per_case)
     header = (
         f"  {'case_id':<{cid_w}}  {'lesion':<7}"
-        f"  {'dice':>7}  {'iou':>7}  {'sens':>7}  {'spec':>7}  {'hd95':>8}"
+        f"  {'dice':>7}  {'iou':>7}  {'sens':>7}  {'prec':>7}  {'hd95':>8}"
     )
     print(header)
     print("  " + "─" * (len(header) - 2))
@@ -493,7 +493,7 @@ def main() -> None:
         print(
             f"  {r['case_id']:<{cid_w}}  {tag:<7}"
             f"  {_fmt(r['dice']):>7}  {_fmt(r['iou']):>7}"
-            f"  {_fmt(r['sensitivity']):>7}  {_fmt(r['specificity']):>7}"
+            f"  {_fmt(r['sensitivity']):>7}  {_fmt(r['precision']):>7}"
             f"  {_fmt(r['hd95']):>8}"
         )
 
@@ -506,8 +506,8 @@ def main() -> None:
     iou_vals  = [r["iou"]         for r in pos_rows if not math.isnan(r["iou"])]
     sens_vals = [r["sensitivity"] for r in pos_rows if not math.isnan(r["sensitivity"])]
 
-    # specificity: all cases (never nan)
-    spec_vals = [r["specificity"] for r in per_case if not math.isnan(r["specificity"])]
+    # precision: positive cases only (nan when target is empty)
+    prec_vals = [r["precision"] for r in pos_rows if not math.isnan(r["precision"])]
 
     # hd95: non-empty pairs only (nan when either mask is empty)
     hd95_vals = [r["hd95"] for r in per_case if not math.isnan(r["hd95"])]
@@ -522,7 +522,7 @@ def main() -> None:
     print(f"  Dice         (positive cases only) : {_fmt(_mean(dice_vals))}")
     print(f"  IoU          (positive cases only) : {_fmt(_mean(iou_vals))}")
     print(f"  Sensitivity  (positive cases only) : {_fmt(_mean(sens_vals))}")
-    print(f"  Specificity  (all cases)           : {_fmt(_mean(spec_vals))}")
+    print(f"  Precision    (positive cases only) : {_fmt(_mean(prec_vals))}")
     print(f"  HD95         (non-empty pairs)     : {_fmt(_mean(hd95_vals))} voxels")
 
     # ---- Visualization ----------------------------------------------------------

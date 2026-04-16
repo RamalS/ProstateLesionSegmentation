@@ -12,7 +12,7 @@ What this tests (no real data required):
   4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
   4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
   4d. Loss robustness: negative-sample exclusion + FP16 overflow guard
-  5. All metrics: dice, iou, sensitivity, specificity, hd95
+  5. All metrics: dice, iou, sensitivity, precision, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
   8. Checkpoint save/load round-trip (save_checkpoint + load_checkpoint),
@@ -835,7 +835,7 @@ try:
     m_empty = compute_all_metrics(zero_logits, zero_targets)
 
     import math as _math
-    for name in ("dice", "iou", "sensitivity"):
+    for name in ("dice", "iou", "sensitivity", "precision"):
         if _math.isnan(m_empty[name]):
             ok(f"empty-target guard: {name} correctly returns nan")
         else:
@@ -843,33 +843,20 @@ try:
                 f"empty-target guard: {name} should be nan for all-zero target "
                 f"but got {m_empty[name]:.4f}"
             )
-    # Specificity should still be finite (1.0 — no false positives)
-    if not _math.isnan(m_empty["specificity"]):
-        ok(f"empty-target guard: specificity={m_empty['specificity']:.4f} (finite, as expected)")
-    else:
-        fail("empty-target guard: specificity unexpectedly returned nan")
 
     # --- Empty-target guard: all-zero target + non-zero prediction -----------
-    # dice / iou / sensitivity must still be nan (target has no positives).
-    # specificity should be < 1.0 because the model produces false positives.
+    # dice / iou / sensitivity / precision must still be nan (target has no positives).
     pos_logits = torch.full((1, 1, 20, 64, 64), 10.0, device=DEVICE)   # pred = 1 everywhere
 
     m_fp = compute_all_metrics(pos_logits, zero_targets)
 
-    for name in ("dice", "iou", "sensitivity"):
+    for name in ("dice", "iou", "sensitivity", "precision"):
         if _math.isnan(m_fp[name]):
             ok(f"empty-target / FP guard: {name} correctly returns nan")
         else:
             fail(
                 f"empty-target / FP guard: {name} should be nan but got {m_fp[name]:.4f}"
             )
-    if m_fp["specificity"] < 0.01:
-        ok(f"empty-target / FP guard: specificity={m_fp['specificity']:.4f} (near 0, as expected)")
-    else:
-        fail(
-            f"empty-target / FP guard: specificity={m_fp['specificity']:.4f} "
-            f"should be ~0 when model predicts all-positive on all-negative target"
-        )
 
 except Exception as exc:
     fail("Metrics test failed", exc)
@@ -1256,7 +1243,7 @@ try:
         "dice":        0.70,
         "hd95":        5.0,
         "iou":         0.60,
-        "specificity": 0.95,
+        "precision":   0.95,
     }
     score_full = compute_composite_score(
         metrics_full, w_sensitivity=0.5, w_dice=0.3, w_hd95=0.2, hd95_scale=1.0
@@ -1375,7 +1362,7 @@ try:
 
     # Epoch A: HD95 is computed → cache it
     metrics_epoch_a = {"sensitivity": 0.75, "dice": 0.65, "hd95": 8.0,
-                       "iou": 0.50, "specificity": 0.92}
+                       "iou": 0.50, "precision": 0.92}
     cached_hd95 = metrics_epoch_a["hd95"]   # 8.0 mm
     score_metrics_a = dict(metrics_epoch_a)
     score_metrics_a["hd95"] = cached_hd95
@@ -1385,7 +1372,7 @@ try:
 
     # Epoch B: HD95 is NOT re-computed; use cached value from epoch A
     metrics_epoch_b = {"sensitivity": 0.76, "dice": 0.66, "hd95": float("nan"),
-                       "iou": 0.51, "specificity": 0.93}
+                       "iou": 0.51, "precision": 0.93}
     score_metrics_b_cached = dict(metrics_epoch_b)
     score_metrics_b_cached["hd95"] = cached_hd95   # inject cached value
     score_b_cached = compute_composite_score(
@@ -1546,7 +1533,7 @@ try:
         )
 
     # Other metrics must still be finite
-    for name in ("dice", "iou", "sensitivity", "specificity"):
+    for name in ("dice", "iou", "sensitivity", "precision"):
         if not _math_hd.isnan(m_no_hd95[name]):
             ok(f"compute_hd95=False: {name}={m_no_hd95[name]:.4f} (finite, as expected)")
         else:

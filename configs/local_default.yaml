@@ -41,6 +41,7 @@ sw_batch_size: 2
 val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
 val_compute_hd95_every: 0          # 0 = skip HD95 during training-time validation
 val_every: 1                        # run validation every N epochs (also always runs on the final epoch)
+val_start_epoch: 1                  # skip validation entirely before this epoch (1 = no skip)
 
 # Training speed optimizations
 use_amp: true                     # automatic mixed precision (see amp_dtype below)

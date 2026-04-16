@@ -108,7 +108,7 @@ export PYTHONPATH=$(pwd)
 |---|---|
 | **OS** | KVM virtual machine |
 | **CPU** | 6 vCPU (Skylake) |
-| **RAM** | 80 GB |
+| **RAM** | 150 GB |
 | **Storage** | 128 GB QEMU virtual disk |
 | **GPU** | NVIDIA TITAN V — Volta (sm_70), 12 GB VRAM |
 | **AMP** | `default.yaml` — `amp_dtype: fp16` |

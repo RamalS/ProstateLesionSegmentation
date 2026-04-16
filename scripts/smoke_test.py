@@ -1080,6 +1080,54 @@ else:
         else:
             fail(f"Unexpected val_transforms output type: {type(result)}")
 
+        # Run train transform on a dummy 3-channel volume (3 modalities: T2w, ADC, HBV).
+        # Use a volume larger than the patch so RandCropByPosNegLabeld has room to crop.
+        # The label has a small foreground region so positive-patch sampling can fire.
+        dummy_vol: dict = {
+            "image": torch.randn(3, 32, 96, 96),
+            "label": torch.zeros(1, 32, 96, 96),
+        }
+        dummy_vol["label"][0, 10:20, 32:64, 32:64] = 1.0  # synthetic lesion region
+
+        train_result = train_tfm(dummy_vol)
+
+        # RandCropByPosNegLabeld with num_samples=1 returns a list[dict]
+        if isinstance(train_result, list):
+            train_result = train_result[0]
+
+        assert isinstance(train_result, dict), (
+            f"train_transforms returned unexpected type: {type(train_result)}"
+        )
+        assert "image" in train_result and "label" in train_result, (
+            "train_transforms output missing 'image' or 'label' key"
+        )
+        img_out = train_result["image"]
+        lbl_out = train_result["label"]
+        assert img_out.shape == (3, 20, 64, 64), (
+            f"train_transforms image shape mismatch: {tuple(img_out.shape)}"
+        )
+        assert lbl_out.shape == (1, 20, 64, 64), (
+            f"train_transforms label shape mismatch: {tuple(lbl_out.shape)}"
+        )
+        ok(
+            f"train_transforms forward pass OK — "
+            f"image {tuple(img_out.shape)}, label {tuple(lbl_out.shape)}"
+        )
+
+        # Verify new MRI-specific augmentations are present in the pipeline
+        transform_names = [type(t).__name__ for t in train_tfm.transforms]
+        for expected in (
+            "Rand3DElasticd",
+            "RandAdjustContrastd",
+            "RandBiasFieldd",
+            "RandGibbsNoised",
+            "RandCoarseDropoutd",
+        ):
+            if expected in transform_names:
+                ok(f"{expected} present in train pipeline")
+            else:
+                fail(f"{expected} missing from train pipeline")
+
     except Exception as exc:
         fail("Transforms test failed", exc)
 

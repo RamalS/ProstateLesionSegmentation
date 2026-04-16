@@ -7,14 +7,19 @@ the image and the label; intensity transforms are applied to the image only.
 
 Training pipeline
 -----------------
-1. RandCropByPosNegLabeld  — balanced patch sampling (favours lesion voxels)
-2. RandFlipd (x3)          — independent left-right, anterior-posterior, superior-inferior flips
-3. RandRotate90d           — random 90° rotations in the axial plane
-4. RandAffined             — small random rotations + scale changes
-5. RandGaussianNoised      — additive Gaussian noise
-6. RandGaussianSmoothd     — Gaussian blur
-7. RandScaleIntensityd     — multiplicative intensity scaling
-8. RandShiftIntensityd     — additive intensity shift
+1.  RandCropByPosNegLabeld  — balanced patch sampling (favours lesion voxels)
+2.  RandFlipd (x3)          — independent left-right, anterior-posterior, superior-inferior flips
+3.  RandRotate90d           — random 90° rotations in the axial plane
+4.  RandAffined             — random rotations (±15°) + scale changes (±10%)
+5.  Rand3DElasticd          — elastic tissue deformation (simulates prostate shape variability)
+6.  RandGaussianNoised      — additive Gaussian noise
+7.  RandGaussianSmoothd     — Gaussian blur
+8.  RandScaleIntensityd     — multiplicative intensity scaling
+9.  RandShiftIntensityd     — additive intensity shift
+10. RandAdjustContrastd     — gamma contrast adjustment (simulates scanner/protocol variability)
+11. RandBiasFieldd          — MRI B1 field inhomogeneity per channel
+12. RandGibbsNoised         — MRI ringing/truncation artifact
+13. RandCoarseDropoutd      — random patch dropout (regularization)
 
 Validation pipeline
 -------------------
@@ -94,9 +99,21 @@ def get_train_transforms(
             T.RandAffined(
                 keys=_BOTH,
                 mode=("bilinear", "nearest"),  # bilinear for image, NN for label
-                prob=0.3,
-                rotate_range=(0.15, 0.15, 0.15),  # ±~8.6° per axis
+                prob=0.5,
+                rotate_range=(0.26, 0.26, 0.26),  # ±~15° per axis (was ±8.6°)
                 scale_range=(0.1, 0.1, 0.1),      # ±10% isotropic scaling
+                padding_mode="border",
+            ),
+            # Elastic deformation: simulates prostate shape changes due to
+            # rectal filling, patient positioning, and breathing motion.
+            # sigma controls smoothness of the deformation field; magnitude
+            # controls displacement amplitude in voxels.
+            T.Rand3DElasticd(
+                keys=_BOTH,
+                mode=("bilinear", "nearest"),
+                prob=0.2,
+                sigma_range=(5, 7),
+                magnitude_range=(50, 150),
                 padding_mode="border",
             ),
             # ----------------------------------------------------------
@@ -104,13 +121,13 @@ def get_train_transforms(
             # ----------------------------------------------------------
             T.RandGaussianNoised(
                 keys=[IMAGE_KEY],
-                prob=0.2,
+                prob=0.3,
                 mean=0.0,
                 std=0.1,
             ),
             T.RandGaussianSmoothd(
                 keys=[IMAGE_KEY],
-                prob=0.2,
+                prob=0.3,
                 sigma_x=(0.5, 1.5),
                 sigma_y=(0.5, 1.5),
                 sigma_z=(0.5, 1.5),
@@ -118,12 +135,47 @@ def get_train_transforms(
             T.RandScaleIntensityd(
                 keys=[IMAGE_KEY],
                 factors=0.2,   # scales by U(1-0.2, 1+0.2)
-                prob=0.3,
+                prob=0.4,
             ),
             T.RandShiftIntensityd(
                 keys=[IMAGE_KEY],
                 offsets=0.2,   # shifts by U(-0.2, 0.2)
+                prob=0.4,
+            ),
+            # Gamma contrast: simulates intensity response differences between
+            # scanner vendors (Siemens vs Philips) and acquisition protocols
+            # across the 4 PI-CAI acquisition centers.
+            T.RandAdjustContrastd(
+                keys=[IMAGE_KEY],
                 prob=0.3,
+                gamma=(0.7, 1.5),
+            ),
+            # MRI B1 field inhomogeneity: simulates spatially varying receive
+            # coil sensitivity.  MONAI applies the bias field independently
+            # per channel, which is physically correct — each modality (T2w,
+            # ADC, HBV) has its own coil geometry and field profile.
+            T.RandBiasFieldd(
+                keys=[IMAGE_KEY],
+                prob=0.3,
+                coeff_range=(0.0, 0.3),
+            ),
+            # Gibbs/ringing artifact: simulates MRI k-space truncation, which
+            # produces ringing at high-contrast tissue boundaries.  Common in
+            # T2w and high-b-value DWI acquisitions.
+            T.RandGibbsNoised(
+                keys=[IMAGE_KEY],
+                prob=0.2,
+                alpha=(0.0, 0.5),
+            ),
+            # Coarse dropout: randomly zeros rectangular 3-D regions, forcing
+            # the model to rely on broader spatial context rather than
+            # memorising local intensity patterns.  Acts as a regularizer.
+            T.RandCoarseDropoutd(
+                keys=[IMAGE_KEY],
+                holes=3,
+                spatial_size=(4, 16, 16),
+                fill_value=0.0,
+                prob=0.2,
             ),
         ]
     )

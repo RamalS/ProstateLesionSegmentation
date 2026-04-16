@@ -306,6 +306,12 @@ def main() -> None:
         help="Path to a .pt checkpoint to resume training from "
              "(overrides resume_checkpoint in config)",
     )
+    parser.add_argument(
+        "--learnability", type=int, nargs="?", const=10, default=None, metavar="N",
+        help="Learnability test: randomly sample N cases (default 10) and use them "
+             "for both training and validation (no split). "
+             "Useful to verify the model can overfit a small subset.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -363,13 +369,25 @@ def main() -> None:
             "Check that your data is mounted correctly (./data -> /data)."
         )
 
-    train_cases, val_cases = stratified_train_val_split(
-        all_cases,
-        val_fraction=cfg.get("val_fraction", 0.2),
-        seed=seed,
-        cache_path=Path(cfg["base_output_dir"]) / "lesion_flags.json",
-    )
-    logger.info("Split: %d train | %d val", len(train_cases), len(val_cases))
+    if args.learnability is not None:
+        n = max(1, args.learnability)
+        n = min(n, len(all_cases))
+        rng = random.Random(seed)
+        subset = rng.sample(all_cases, n)
+        train_cases = subset
+        val_cases = subset
+        logger.info(
+            "[LEARNABILITY MODE] Using %d randomly sampled cases for both train and val (no split).",
+            n,
+        )
+    else:
+        train_cases, val_cases = stratified_train_val_split(
+            all_cases,
+            val_fraction=cfg.get("val_fraction", 0.2),
+            seed=seed,
+            cache_path=Path(cfg["base_output_dir"]) / "lesion_flags.json",
+        )
+        logger.info("Split: %d train | %d val", len(train_cases), len(val_cases))
 
     train_ds = PiCaiDataset(
         images_dir=cfg["images_dir"],
@@ -571,6 +589,7 @@ def main() -> None:
     epochs = cfg["epochs"]
     keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
     val_every: int = max(1, cfg.get("val_every", 1))
+    val_start_epoch: int = max(1, int(cfg.get("val_start_epoch", 1)))
 
     # AMP dtype: "fp16" for Volta/Turing (TITAN V, V100), "bf16" for Ampere+/Blackwell.
     # FP16 requires GradScaler (limited exponent range); BF16 does not.
@@ -660,6 +679,11 @@ def main() -> None:
             )
     else:
         logger.info("Early stopping: disabled")
+    if val_start_epoch > 1:
+        logger.info(
+            "Validation deferred until epoch %d (val_start_epoch)",
+            val_start_epoch,
+        )
 
     send_ntfy(
         cfg,
@@ -740,7 +764,7 @@ def main() -> None:
             _log_cuda_memory(f"Epoch {epoch} after train", device)
 
         # ---- Validate ----
-        run_val = (epoch % val_every == 0) or (epoch == epochs)
+        run_val = (epoch >= val_start_epoch) and ((epoch % val_every == 0) or (epoch == epochs))
         if run_val:
             # Free leftover train grads/cache before validation.
             optimizer.zero_grad(set_to_none=True)

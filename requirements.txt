@@ -1,5 +1,6 @@
 torch
 torchvision
+einops
 torchaudio
 tensorboard
 setuptools<80

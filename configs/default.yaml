@@ -22,13 +22,22 @@ num_samples: 1                     # patches extracted per volume per __getitem_
                                    # effective batch size = batch_size × num_samples
 
 # Model
-model: attention_unet3d            # options: unet3d, attention_unet3d
+model: attention_unet3d            # options: unet3d, attention_unet3d, deconver
 use_t2w: true                      # include T2w channel
 use_adc: true                      # include ADC channel — most discriminative for csPCa
 use_hbv: true                      # include HBV channel — complementary DWI information
 out_channels: 1                    # binary segmentation
-features: [32, 64, 128, 256]       # encoder feature map sizes
+features: [32, 64, 128, 256]       # encoder feature map sizes (unet3d / attention_unet3d only)
 deep_supervision: true             # auxiliary losses at each decoder level (nnU-Net style)
+
+# Deconver-specific hyperparameters (used only when model: deconver)
+# Defaults match the 3-D ISLES'22 configuration from the paper (arXiv:2504.00302).
+deconver_encoder_depth: [1, 1, 1, 1]        # number of Deconver blocks per encoder stage
+deconver_encoder_width: [64, 128, 256, 512] # feature channels per encoder stage
+deconver_strides: [1, 2, 2, 2]              # stride per stage (1 = no downsample at stem)
+deconver_kernel_size: [3, 3, 3]             # NDC 3-D kernel size
+deconver_groups: -1                          # NDC groups: -1 = one group per channel
+deconver_ndc_ratio: 4                        # NDC channel expansion ratio (R = E/C)
 
 # Loss
 # loss_fn: "tversky_bce" uses TverskyBCELoss (penalises FN > FP via alpha < beta).
@@ -57,7 +66,7 @@ sw_batch_size: 40                  # number of patches processed per SW step
 val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
 val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
 val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
-val_start_epoch: 10                # skip validation entirely before this epoch (saves time during early training)
+val_start_epoch: 100               # skip validation entirely before this epoch (saves time during early training)
 
 # Training speed optimizations
 use_amp: true                      # automatic mixed precision (see amp_dtype below)

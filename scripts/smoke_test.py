@@ -5,9 +5,10 @@ What this tests (no real data required):
   1. PyTorch + CUDA availability
   2. Optional dependency imports (SimpleITK, MONAI, nibabel, scipy)
   3. UNet3D: instantiation, parameter count, forward pass shape
-  3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
-  3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
-  3d. Deep supervision: list output, auxiliary shapes, build_model DS, DeepSupervisionWrapper
+   3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
+   3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
+   3d. Deep supervision: list output, auxiliary shapes, build_model DS, DeepSupervisionWrapper
+   3e. Deconver: instantiation, forward pass, build_model factory, deep supervision (num_deep_supr)
   4. DiceBCELoss: forward pass with random logits/targets
   4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
   4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
@@ -468,6 +469,95 @@ try:
 
 except Exception as exc:
     fail("Deep supervision test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 3e. Deconver: instantiation, forward pass, build_model factory,
+#     deep supervision via num_deep_supr
+# ---------------------------------------------------------------------------
+section("3e. Deconver (NDC-based U-Net) + build_model factory")
+
+try:
+    from models import build_model as _bm_dconv
+
+    _all_flags_dconv = {"use_t2w": True, "use_adc": True, "use_hbv": True}
+
+    # --- 3e-i. build_model factory (no deep supervision) ----------------------
+    _dconv_cfg_base: dict = {
+        "model": "deconver",
+        **_all_flags_dconv,
+        "out_channels": 1,
+        # Slim widths to keep memory low in the smoke test
+        "deconver_encoder_depth": [1, 1, 1],
+        "deconver_encoder_width": [16, 32, 64],
+        "deconver_strides": [1, 2, 2],
+        "deconver_kernel_size": [3, 3, 3],
+        "deconver_groups": -1,
+        "deconver_ndc_ratio": 2,
+        "deep_supervision": False,
+    }
+
+    dconv_model = _bm_dconv(_dconv_cfg_base).to(DEVICE)
+    n_dconv = sum(p.numel() for p in dconv_model.parameters())
+    ok(f"build_model('deconver') → {type(dconv_model).__name__} — {n_dconv:,} parameters")
+
+    # --- 3e-ii. Forward pass: output shape must match input spatial dims -------
+    B, C, D, H, W = 1, 3, 20, 32, 32
+    _dconv_inp = torch.randn(B, C, D, H, W, device=DEVICE)
+    with torch.no_grad():
+        _dconv_out = dconv_model(_dconv_inp)
+
+    _dconv_expected = (B, 1, D, H, W)
+    if isinstance(_dconv_out, torch.Tensor) and _dconv_out.shape == _dconv_expected:
+        ok(f"Deconver forward pass OK — output shape {tuple(_dconv_out.shape)}")
+    else:
+        _got = tuple(_dconv_out.shape) if isinstance(_dconv_out, torch.Tensor) else type(_dconv_out).__name__
+        fail(f"Deconver forward: got {_got}, expected {_dconv_expected}")
+
+    # --- 3e-iii. Deep supervision (num_deep_supr) returns a list ---------------
+    _dconv_cfg_ds = dict(_dconv_cfg_base)
+    _dconv_cfg_ds["deep_supervision"] = True
+
+    dconv_ds_model = _bm_dconv(_dconv_cfg_ds).to(DEVICE)
+    with torch.no_grad():
+        _dconv_ds_out = dconv_ds_model(_dconv_inp)
+
+    if isinstance(_dconv_ds_out, (list, tuple)) and len(_dconv_ds_out) > 0:
+        ok(
+            f"Deconver DS=True → {type(_dconv_ds_out).__name__} of "
+            f"{len(_dconv_ds_out)} tensors"
+        )
+        # The first (finest) output must match the input spatial resolution
+        _dconv_ds_main = _dconv_ds_out[0]
+        if _dconv_ds_main.shape == _dconv_expected:
+            ok(f"Deconver DS output[0] full-res shape {tuple(_dconv_ds_main.shape)}")
+        else:
+            fail(
+                f"Deconver DS output[0] shape {tuple(_dconv_ds_main.shape)} "
+                f"!= expected {_dconv_expected}"
+            )
+    elif isinstance(_dconv_ds_out, torch.Tensor) and _dconv_ds_out.shape == _dconv_expected:
+        # Some Deconver builds return a plain tensor even when num_deep_supr is set
+        ok(
+            f"Deconver DS=True → plain Tensor {tuple(_dconv_ds_out.shape)} "
+            f"(built-in DS may require num_deep_supr > 1 stages)"
+        )
+    else:
+        _got_ds = (
+            tuple(_dconv_ds_out.shape)
+            if isinstance(_dconv_ds_out, torch.Tensor)
+            else f"{type(_dconv_ds_out).__name__}(len={len(_dconv_ds_out)})"
+        )
+        fail(f"Deconver DS=True unexpected output: {_got_ds}")
+
+    # --- 3e-iv. Unknown model still raises ValueError -------------------------
+    try:
+        _bm_dconv({"model": "deconver_nonexistent"})
+        fail("build_model should raise ValueError for unknown model name")
+    except ValueError:
+        ok("build_model raises ValueError for unknown model name (regression guard)")
+
+except Exception as exc:
+    fail("Deconver test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 4. DiceBCELoss

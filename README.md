@@ -206,6 +206,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 |---|---|
 | Train | `PYTHONPATH=. python src/train.py --config configs/local_default.yaml` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
+| Estimate resources | `PYTHONPATH=. python scripts/estimate_resources.py --config configs/default.yaml` |
 | TensorBoard | `tensorboard --logdir outputs/runs --port 6006` |
 
 ---

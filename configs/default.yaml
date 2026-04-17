@@ -16,13 +16,13 @@ target_spacing: [3.0, 0.5, 0.5]   # (z, y, x) in mm — preserves T2w in-plane r
 val_fraction: 0.2
 
 # Patch sampling
-patch_size: [20, 128, 128]         # (D, H, W) in voxels
+patch_size: [16, 128, 128]         # (D, H, W) in voxels
 pos_fraction: 0.85                 # fraction of patches containing a lesion
 num_samples: 1                     # patches extracted per volume per __getitem__ call
                                    # effective batch size = batch_size × num_samples
 
 # Model
-model: attention_unet3d            # options: unet3d, attention_unet3d, deconver
+model: deconver                    # options: unet3d, attention_unet3d, deconver
 use_t2w: true                      # include T2w channel
 use_adc: true                      # include ADC channel — most discriminative for csPCa
 use_hbv: true                      # include HBV channel — complementary DWI information

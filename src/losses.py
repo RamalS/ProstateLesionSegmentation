@@ -140,11 +140,12 @@ class DiceBCELoss(nn.Module):
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
         d_loss = dice_loss(logits, targets)
-        # Cast _pw to match logits device and dtype (important for BF16 autocast and
-        # cases where the criterion is not explicitly moved to the target device).
-        pw: Tensor = self._pw.to(device=logits.device, dtype=logits.dtype)  # type: ignore[union-attr]
+        # Always compute BCE in FP32: F.binary_cross_entropy_with_logits is NOT
+        # auto-upcast by torch.autocast, so FP16 logits summed over ~327 K voxels
+        # with pos_weight=10 overflows FP16 max (~65 504) → inf/NaN loss.
+        pw: Tensor = self._pw.to(device=logits.device, dtype=torch.float32)  # type: ignore[union-attr]
         b_loss = F.binary_cross_entropy_with_logits(
-            logits, targets, pos_weight=pw
+            logits.float(), targets.float(), pos_weight=pw
         )
         return self.dice_weight * d_loss + self.bce_weight * b_loss
 
@@ -282,9 +283,12 @@ class TverskyBCELoss(nn.Module):
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
         t_loss = tversky_loss(logits, targets, self.alpha, self.beta)
-        pw: Tensor = self._pw.to(device=logits.device, dtype=logits.dtype)  # type: ignore[union-attr]
+        # Always compute BCE in FP32: F.binary_cross_entropy_with_logits is NOT
+        # auto-upcast by torch.autocast, so FP16 logits summed over ~327 K voxels
+        # with pos_weight=10 overflows FP16 max (~65 504) → inf/NaN loss.
+        pw: Tensor = self._pw.to(device=logits.device, dtype=torch.float32)  # type: ignore[union-attr]
         b_loss = F.binary_cross_entropy_with_logits(
-            logits, targets, pos_weight=pw
+            logits.float(), targets.float(), pos_weight=pw
         )
         return self.tversky_weight * t_loss + self.bce_weight * b_loss
 
@@ -362,7 +366,7 @@ class DeepSupervisionWrapper(nn.Module):
             return self.base_criterion(outputs, targets)
 
         total_loss: Tensor = torch.zeros(
-            1, device=targets.device, dtype=targets.dtype
+            1, device=targets.device, dtype=torch.float32
         ).squeeze()
 
         for logits, weight in zip(outputs, self.weights):

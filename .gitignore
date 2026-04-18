@@ -2,3 +2,12 @@ outputs/
 cache/
 data/
 .docker_build_hash
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OpenCode
+.opencode/

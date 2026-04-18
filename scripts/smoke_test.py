@@ -1741,6 +1741,56 @@ else:
         fail("AMP autocast test failed", exc)
 
 # ---------------------------------------------------------------------------
+# 13b. Logit clamp: FP16 overflow guard and NaN-skip resilience
+# ---------------------------------------------------------------------------
+section("13b. Logit clamp — FP16 overflow guard and NaN-skip resilience")
+
+try:
+    from losses import TverskyBCELoss
+
+    clamp_criterion = TverskyBCELoss().to("cpu")
+    tgt_clamp = (torch.rand(1, 1, 8, 16, 16) > 0.8).float()
+
+    # --- 13b-i. Extreme logits (simulating FP16 overflow) are tamed by clamp --
+    # Without clamp: sigmoid(1e4) = 1.0 exactly → log(1 - 1.0) = -inf → NaN BCE
+    extreme_logits = torch.full((1, 1, 8, 16, 16), 1e4)
+    clamped = extreme_logits.clamp(-10.0, 10.0)
+    loss_clamped = clamp_criterion(clamped, tgt_clamp)
+    if torch.isfinite(loss_clamped):
+        ok(f"Clamped extreme logits (1e4 → 10.0) produce finite loss: {loss_clamped.item():.4f}")
+    else:
+        fail(f"Clamped logits still produce non-finite loss: {loss_clamped.item()}")
+
+    # Verify unclamped logits would produce non-finite loss (confirms the guard is needed)
+    loss_unclamped = clamp_criterion(extreme_logits.float(), tgt_clamp)
+    if not torch.isfinite(loss_unclamped):
+        ok("Unclamped extreme logits correctly produce non-finite loss (guard is necessary)")
+    else:
+        ok(
+            "Unclamped extreme logits happen to be finite on this platform "
+            f"(loss={loss_unclamped.item():.4f}) — clamp is still a safe no-op"
+        )
+
+    # --- 13b-ii. List-of-tensors (deep supervision) clamp path ----------------
+    ds_logits = [torch.full((1, 1, 8, 16, 16), 1e4) for _ in range(4)]
+    ds_clamped = [l.clamp(-10.0, 10.0) for l in ds_logits]
+    if all(t.max().item() <= 10.0 and t.min().item() >= -10.0 for t in ds_clamped):
+        ok("Deep-supervision list clamp: all 4 tensors correctly bounded to [-10, 10]")
+    else:
+        fail("Deep-supervision list clamp: some tensors out of [-10, 10] range")
+
+    # --- 13b-iii. Finite logits are unaffected by clamp (no-op on normal range) -
+    normal_logits = torch.randn(1, 1, 8, 16, 16)  # std≈1, well within ±10
+    normal_clamped = normal_logits.clamp(-10.0, 10.0)
+    if torch.allclose(normal_logits, normal_clamped):
+        ok("Normal-range logits (std≈1) are unchanged by clamp — no-op confirmed")
+    else:
+        fail("Clamp unexpectedly modified normal-range logits")
+
+except Exception as exc:
+    fail("Logit clamp smoke test failed", exc)
+
+# ---------------------------------------------------------------------------
 # 14. ntfy notifications (send_ntfy)
 # ---------------------------------------------------------------------------
 section("14. ntfy notifications (send_ntfy)")

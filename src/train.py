@@ -698,6 +698,10 @@ def main() -> None:
         priority="default",
     )
 
+    # Maximum consecutive NaN batches tolerated before aborting training.
+    _MAX_NAN_BATCHES: int = 10
+    nan_batch_count: int = 0
+
     for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs", unit="epoch"):
 
         # ---- Train ----
@@ -712,19 +716,35 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             with amp_ctx:
                 logits = model(images)
+                # Clamp to ±10 to prevent FP16 sigmoid overflow (sigmoid(±10) ≈
+                # 0.99995 / 0.00005 — sufficient confidence range for segmentation).
+                # Under BF16 or FP32 this is a no-op in practice.
+                if isinstance(logits, list):
+                    logits = [l.clamp(-10.0, 10.0) for l in logits]
+                else:
+                    logits = logits.clamp(-10.0, 10.0)
                 loss = criterion(logits, labels)
 
             if not torch.isfinite(loss):
                 loss_value = float(loss.detach().cpu().item())
-                logger.error(
-                    "Non-finite loss at epoch %d, batch %d: %s",
+                nan_batch_count += 1
+                logger.warning(
+                    "Non-finite loss at epoch %d, batch %d: %s — skipping"
+                    " (consecutive NaN skips: %d/%d)",
                     epoch,
                     step,
                     loss_value,
+                    nan_batch_count,
+                    _MAX_NAN_BATCHES,
                 )
-                raise FloatingPointError(
-                    f"Non-finite loss at epoch={epoch}, batch={step}: {loss_value}"
-                )
+                optimizer.zero_grad(set_to_none=True)
+                if nan_batch_count >= _MAX_NAN_BATCHES:
+                    raise FloatingPointError(
+                        f"Non-finite loss for {_MAX_NAN_BATCHES} consecutive"
+                        f" batches (epoch={epoch}, batch={step}): {loss_value}"
+                    )
+                continue
+            nan_batch_count = 0
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)

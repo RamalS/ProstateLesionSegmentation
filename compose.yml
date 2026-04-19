@@ -1,5 +1,6 @@
 services:
   trainer:
+    image: ramal/prostate-lesion-segmentation:latest
     build:
       context: .
       network: host

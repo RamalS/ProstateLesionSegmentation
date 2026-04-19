@@ -10,16 +10,24 @@ checkpoints and training runs.
 Usage
 -----
 python scripts/evaluate_checkpoint.py \\
-    --checkpoint outputs/runs/<run>/checkpoints/best.pt \\
+    --run outputs/runs/<run> \\
     [--images-dir data/test_images] \\
     [--labels-dir data/labels]
+
+The run directory must contain:
+  config.yaml       — the YAML config the model was trained with
+  checkpoints/      — one or more .pt checkpoint files
+
+An interactive arrow-key menu lets you select which checkpoint to evaluate.
+In non-interactive environments (no TTY) best.pt is selected automatically;
+if best.pt is absent the newest checkpoint by filename is used.
 
 Output
 ------
 - Per-case metrics table printed to stdout.
 - Aggregate metric summary printed to stdout.
-- eval_visualization.png (5 rows × 20 axial slices) saved next to the
-  checkpoint file, with semi-transparent colour overlays:
+- eval_visualization.png (5 rows × 20 axial slices) saved in the run dir next to the
+  selected checkpoint file, with semi-transparent colour overlays:
       Green  = ground truth only
       Red    = prediction only
       Yellow = overlap (both masks active)
@@ -28,6 +36,7 @@ Output
 from __future__ import annotations
 
 import argparse
+import curses
 import logging
 import math
 import sys
@@ -50,7 +59,7 @@ sys.path.insert(0, str(_SRC))
 from config import load_config  # noqa: E402
 from dataset import PiCaiDataset, discover_cases, stratified_train_val_split  # noqa: E402
 from metrics import compute_all_metrics  # noqa: E402
-from models import UNet3D  # noqa: E402
+from models import build_model  # noqa: E402
 from transforms import get_val_transforms  # noqa: E402
 from utils import load_checkpoint  # noqa: E402
 
@@ -301,6 +310,220 @@ def save_visualization(
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint selection
+# ---------------------------------------------------------------------------
+
+def _load_epoch(path: Path) -> str:
+    """
+    Read only the ``epoch`` scalar from a checkpoint file without loading
+    the full tensor state.  Returns the epoch as a string, or ``"?"`` on
+    any failure.
+
+    Parameters
+    ----------
+    path : Path
+        Absolute path to a ``.pt`` checkpoint file.
+
+    Returns
+    -------
+    str
+        Epoch number as a string (e.g. ``"139"``), or ``"?"`` if the key
+        is absent or the file cannot be read.
+    """
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        epoch = ckpt.get("epoch", "?")
+        return str(epoch)
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _build_checkpoint_list(ckpts_dir: Path) -> list[Path]:
+    """
+    Return all ``.pt`` files in *ckpts_dir* sorted for display:
+    ``best.pt`` pinned first, then remaining files in descending
+    lexicographic order (newest epoch filename first).
+
+    Parameters
+    ----------
+    ckpts_dir : Path
+        Directory that contains ``.pt`` checkpoint files.
+
+    Returns
+    -------
+    list[Path]
+        Sorted list of absolute checkpoint paths.  Empty list when no
+        ``.pt`` files are found.
+    """
+    all_pts = list(ckpts_dir.glob("*.pt"))
+    best    = [p for p in all_pts if p.name == "best.pt"]
+    others  = sorted(
+        [p for p in all_pts if p.name != "best.pt"],
+        key=lambda p: p.name,
+        reverse=True,   # descending: epoch_0139 before epoch_0138
+    )
+    return best + others
+
+
+def _format_size(n_bytes: int) -> str:
+    """
+    Format a byte count as a human-readable string (KB / MB).
+
+    Parameters
+    ----------
+    n_bytes : int
+        File size in bytes.
+
+    Returns
+    -------
+    str
+        Formatted string such as ``"123.4 MB"`` or ``"456.7 KB"``.
+    """
+    mb = n_bytes / (1024 * 1024)
+    if mb >= 1.0:
+        return f"{mb:.1f} MB"
+    return f"{n_bytes / 1024:.1f} KB"
+
+
+def select_checkpoint(ckpts_dir: Path) -> Path:
+    """
+    Interactively select a ``.pt`` checkpoint from *ckpts_dir* using a
+    ``curses`` arrow-key menu.
+
+    Each row in the menu shows:
+    ``filename     <size>   [epoch <n>]``
+
+    Controls
+    --------
+    ↑ / ↓          move selection up / down
+    Page Up / Down  jump 5 rows
+    Enter           confirm selection
+    q / Ctrl-C      abort (exits the process)
+
+    Non-TTY fallback
+    ----------------
+    When ``sys.stdin`` is not a TTY (e.g. piped input or Docker without
+    ``-it``), the menu is skipped: ``best.pt`` is returned automatically
+    if present, otherwise the first entry in the sorted list (newest
+    epoch).  A warning is logged in this case.
+
+    Parameters
+    ----------
+    ckpts_dir : Path
+        Directory containing ``.pt`` checkpoint files.
+
+    Returns
+    -------
+    Path
+        Absolute path to the selected checkpoint file.
+
+    Raises
+    ------
+    SystemExit
+        If no ``.pt`` files are found, or if the user quits the menu.
+    """
+    checkpoints = _build_checkpoint_list(ckpts_dir)
+    if not checkpoints:
+        logger.error("No .pt checkpoint files found in %s", ckpts_dir)
+        sys.exit(1)
+
+    # ------------------------------------------------------------------ #
+    # Non-interactive fallback
+    # ------------------------------------------------------------------ #
+    if not sys.stdin.isatty():
+        best_pts = [p for p in checkpoints if p.name == "best.pt"]
+        chosen   = best_pts[0] if best_pts else checkpoints[0]
+        logger.warning(
+            "Non-interactive environment detected — auto-selecting: %s",
+            chosen.name,
+        )
+        return chosen
+
+    # ------------------------------------------------------------------ #
+    # Pre-load epoch labels (done once before entering curses)
+    # ------------------------------------------------------------------ #
+    logger.info("Reading checkpoint metadata (%d files) …", len(checkpoints))
+    epochs: list[str] = [_load_epoch(p) for p in checkpoints]
+    sizes:  list[str] = [_format_size(p.stat().st_size) for p in checkpoints]
+
+    # Build display rows: pad filename and size columns for alignment
+    names      = [p.name for p in checkpoints]
+    name_w     = max(len(n) for n in names)
+    size_w     = max(len(s) for s in sizes)
+    rows: list[str] = [
+        f"{n:<{name_w}}   {s:>{size_w}}   [epoch {e}]"
+        for n, s, e in zip(names, sizes, epochs)
+    ]
+
+    # ------------------------------------------------------------------ #
+    # curses UI
+    # ------------------------------------------------------------------ #
+    selected_idx: int = 0
+
+    def _draw(stdscr: curses.window, idx: int) -> None:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+
+        title  = "Select checkpoint  (↑/↓  PgUp/PgDn  Enter to confirm  q to quit)"
+        border = "─" * min(len(title), max_x - 1)
+
+        stdscr.addstr(0, 0, title[:max_x - 1],  curses.A_BOLD)
+        stdscr.addstr(1, 0, border[:max_x - 1])
+
+        # Scrolling: keep selected row visible
+        visible = max_y - 3   # rows available for the list
+        start   = max(0, min(idx - visible // 2, len(rows) - visible))
+
+        for offset, (row_text, row_idx) in enumerate(
+            zip(rows[start : start + visible], range(start, start + visible))
+        ):
+            y = 2 + offset
+            if y >= max_y - 1:
+                break
+            prefix = "▶ " if row_idx == idx else "  "
+            line   = (prefix + row_text)[: max_x - 1]
+            attr   = curses.A_REVERSE if row_idx == idx else curses.A_NORMAL
+            stdscr.addstr(y, 0, line, attr)
+
+        stdscr.refresh()
+
+    def _run(stdscr: curses.window) -> int:
+        nonlocal selected_idx
+        curses.curs_set(0)
+        stdscr.keypad(True)
+
+        while True:
+            _draw(stdscr, selected_idx)
+            key = stdscr.getch()
+
+            if key in (curses.KEY_UP, ord("k")):
+                selected_idx = max(0, selected_idx - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected_idx = min(len(rows) - 1, selected_idx + 1)
+            elif key == curses.KEY_PPAGE:       # Page Up
+                selected_idx = max(0, selected_idx - 5)
+            elif key == curses.KEY_NPAGE:       # Page Down
+                selected_idx = min(len(rows) - 1, selected_idx + 5)
+            elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+                return selected_idx
+            elif key in (ord("q"), ord("Q"), 27):   # q / Esc
+                return -1
+
+        return selected_idx  # unreachable
+
+    try:
+        chosen_idx = curses.wrapper(_run)
+    except KeyboardInterrupt:
+        chosen_idx = -1
+
+    if chosen_idx == -1:
+        print("Aborted.")
+        sys.exit(0)
+
+    return checkpoints[chosen_idx]
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -314,10 +537,14 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--checkpoint",
+        "--run",
         required=True,
-        metavar="PATH",
-        help="Path to a .pt checkpoint file (e.g. outputs/runs/.../best.pt)",
+        metavar="DIR",
+        help=(
+            "Path to a training run directory "
+            "(e.g. /outputs/20260418_224246_deconver). "
+            "Must contain config.yaml and a checkpoints/ subdirectory."
+        ),
     )
     parser.add_argument(
         "--images-dir",
@@ -333,41 +560,52 @@ def main() -> None:
         metavar="DIR",
         help="Directory containing .nii.gz label masks",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        metavar="DEVICE",
+        help=(
+            "Override the compute device from config "
+            "(e.g. 'cpu', 'cuda', 'cuda:0'). "
+            "Useful when the GPU is not compatible with the installed PyTorch build."
+        ),
+    )
     args = parser.parse_args()
 
-    # ---- Validate checkpoint path -----------------------------------------------
-    ckpt_path = Path(args.checkpoint).resolve()
-    if not ckpt_path.exists():
-        logger.error("Checkpoint not found: %s", ckpt_path)
+    # ---- Validate run directory -------------------------------------------------
+    run_dir   = Path(args.run).resolve()
+    ckpts_dir = run_dir / "checkpoints"
+    cfg_path  = run_dir / "config.yaml"
+
+    if not run_dir.is_dir():
+        logger.error("Run directory not found: %s", run_dir)
+        sys.exit(1)
+    if not cfg_path.exists():
+        logger.error("config.yaml not found in run directory: %s", cfg_path)
+        sys.exit(1)
+    if not ckpts_dir.is_dir():
+        logger.error("checkpoints/ subdirectory not found in: %s", run_dir)
         sys.exit(1)
 
-    # ---- Auto-detect config ------------------------------------------------------
-    # Training saves config.yaml at <run_dir>/config.yaml.
-    # The checkpoint is at <run_dir>/checkpoints/<name>.pt, so run_dir is two levels up.
-    run_dir  = ckpt_path.parent.parent
-    cfg_path = run_dir / "config.yaml"
-    fallback = Path(__file__).parent.parent / "configs" / "local_default.yaml"
+    # ---- Load config ------------------------------------------------------------
+    cfg = load_config(str(cfg_path))
+    logger.info("Config loaded from %s", cfg_path)
 
-    if cfg_path.exists():
-        cfg = load_config(str(cfg_path))
-        logger.info("Config loaded from %s", cfg_path)
-    else:
-        cfg = load_config(str(fallback))
-        logger.warning(
-            "config.yaml not found at %s; falling back to %s",
-            cfg_path, fallback,
-        )
+    # ---- Select checkpoint interactively ----------------------------------------
+    ckpt_path = select_checkpoint(ckpts_dir)
+    logger.info("Selected checkpoint: %s", ckpt_path.name)
 
     # ---- Device -----------------------------------------------------------------
-    use_cuda = torch.cuda.is_available() and cfg.get("device", "cuda") == "cuda"
-    device   = torch.device("cuda" if use_cuda else "cpu")
+    if args.device:
+        device = torch.device(args.device)
+        logger.info("Device overridden via --device flag: %s", device)
+    else:
+        use_cuda = torch.cuda.is_available() and cfg.get("device", "cuda") == "cuda"
+        device   = torch.device("cuda" if use_cuda else "cpu")
 
     # ---- Model + checkpoint -----------------------------------------------------
-    model = UNet3D(
-        in_channels=cfg.get("in_channels", 3),
-        out_channels=cfg.get("out_channels", 1),
-        features=tuple(cfg.get("features", [32, 64, 128, 256])),
-    ).to(device)
+    model = build_model(cfg).to(device)
 
     ckpt          = load_checkpoint(ckpt_path, model, device=device)
     ckpt_epoch    = ckpt.get("epoch", "?")
@@ -445,6 +683,11 @@ def main() -> None:
         c["case_id"]: c.get("has_lesion", False) for c in test_cases
     }
 
+    # When deep supervision is active the model returns a list of tensors
+    # (finest → coarsest).  sliding_window_inference requires a callable
+    # that returns a single tensor, so we wrap accordingly.
+    _predictor = (lambda x: model(x)[0]) if cfg.get("deep_supervision") else model
+
     with torch.no_grad():
         for batch in tqdm(loader, desc="Inference", unit="vol"):
             images   = batch["image"].to(device)    # (1, 3, D, H, W)
@@ -455,7 +698,7 @@ def main() -> None:
                 inputs=images,
                 roi_size=patch_size,
                 sw_batch_size=sw_batch_size,
-                predictor=model,
+                predictor=_predictor,
                 overlap=sw_overlap,
             )   # (1, 1, D, H, W) — raw logits
 
@@ -527,7 +770,7 @@ def main() -> None:
 
     # ---- Visualization ----------------------------------------------------------
     _section("Visualization  (5 rows × 20 axial slices)")
-    vis_path = ckpt_path.parent / "eval_visualization.png"
+    vis_path = run_dir / "eval_visualization.png"
     save_visualization(vis_data, vis_path, n_cols=_N_VIS_COLS)
     print(
         "\n  Colour key:\n"

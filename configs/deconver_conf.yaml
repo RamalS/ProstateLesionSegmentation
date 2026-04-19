@@ -1,0 +1,116 @@
+experiment_name: deconver
+epochs: 300
+batch_size: 12
+learning_rate: 4.0e-4
+weight_decay: 1.0e-5
+num_workers: 5
+device: cuda
+base_output_dir: /outputs/runs
+random_seed: 42
+deterministic: false
+
+# Data
+images_dir: /data/images
+labels_dir: /data/labels
+target_spacing: [3.0, 0.5, 0.5]   # (z, y, x) in mm — preserves T2w in-plane res
+val_fraction: 0.2
+
+# Patch sampling
+patch_size: [16, 128, 128]         # (D, H, W) in voxels
+pos_fraction: 0.85                 # fraction of patches containing a lesion
+num_samples: 1                     # patches extracted per volume per __getitem__ call
+                                   # effective batch size = batch_size × num_samples
+
+# Model
+model: deconver                    # options: unet3d, attention_unet3d, deconver
+use_t2w: true                      # include T2w channel
+use_adc: true                      # include ADC channel — most discriminative for csPCa
+use_hbv: true                      # include HBV channel — complementary DWI information
+out_channels: 1                    # binary segmentation
+features: [32, 64, 128, 256]       # encoder feature map sizes (unet3d / attention_unet3d only)
+deep_supervision: true             # auxiliary losses at each decoder level (nnU-Net style)
+
+# Deconver-specific hyperparameters (used only when model: deconver)
+# Defaults match the 3-D ISLES'22 configuration from the paper (arXiv:2504.00302).
+deconver_encoder_depth: [1, 1, 1, 1]        # number of Deconver blocks per encoder stage
+deconver_encoder_width: [64, 128, 256, 512] # feature channels per encoder stage
+deconver_strides: [1, 2, 2, 2]              # stride per stage (1 = no downsample at stem)
+deconver_kernel_size: [3, 3, 3]             # NDC 3-D kernel size
+deconver_groups: -1                          # NDC groups: -1 = one group per channel
+deconver_ndc_ratio: 4                        # NDC channel expansion ratio (R = E/C)
+
+# Loss
+# loss_fn: "tversky_bce" uses TverskyBCELoss (penalises FN > FP via alpha < beta).
+# loss_fn: "dice_bce"    uses the original DiceBCELoss (FP = FN penalty).
+loss_fn: tversky_bce
+tversky_alpha: 0.3                 # FP penalty weight (lower → more FP-tolerant)
+tversky_beta: 0.7                  # FN penalty weight (higher → fewer missed lesions)
+dice_weight: 1.0                   # weight on Tversky/Dice term  (was 3.0)
+bce_weight: 1.0
+# Positive-voxel weight for the BCE term. Compensates for class imbalance.
+# At target_spacing [3.0, 0.5, 0.5] a typical prostate is ~80 k voxels;
+# lesions ≈ 1–2 % → background/foreground ratio ≈ 50–100:1.
+# Rule of thumb: (background voxels) / (lesion voxels). Start at 50 and
+# tune upward toward 100 if the model still predicts all-background.
+bce_pos_weight: 10.0               # was: 50.0
+
+# LR schedule
+# warmup_epochs > 0 inserts a linear warm-up phase before cosine annealing.
+# Helps BatchNorm layers stabilise before the full learning rate is applied,
+# reducing the risk of early collapse into the all-background local minimum.
+warmup_epochs: 10                  # linear warm-up from 10 % → 100 % of learning_rate
+
+# Validation (sliding window)
+sw_overlap: 0.50                   # overlap fraction for sliding window inference
+sw_batch_size: 20                  # number of patches processed per SW step
+val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
+val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
+val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
+val_start_epoch: 100               # skip validation entirely before this epoch (saves time during early training)
+
+# Training speed optimizations
+use_amp: true                      # automatic mixed precision (see amp_dtype below)
+amp_dtype: bf16                    # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
+                                   # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
+use_compile: false                 # torch.compile requires sm_75+ (Triton); TITAN V is sm_70
+cache_dataset: true                # cache preprocessed volumes in worker RAM after first epoch
+cache_rate: 1.0                    # fraction of dataset to cache (1.0 = all cases)
+
+# Checkpointing
+keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to keep (0 = keep all)
+# resume_checkpoint:               # uncomment and set path to resume from a checkpoint
+                                   # e.g. resume_checkpoint: /outputs/runs/my_run/checkpoints/epoch_0050.pt
+
+# Best checkpoint selection (composite score)
+# best.pt is saved when the composite score improves:
+#   score = w_sensitivity * sensitivity + w_dice * dice
+#           + w_hd95 * (1 / (1 + hd95 / hd95_scale))
+# Weights are normalised internally so they do not need to sum to 1.0.
+# hd95_scale (mm) sets the midpoint of the HD95 term: an HD95 equal to
+# hd95_scale produces a term of 0.5.  Use a value near the boundary between
+# "acceptable" and "poor" HD95 for your dataset (default: 10 mm).
+# HD95 is cached across epochs so the formula is consistent even when
+# val_compute_hd95_every > 1.
+best_ckpt_w_sensitivity: 0.4
+best_ckpt_w_dice: 0.6
+best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
+
+# Early stopping
+# Training halts when the composite score does not improve by more than
+# early_stopping_min_delta for early_stopping_patience consecutive val epochs.
+# With val_every=2, patience=30 → no improvement for 60 training epochs.
+# Set early_stopping_patience to 0 to disable early stopping.
+early_stopping_patience: 50        # was: 30
+early_stopping_min_delta: 0.001
+
+# ntfy push notifications
+# Leave ntfy_url or ntfy_topic empty (or omit them entirely) to disable all
+# notifications.  ntfy_notify_best_model can be set to false to suppress the
+# per-checkpoint notification while keeping the others.
+# Example:
+#   ntfy_url: https://ntfy.sh
+#   ntfy_topic: my-training-alerts
+ntfy_url: "https://ntfy.sh"
+ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"
+ntfy_notify_best_model: true

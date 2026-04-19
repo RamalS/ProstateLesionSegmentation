@@ -48,7 +48,7 @@ configs/
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 export PYTHONPATH=$(pwd)
 ```
@@ -74,7 +74,7 @@ PyTorch 2.6.0 + CUDA 12.6 wheels pinned in the Dockerfile.
 | Train (local) | `PYTHONPATH=. python src/train.py --config configs/local_default.yaml` |
 | TensorBoard | `tensorboard --logdir outputs/runs --port 6006` |
 | TensorBoard (Docker) | `docker compose run --rm --service-ports trainer tensorboard` |
-| Evaluate checkpoint | `docker compose run --rm trainer evaluate --checkpoint <path>` |
+| Evaluate checkpoint | `docker compose run --rm -it trainer evaluate --run <run_dir>` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
 ---

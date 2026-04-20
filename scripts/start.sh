@@ -10,7 +10,7 @@ for arg in "$@"; do
     --local)
       USE_LOCAL=true
       ;;
-    train|tensorboard|smoke-test|shell|evaluate|learnability)
+    train|tensorboard|smoke-test|shell|evaluate|learnability|download)
       MODE="$arg"
       ;;
     *)
@@ -56,6 +56,11 @@ case "$MODE" in
     cd "$PROJECT_ROOT"
     PYTHONPATH="$PROJECT_ROOT" python -m src.train --config "$CONFIG_PATH" --learnability "${EXTRA_ARGS[@]}"
     ;;
+  download)
+    echo "Downloading dataset..."
+    cd "$PROJECT_ROOT"
+    bash "$PROJECT_ROOT/scripts/download_dataset.sh" "${EXTRA_ARGS[@]}"
+    ;;
   shell)
     echo "Opening shell..."
     cd "$PROJECT_ROOT"
@@ -63,7 +68,7 @@ case "$MODE" in
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Available modes: train | tensorboard | smoke-test | evaluate | learnability | shell"
+    echo "Available modes: train | tensorboard | smoke-test | evaluate | learnability | download | shell"
     exit 1
     ;;
 esac

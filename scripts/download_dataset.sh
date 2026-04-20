@@ -1,31 +1,37 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# download_dataset.sh  —  Download PI-CAI public training images
+# download_dataset.sh - Download PI-CAI images and labels
 #
 # Usage:
-#   bash scripts/download_dataset.sh <N> [OPTIONS]
+#   bash scripts/download_dataset.sh [N] [OPTIONS]
 #
-#   <N>            Number of folds to download (1–5).
+#   [N]            Optional number of image folds to download (1-5).
 #                  Fold indices are 0-based, so N=2 downloads fold0 + fold1.
+#                  Default: 5
 #
 # Options:
-#   --out-dir DIR  Root data directory (default: ./data)
-#   --keep-zip     Keep .zip files after extraction (default: delete)
-#   --dry-run      Print what would be downloaded without doing anything
-#   -h, --help     Show this help message
+#   --out-dir DIR   Root data directory (default: ./data)
+#   --keep-zip      Keep image .zip files after extraction (default: delete)
+#   --no-images     Skip image download/extraction
+#   --no-labels     Skip label download
+#   --images-only   Alias for --no-labels
+#   --labels-only   Alias for --no-images
+#   --dry-run       Print what would be downloaded without doing anything
+#   -h, --help      Show this help message
 #
 # Examples:
-#   bash scripts/download_dataset.sh 1            # download fold0 only (~5 GB)
-#   bash scripts/download_dataset.sh 5            # download all folds (~25 GB)
-#   bash scripts/download_dataset.sh 2 --keep-zip # download fold0+1, keep zips
+#   bash scripts/download_dataset.sh
+#   bash scripts/download_dataset.sh 2
+#   bash scripts/download_dataset.sh --images-only
+#   docker compose run --rm trainer download
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Fixed test-set case IDs
 # These 10 cases are permanently reserved for evaluation and are always
-# segregated into data/test_images/ — they are never mixed into the training
-# pool.  Five have confirmed lesions (positive) and five are negative.
+# segregated into data/test_images/ - they are never mixed into the training
+# pool. Five have confirmed lesions (positive) and five are negative.
 # ---------------------------------------------------------------------------
 TEST_CASE_IDS=(
     11377_1001400   # positive
@@ -49,10 +55,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="$REPO_ROOT/data"
 KEEP_ZIP=false
 DRY_RUN=false
-N_FOLDS=""
+DOWNLOAD_IMAGES=true
+DOWNLOAD_LABELS=true
+N_FOLDS=5
 
-BASE_URL="https://zenodo.org/records/6624726/files"
+IMAGE_BASE_URL="https://zenodo.org/records/6624726/files"
 TOTAL_FOLDS=5
+
+LABELS_REPO="https://github.com/DIAGNijmegen/picai_labels"
+SPARSE_PATHS=(
+    "csPCa_lesion_delineations/human_expert/resampled"
+    "csPCa_lesion_delineations/human_expert/Pooch25"
+)
 
 # ---------------------------------------------------------------------------
 # Colours (only when stdout is a terminal)
@@ -70,20 +84,116 @@ warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# Helpers
 # ---------------------------------------------------------------------------
 print_help() {
-    sed -n '/^# Usage/,/^# ---/p' "$0" | grep '^#' | sed 's/^# \?//'
+    cat <<'EOF'
+Usage:
+  bash scripts/download_dataset.sh [N] [OPTIONS]
+
+  [N]            Optional number of image folds to download (1-5).
+                 Fold indices are 0-based, so N=2 downloads fold0 + fold1.
+                 Default: 5
+
+Options:
+  --out-dir DIR   Root data directory (default: ./data)
+  --keep-zip      Keep image .zip files after extraction (default: delete)
+  --no-images     Skip image download/extraction
+  --no-labels     Skip label download
+  --images-only   Alias for --no-labels
+  --labels-only   Alias for --no-images
+  --dry-run       Print what would be downloaded without doing anything
+  -h, --help      Show this help message
+
+Examples:
+  bash scripts/download_dataset.sh
+  bash scripts/download_dataset.sh 2
+  bash scripts/download_dataset.sh --images-only
+  docker compose run --rm trainer download
+EOF
     exit 0
 }
 
+require_python3() {
+    if ! command -v python3 &>/dev/null; then
+        error "python3 is required but not installed."
+        exit 1
+    fi
+}
+
+detect_downloader() {
+    if command -v wget &>/dev/null; then
+        DOWNLOADER="wget"
+    elif command -v curl &>/dev/null; then
+        DOWNLOADER="curl"
+    else
+        error "Neither wget nor curl is installed. Install one and retry."
+        exit 1
+    fi
+}
+
+check_git_sparse_checkout_support() {
+    local git_version
+    local git_major
+    local git_minor
+    local remainder
+
+    if ! command -v git &>/dev/null; then
+        error "git is required for label download but is not installed."
+        exit 1
+    fi
+
+    git_version="$(git --version | cut -d' ' -f3)"
+    git_major="${git_version%%.*}"
+    remainder="${git_version#*.}"
+    git_minor="${remainder%%.*}"
+
+    if (( git_major < 2 || ( git_major == 2 && git_minor < 25 ) )); then
+        error "git >= 2.25 required for sparse-checkout (found $git_version)."
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help)    print_help ;;
-        --out-dir)    OUT_DIR="$2"; shift 2 ;;
-        --keep-zip)   KEEP_ZIP=true; shift ;;
-        --dry-run)    DRY_RUN=true; shift ;;
-        [1-5])        N_FOLDS="$1"; shift ;;
+        -h|--help)
+            print_help
+            ;;
+        --out-dir)
+            if [[ $# -lt 2 ]]; then
+                error "--out-dir requires a directory argument."
+                exit 1
+            fi
+            OUT_DIR="$2"
+            shift 2
+            ;;
+        --keep-zip)
+            KEEP_ZIP=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --no-images|--labels-only)
+            DOWNLOAD_IMAGES=false
+            shift
+            ;;
+        --no-labels|--images-only)
+            DOWNLOAD_LABELS=false
+            shift
+            ;;
+        [1-5])
+            N_FOLDS="$1"
+            shift
+            ;;
+        [0-9]*)
+            error "Invalid fold count '$1'. N must be between 1 and $TOTAL_FOLDS."
+            exit 1
+            ;;
         *)
             error "Unknown argument: $1"
             echo "Run with --help for usage."
@@ -92,9 +202,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$N_FOLDS" ]]; then
-    error "Missing required argument: <N> (number of folds to download, 1–5)"
-    echo "  Example: bash scripts/download_dataset.sh 2"
+if [[ "$DOWNLOAD_IMAGES" == false && "$DOWNLOAD_LABELS" == false ]]; then
+    error "Nothing to do: both images and labels are disabled."
     exit 1
 fi
 
@@ -103,39 +212,35 @@ if (( N_FOLDS < 1 || N_FOLDS > TOTAL_FOLDS )); then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Check for downloader
-# ---------------------------------------------------------------------------
-if command -v wget &>/dev/null; then
-    DOWNLOADER="wget"
-elif command -v curl &>/dev/null; then
-    DOWNLOADER="curl"
-else
-    error "Neither wget nor curl is installed. Install one and retry."
-    exit 1
+if [[ "$DOWNLOAD_IMAGES" == false && "$N_FOLDS" != "5" ]]; then
+    warn "Ignoring fold count ($N_FOLDS) because image download is disabled."
 fi
 
-info "Using downloader: $DOWNLOADER"
-
-# ---------------------------------------------------------------------------
-# Prepare directories
-# ---------------------------------------------------------------------------
 IMAGES_DIR="$OUT_DIR/images"
 TEST_IMAGES_DIR="$OUT_DIR/test_images"
+LABELS_DIR="$OUT_DIR/labels"
+LABELS_CLONE_DIR="$OUT_DIR/.picai_labels_tmp"
+LABELS_DONE_MARKER="$OUT_DIR/.labels_done"
 
 if [[ "$DRY_RUN" == false ]]; then
-    mkdir -p "$IMAGES_DIR"
-    mkdir -p "$TEST_IMAGES_DIR"
+    require_python3
+    if [[ "$DOWNLOAD_IMAGES" == true ]]; then
+        detect_downloader
+        info "Using downloader: $DOWNLOADER"
+    fi
+    if [[ "$DOWNLOAD_LABELS" == true ]]; then
+        check_git_sparse_checkout_support
+    fi
 fi
 
 # ---------------------------------------------------------------------------
-# segregate_test_cases — move fixed test-set images into test_images/
+# segregate_test_cases - move fixed test-set images into test_images/
 #
-# Called (1) before the download loop to handle cases that were already
-# extracted into data/images/, and (2) after each fold extraction to
-# immediately relocate any newly extracted test-case files.
+# Called before image download to handle cases already extracted into
+# data/images/, and after each fold extraction to relocate any newly extracted
+# test-case files.
 #
-# Labels are NOT moved — they remain in data/labels/ and are looked up by
+# Labels are NOT moved - they remain in data/labels/ and are looked up by
 # case ID as usual.
 # ---------------------------------------------------------------------------
 segregate_test_cases() {
@@ -143,122 +248,114 @@ segregate_test_cases() {
 
     local moved=0
     local already=0
+    local case_id
+    local -a files=()
 
+    shopt -s nullglob
     for case_id in "${TEST_CASE_IDS[@]}"; do
-        # Already in the right place — nothing to do
-        local existing
-        existing=$(find "$TEST_IMAGES_DIR" -maxdepth 1 -name "${case_id}_*.mha" 2>/dev/null | wc -l)
-        if (( existing > 0 )); then
+        files=("$TEST_IMAGES_DIR/${case_id}_"*.mha)
+        if (( ${#files[@]} > 0 )); then
             (( already++ )) || true
             continue
         fi
 
-        # Present in the training pool — move them over
-        local files
-        files=$(ls "$IMAGES_DIR/${case_id}_"*.mha 2>/dev/null || true)
-        if [[ -n "$files" ]]; then
-            mv $files "$TEST_IMAGES_DIR/"
-            info "Test case $case_id  →  test_images/  (moved ${existing:-$(echo "$files" | wc -w)} files)"
+        files=("$IMAGES_DIR/${case_id}_"*.mha)
+        if (( ${#files[@]} > 0 )); then
+            mv "${files[@]}" "$TEST_IMAGES_DIR/"
+            info "Test case $case_id -> test_images/ (moved ${#files[@]} files)"
             (( moved++ )) || true
         fi
     done
+    shopt -u nullglob
 
     if (( moved > 0 || already > 0 )); then
         success "Test-set segregation: $moved case(s) moved, $already already in test_images/"
     fi
 }
 
-# Run immediately so any cases already present in data/images/ are moved
-# before the download loop (or before training accidentally picks them up).
-segregate_test_cases
+download_images() {
+    local n_downloaded=0
+    local n_cached=0
+    local i
+    local fold_name
+    local zip_name
+    local url
+    local zip_path
+    local fold_marker
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-echo ""
-echo -e "${BOLD}PI-CAI Dataset Download${RESET}"
-echo "  Folds to download : fold0 – fold$((N_FOLDS - 1))  ($N_FOLDS of $TOTAL_FOLDS)"
-echo "  Output directory  : $IMAGES_DIR"
-echo "  Keep zip files    : $KEEP_ZIP"
-echo "  Dry run           : $DRY_RUN"
-echo ""
-
-# ---------------------------------------------------------------------------
-# Download + extract loop
-# ---------------------------------------------------------------------------
-n_downloaded=0
-n_cached=0
-
-for (( i=0; i<N_FOLDS; i++ )); do
-    FOLD_NAME="picai_public_images_fold${i}"
-    ZIP_NAME="${FOLD_NAME}.zip"
-    URL="${BASE_URL}/${ZIP_NAME}?download=1"
-    ZIP_PATH="$OUT_DIR/$ZIP_NAME"
-    FOLD_MARKER="$OUT_DIR/.${FOLD_NAME}_done"
-
-    echo -e "${BOLD}──────────────────────────────────────────${RESET}"
-    info "Fold $((i+1))/$N_FOLDS  (fold${i})  →  $ZIP_NAME"
-
-    # Skip if already fully extracted
-    if [[ -f "$FOLD_MARKER" ]]; then
-        success "fold${i} already downloaded and extracted — skipping."
-        (( n_cached++ )) || true
-        continue
+    if [[ "$DRY_RUN" == false ]]; then
+        mkdir -p "$IMAGES_DIR"
+        mkdir -p "$TEST_IMAGES_DIR"
     fi
 
-    if [[ "$DRY_RUN" == true ]]; then
-        info "[dry-run] Would download: $URL"
-        info "[dry-run] Would extract to: $IMAGES_DIR"
-        continue
-    fi
+    segregate_test_cases
 
-    # ---- Download ----
-    info "Downloading $ZIP_NAME (~5 GB)..."
+    echo ""
+    echo -e "${BOLD}PI-CAI Image Download${RESET}"
+    echo "  Folds to download : fold0 - fold$((N_FOLDS - 1))  ($N_FOLDS of $TOTAL_FOLDS)"
+    echo "  Output directory  : $IMAGES_DIR"
+    echo "  Keep zip files    : $KEEP_ZIP"
+    echo "  Dry run           : $DRY_RUN"
+    echo ""
 
-    if [[ "$DOWNLOADER" == "wget" ]]; then
-        # -c  : resume interrupted download
-        # --show-progress : progress bar even when not interactive
-        wget -c --show-progress -O "$ZIP_PATH" "$URL"
-    else
-        # curl: -L follow redirects, -C - resume, --progress-bar
-        curl -L -C - --progress-bar -o "$ZIP_PATH" "$URL"
-    fi
+    for (( i=0; i<N_FOLDS; i++ )); do
+        fold_name="picai_public_images_fold${i}"
+        zip_name="${fold_name}.zip"
+        url="${IMAGE_BASE_URL}/${zip_name}?download=1"
+        zip_path="$OUT_DIR/$zip_name"
+        fold_marker="$OUT_DIR/.${fold_name}_done"
 
-    success "Download complete: $ZIP_PATH"
+        echo -e "${BOLD}------------------------------------------${RESET}"
+        info "Fold $((i + 1))/$N_FOLDS (fold${i}) -> $zip_name"
 
-    # ---- Extract ----
-    info "Extracting $ZIP_NAME → $IMAGES_DIR ..."
+        if [[ -f "$fold_marker" ]]; then
+            success "fold${i} already downloaded and extracted - skipping."
+            (( n_cached++ )) || true
+            continue
+        fi
 
-    # Use Python's zipfile module (always available, no unzip dependency)
-    python3 - <<PYEOF
-import zipfile, sys, os, shutil
+        if [[ "$DRY_RUN" == true ]]; then
+            info "[dry-run] Would download: $url"
+            info "[dry-run] Would extract to: $IMAGES_DIR"
+            continue
+        fi
+
+        info "Downloading $zip_name (~5 GB)..."
+        if [[ "$DOWNLOADER" == "wget" ]]; then
+            wget -c --show-progress -O "$zip_path" "$url"
+        else
+            curl -L -C - --progress-bar -o "$zip_path" "$url"
+        fi
+        success "Download complete: $zip_path"
+
+        info "Extracting $zip_name -> $IMAGES_DIR ..."
+        python3 - <<PYEOF
+import shutil
+import zipfile
 from pathlib import Path
 
-zip_path   = "$ZIP_PATH"
+zip_path = "$zip_path"
 images_dir = Path("$IMAGES_DIR")
-fold_name  = "$FOLD_NAME"
 
 print(f"  Opening {zip_path} ...")
-with zipfile.ZipFile(zip_path, 'r') as zf:
+with zipfile.ZipFile(zip_path, "r") as zf:
     members = zf.namelist()
-    total   = len(members)
+    total = len(members)
     print(f"  {total} entries in archive")
 
     for idx, member in enumerate(members, 1):
-        # Strip the top-level fold directory:
-        # e.g.  picai_public_images_fold0/10000/... → 10000/...
         parts = Path(member).parts
         if len(parts) < 2:
-            continue  # skip the root directory entry itself
+            continue
 
-        relative = Path(*parts[1:])  # drop fold dir prefix
-        target   = images_dir / relative
+        relative = Path(*parts[1:])
+        target = images_dir / relative
 
-        if member.endswith('/'):
+        if member.endswith("/"):
             target.mkdir(parents=True, exist_ok=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member) as src, open(target, 'wb') as dst:
+            with zf.open(member) as src, open(target, "wb") as dst:
                 shutil.copyfileobj(src, dst)
 
         if idx % 500 == 0 or idx == total:
@@ -268,41 +365,177 @@ with zipfile.ZipFile(zip_path, 'r') as zf:
 print("  Extraction complete.")
 PYEOF
 
-    success "Extracted fold${i} to $IMAGES_DIR"
+        success "Extracted fold${i} to $IMAGES_DIR"
 
-    # Immediately move any test-set cases that landed in data/images/
-    segregate_test_cases
+        segregate_test_cases
 
-    # ---- Cleanup ----
-    if [[ "$KEEP_ZIP" == false ]]; then
-        rm -f "$ZIP_PATH"
-        info "Removed $ZIP_NAME"
+        if [[ "$KEEP_ZIP" == false ]]; then
+            rm -f "$zip_path"
+            info "Removed $zip_name"
+        fi
+
+        touch "$fold_marker"
+        (( n_downloaded++ )) || true
+    done
+
+    echo ""
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    if [[ "$DRY_RUN" == true ]]; then
+        success "Image dry run complete."
+    else
+        success "Image download complete."
+        echo "  Newly downloaded : $n_downloaded fold(s)"
+        echo "  Already cached   : $n_cached fold(s)"
+        echo "  Images           : $IMAGES_DIR"
+        echo "  Test images      : $TEST_IMAGES_DIR"
+    fi
+}
+
+download_labels() {
+    local sp
+    local n_labels
+
+    echo ""
+    echo -e "${BOLD}PI-CAI Labels Download${RESET}"
+    echo "  Source      : $LABELS_REPO"
+    echo "  Subdirs     : ${SPARSE_PATHS[*]}"
+    echo "  Output dir  : $LABELS_DIR"
+    echo "  Dry run     : $DRY_RUN"
+    echo ""
+
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] Would sparse-clone $LABELS_REPO into $LABELS_CLONE_DIR"
+        for sp in "${SPARSE_PATHS[@]}"; do
+            info "[dry-run] Would fetch path: $sp"
+        done
+        info "[dry-run] Would copy all .nii.gz files -> $LABELS_DIR"
+        info "[dry-run] Would remove $LABELS_CLONE_DIR"
+        success "Label dry run complete."
+        return
     fi
 
-    # Mark fold as done so re-runs skip it
-    touch "$FOLD_MARKER"
-    (( n_downloaded++ )) || true
-done
+    if [[ -f "$LABELS_DONE_MARKER" ]]; then
+        n_labels="$(find "$LABELS_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
+        success "Labels already downloaded ($n_labels .nii.gz files in $LABELS_DIR) - skipping."
+        echo "  Delete $LABELS_DONE_MARKER to force a re-download."
+        return
+    fi
+
+    mkdir -p "$LABELS_DIR"
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Sparse-cloning label repository (no blobs yet)..."
+
+    rm -rf "$LABELS_CLONE_DIR"
+
+    git clone \
+        --filter=blob:none \
+        --no-checkout \
+        --depth=1 \
+        "$LABELS_REPO" \
+        "$LABELS_CLONE_DIR"
+
+    info "Configuring sparse-checkout..."
+    git -C "$LABELS_CLONE_DIR" sparse-checkout init --cone
+    git -C "$LABELS_CLONE_DIR" sparse-checkout set "${SPARSE_PATHS[@]}"
+
+    info "Checking out sparse paths (this may take a few minutes)..."
+    git -C "$LABELS_CLONE_DIR" checkout
+    success "Sparse checkout complete."
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Copying .nii.gz files -> $LABELS_DIR ..."
+
+    python3 - <<PYEOF
+import shutil
+from pathlib import Path
+
+clone_dir = Path("$LABELS_CLONE_DIR")
+labels_dir = Path("$LABELS_DIR")
+labels_dir.mkdir(parents=True, exist_ok=True)
+
+sparse_paths = [
+    "csPCa_lesion_delineations/human_expert/resampled",
+    "csPCa_lesion_delineations/human_expert/Pooch25",
+]
+
+copied = 0
+duplicates = 0
+
+for rel in sparse_paths:
+    src_dir = clone_dir / rel
+    if not src_dir.is_dir():
+        print(f"  [WARN] Expected directory not found: {src_dir}")
+        continue
+
+    files = sorted(src_dir.glob("*.nii.gz"))
+    print(f"  {len(files):4d} files in {rel}")
+
+    for src in files:
+        dst = labels_dir / src.name
+        if dst.exists():
+            duplicates += 1
+            continue
+        shutil.copy2(src, dst)
+        copied += 1
+
+print(f"\n  Copied    : {copied}")
+if duplicates:
+    print(f"  Duplicates: {duplicates} (earlier source kept)")
+print(f"  Total     : {copied + duplicates}")
+PYEOF
+
+    n_labels="$(find "$LABELS_DIR" -name '*.nii.gz' | wc -l | tr -d ' ')"
+    success "Copied $n_labels label files to $LABELS_DIR"
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Removing temporary clone ($LABELS_CLONE_DIR)..."
+    rm -rf "$LABELS_CLONE_DIR"
+    success "Cleanup done."
+
+    touch "$LABELS_DONE_MARKER"
+}
 
 # ---------------------------------------------------------------------------
-# Done
+# Main
 # ---------------------------------------------------------------------------
 echo ""
-echo -e "${BOLD}──────────────────────────────────────────${RESET}"
+echo -e "${BOLD}PI-CAI Data Download${RESET}"
+echo "  Output root      : $OUT_DIR"
+echo "  Download images  : $DOWNLOAD_IMAGES"
+if [[ "$DOWNLOAD_IMAGES" == true ]]; then
+    echo "  Image folds      : fold0 - fold$((N_FOLDS - 1))  ($N_FOLDS of $TOTAL_FOLDS)"
+fi
+echo "  Download labels  : $DOWNLOAD_LABELS"
+echo "  Keep zip files   : $KEEP_ZIP"
+echo "  Dry run          : $DRY_RUN"
+
+if [[ "$DOWNLOAD_IMAGES" == true ]]; then
+    download_images
+else
+    info "Skipping image download."
+fi
+
+if [[ "$DOWNLOAD_LABELS" == true ]]; then
+    download_labels
+else
+    info "Skipping label download."
+fi
+
+echo ""
+echo -e "${BOLD}------------------------------------------${RESET}"
 if [[ "$DRY_RUN" == true ]]; then
     success "Dry run complete. No files were downloaded."
 else
-    success "All $N_FOLDS fold(s) now available in: $IMAGES_DIR"
-    echo "  Newly downloaded : $n_downloaded fold(s)"
-    echo "  Already cached   : $n_cached fold(s)"
+    success "Done."
+    if [[ "$DOWNLOAD_IMAGES" == true ]]; then
+        echo "  Images      : $IMAGES_DIR"
+        echo "  Test images : $TEST_IMAGES_DIR"
+    fi
+    if [[ "$DOWNLOAD_LABELS" == true ]]; then
+        echo "  Labels      : $LABELS_DIR"
+    fi
     echo ""
-    echo "  Fixed test cases (${#TEST_CASE_IDS[@]} IDs) are in: $TEST_IMAGES_DIR"
-    echo "  Run evaluation with:"
-    echo "  python scripts/evaluate_checkpoint.py --checkpoint <path/to/best.pt>"
-    echo ""
-    echo "  Next step: download the labels (csPCa lesion masks):"
-    echo "  https://zenodo.org/records/6667655"
-    echo ""
-    echo "  Then run training:"
+    echo "Start training with:"
     echo "  docker compose run --rm trainer train"
 fi

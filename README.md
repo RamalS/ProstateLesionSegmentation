@@ -28,11 +28,10 @@ src/                        # All importable source code (PYTHONPATH=.)
   utils.py                  # Shared helpers (checkpointing, run directories, composite score)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|shell)
+  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
   count_positives.py        # Print dataset statistics (positive/negative case counts)
-  download_dataset.sh       # Download PI-CAI image folds from zenodo
-  download_labels.sh        # Download PI-CAI annotation labels
+  download_dataset.sh       # Download PI-CAI image folds + labels (single command)
   list_checkpoints.sh       # List saved checkpoints for a run
   select_checkpoint.py      # Interactive checkpoint selection helper
   select_checkpoint.sh      # Shell wrapper for select_checkpoint.py
@@ -173,11 +172,15 @@ The ~1:2.5 case-level and ~1:50+ voxel-level imbalance is addressed at four stac
 ### Downloading the Data
 
 ```bash
-# Images — download all 5 folds (~25 GB total, ~5 GB each)
-bash scripts/download_dataset.sh 5
+# Full dataset (default): all 5 image folds + labels
+bash scripts/download_dataset.sh
 
-# Labels — follow the instructions at:
-# https://github.com/DIAGNijmegen/picai_labels
+# Docker equivalent
+docker compose run --rm trainer download
+
+# Optional: images only or labels only
+bash scripts/download_dataset.sh 5 --no-labels
+bash scripts/download_dataset.sh --no-images
 
 # Verify dataset statistics after download
 PYTHONPATH=. python scripts/count_positives.py \
@@ -194,6 +197,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Task | Command |
 |---|---|
 | Build image | `docker compose build` |
+| Download data | `docker compose run --rm trainer download` |
 | Train | `docker compose run --rm trainer train` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
 | TensorBoard | `docker compose run --rm --service-ports trainer tensorboard` |

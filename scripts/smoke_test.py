@@ -18,7 +18,8 @@ What this tests (no real data required):
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
   8. Checkpoint save/load round-trip (save_checkpoint + load_checkpoint),
      including best_composite_score, last_hd95 persistence, and GradScaler state
- 10. compute_composite_score: normal case, hd95_scale parameter, HD95=NaN
+   9b. visualize_3d helpers: seg auto-detection, downsampling, Plotly HTML output
+  10. compute_composite_score: normal case, hd95_scale parameter, HD95=NaN
       redistribution, sensitivity=NaN guard, cached-HD95 consistency,
       early stopping counter simulation
  11. PiCaiDataset in-memory cache (use_cache=True)
@@ -1364,6 +1365,99 @@ try:
 
 except Exception as exc:
     fail("evaluate_checkpoint helpers test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 9b. visualize_3d helpers
+# ---------------------------------------------------------------------------
+section("9b. visualize_3d helpers (_resolve_seg_path, _downsample_for_render, save_3d_visualization_html)")
+
+try:
+    import importlib.util
+    import tempfile
+
+    import numpy as np
+
+    _vis_spec = importlib.util.spec_from_file_location(
+        "visualize_3d",
+        Path(__file__).parent / "visualize_3d.py",
+    )
+    _vis_mod = importlib.util.module_from_spec(_vis_spec)  # type: ignore[arg-type]
+    _vis_spec.loader.exec_module(_vis_mod)  # type: ignore[union-attr]
+
+    _downsample = _vis_mod._downsample_for_render
+    _resolve_seg = _vis_mod._resolve_seg_path
+    _save_html = _vis_mod.save_3d_visualization_html
+
+    # Seg auto-detection smoke check from <root>/test_images/<case>_t2w.mha
+    # to <root>/labels/<case>.nii.gz.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        test_images = root / "test_images"
+        labels = root / "labels"
+        test_images.mkdir(parents=True, exist_ok=True)
+        labels.mkdir(parents=True, exist_ok=True)
+
+        t2w_case = test_images / "demo_case_t2w.mha"
+        seg_case = labels / "demo_case.nii.gz"
+        t2w_case.write_bytes(b"dummy")
+        seg_case.write_bytes(b"dummy")
+
+        resolved_auto = _resolve_seg(t2w_case, None)
+        if resolved_auto == seg_case.resolve():
+            ok("_resolve_seg_path auto-detects <case>.nii.gz from T2w case id")
+        else:
+            fail(f"_resolve_seg_path auto path mismatch: {resolved_auto} != {seg_case.resolve()}")
+
+        resolved_explicit = _resolve_seg(t2w_case, str(seg_case))
+        if resolved_explicit == seg_case.resolve():
+            ok("_resolve_seg_path honors explicit --seg path")
+        else:
+            fail(f"_resolve_seg_path explicit path mismatch: {resolved_explicit} != {seg_case.resolve()}")
+
+    rng_np = np.random.default_rng(123)
+    vol = rng_np.standard_normal((18, 64, 64)).astype(np.float32)
+    gt = (rng_np.random((18, 64, 64)) > 0.92).astype(np.uint8)
+    pred = (rng_np.random((18, 64, 64)) > 0.93).astype(np.uint8)
+
+    # Downsample smoke check: verify output volume respects max_voxels cap.
+    vol_ds, gt_ds, pred_ds, spacing_ds, stride = _downsample(
+        t2w_vol=vol,
+        gt_mask=gt,
+        pred_mask=pred,
+        spacing_zyx=(3.0, 0.5, 0.5),
+        max_voxels=20_000,
+    )
+    if np.prod(vol_ds.shape) <= 20_000:
+        ok(
+            f"_downsample_for_render applied stride={stride} -> shape={vol_ds.shape} "
+            f"({int(np.prod(vol_ds.shape)):,} voxels)"
+        )
+    else:
+        fail(
+            f"_downsample_for_render cap violation: got {int(np.prod(vol_ds.shape))} > 20000"
+        )
+
+    # HTML export smoke check.
+    with tempfile.TemporaryDirectory() as tmp:
+        out_html = Path(tmp) / "test_3d_vis.html"
+        _save_html(
+            t2w_vol=vol_ds,
+            gt_mask=gt_ds,
+            pred_mask=pred_ds,
+            spacing_zyx=spacing_ds,
+            output_path=out_html,
+            case_id="synth_case",
+            max_voxels=20_000,
+        )
+        assert out_html.exists(), "3-D HTML file was not created"
+        html_text = out_html.read_text(encoding="utf-8", errors="ignore")
+        assert "plotly" in html_text.lower(), "output HTML does not look like Plotly export"
+        ok(f"save_3d_visualization_html wrote {out_html.name} ({out_html.stat().st_size / 1024:.0f} KB)")
+
+except ImportError as exc:
+    skip(f"visualize_3d helper test skipped ({exc})")
+except Exception as exc:
+    fail("visualize_3d helper test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 10. compute_composite_score

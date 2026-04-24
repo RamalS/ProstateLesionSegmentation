@@ -68,6 +68,12 @@ val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validati
 val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
 val_start_epoch: 100               # skip validation entirely before this epoch (saves time during early training)
 
+# Prediction / post-processing
+pred_threshold: 0.5                        # sigmoid threshold before binarization
+postprocess_enabled: false                 # remove tiny 3-D connected-component outliers
+postprocess_min_component_volume_mm3: 30.0
+postprocess_connectivity: 26               # 6, 18, or 26
+
 # Training speed optimizations
 use_amp: true                      # automatic mixed precision (see amp_dtype below)
 amp_dtype: fp16                    # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)

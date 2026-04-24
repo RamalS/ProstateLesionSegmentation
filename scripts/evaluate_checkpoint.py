@@ -60,6 +60,7 @@ from config import load_config  # noqa: E402
 from dataset import PiCaiDataset, discover_cases, stratified_train_val_split  # noqa: E402
 from metrics import compute_all_metrics  # noqa: E402
 from models import build_model  # noqa: E402
+from postprocess import postprocess_logits  # noqa: E402
 from transforms import get_val_transforms  # noqa: E402
 from utils import load_checkpoint  # noqa: E402
 
@@ -591,6 +592,28 @@ def main() -> None:
     # ---- Load config ------------------------------------------------------------
     cfg = load_config(str(cfg_path))
     logger.info("Config loaded from %s", cfg_path)
+    pred_threshold: float = float(cfg.get("pred_threshold", 0.5))
+    postprocess_enabled: bool = bool(cfg.get("postprocess_enabled", False))
+    postprocess_min_component_volume_mm3: float = float(
+        cfg.get("postprocess_min_component_volume_mm3", 30.0)
+    )
+    postprocess_connectivity: int = int(cfg.get("postprocess_connectivity", 26))
+
+    if not (0.0 <= pred_threshold <= 1.0):
+        logger.error("pred_threshold must be in [0,1], got %s", pred_threshold)
+        sys.exit(1)
+    if postprocess_min_component_volume_mm3 < 0.0:
+        logger.error(
+            "postprocess_min_component_volume_mm3 must be >= 0, got %s",
+            postprocess_min_component_volume_mm3,
+        )
+        sys.exit(1)
+    if postprocess_connectivity not in (6, 18, 26):
+        logger.error(
+            "postprocess_connectivity must be one of {6,18,26}, got %s",
+            postprocess_connectivity,
+        )
+        sys.exit(1)
 
     # ---- Select checkpoint interactively ----------------------------------------
     ckpt_path = select_checkpoint(ckpts_dir)
@@ -673,6 +696,13 @@ def main() -> None:
     print(f"  Test cases  : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
     print(f"  Images dir  : {images_dir}")
     print(f"  Patch size  : {patch_size}   SW overlap: {sw_overlap}")
+    print(f"  Threshold   : {pred_threshold:.3f}")
+    print(
+        "  Postprocess : "
+        f"{'on' if postprocess_enabled else 'off'} "
+        f"(min_component_volume_mm3={postprocess_min_component_volume_mm3:.1f}, "
+        f"connectivity={postprocess_connectivity})"
+    )
 
     # ---- Inference loop ---------------------------------------------------------
     per_case: list[dict] = []
@@ -702,7 +732,19 @@ def main() -> None:
                 overlap=sw_overlap,
             )   # (1, 1, D, H, W) — raw logits
 
-            m          = compute_all_metrics(logits, labels)
+            metric_logits, pred_bin = postprocess_logits(
+                logits=logits.float(),
+                threshold=pred_threshold,
+                enabled=postprocess_enabled,
+                spacing_zyx=target_spacing,
+                min_component_volume_mm3=postprocess_min_component_volume_mm3,
+                connectivity=postprocess_connectivity,
+            )
+            m = compute_all_metrics(
+                metric_logits,
+                labels,
+                threshold=pred_threshold,
+            )
             has_lesion = lesion_map.get(case_id, False)
 
             per_case.append({
@@ -713,7 +755,6 @@ def main() -> None:
 
             # Store volumetric data for the first 5 positive cases (visualization)
             if has_lesion and len(vis_data) < 5:
-                pred_bin = (torch.sigmoid(logits) >= 0.5).float()
                 vis_data.append({
                     "case_id":  case_id,
                     "t2w_vol":  images[0, 0].cpu().numpy(),      # (D, H, W)

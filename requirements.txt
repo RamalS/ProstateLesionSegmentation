@@ -7,6 +7,7 @@ setuptools<80
 numpy
 pandas
 matplotlib
+plotly
 scikit-learn
 tqdm
 pyyaml

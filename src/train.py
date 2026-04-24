@@ -45,6 +45,7 @@ from src.losses import DiceBCELoss, DeepSupervisionWrapper, TverskyBCELoss
 from src.metrics import compute_all_metrics
 from src.models import build_model
 from src.notify import send_ntfy
+from src.postprocess import postprocess_logits
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     compute_composite_score,
@@ -136,6 +137,11 @@ def validate(
     use_amp: bool = False,
     amp_dtype: torch.dtype = torch.bfloat16,
     compute_hd95: bool = True,
+    threshold: float = 0.5,
+    postprocess_enabled: bool = False,
+    postprocess_min_component_volume_mm3: float = 30.0,
+    postprocess_connectivity: int = 26,
+    spacing_zyx: tuple[float, float, float] = (3.0, 0.5, 0.5),
 ) -> dict[str, float]:
     """
     Run sliding-window inference over full validation volumes and return
@@ -154,6 +160,12 @@ def validate(
     compute_hd95 : if False, skip the expensive HD95 calculation and log
                    float('nan') for "hd95".  Useful during the training loop
                    where HD95 is not needed every epoch.
+    threshold    : sigmoid threshold for logits -> binary prediction mask.
+    postprocess_enabled : if True, remove tiny connected components from
+                         predicted binary masks before metrics.
+    postprocess_min_component_volume_mm3 : minimum component size in mm^3.
+    postprocess_connectivity : 3-D connectivity for components (6/18/26).
+    spacing_zyx : voxel spacing (z, y, x) in mm used for mm^3 -> voxel conversion.
     """
     model.eval()
 
@@ -195,8 +207,21 @@ def validate(
             # Cast back to float32 for metrics (avoids BF16 precision loss in distance
             # transforms and other numpy-backed metric operations).
             logits = logits.float()
+            metric_logits, _ = postprocess_logits(
 
-            m = compute_all_metrics(logits, labels, compute_hd95=compute_hd95)
+                threshold=threshold,
+                enabled=postprocess_enabled,
+                spacing_zyx=spacing_zyx,
+                min_component_volume_mm3=postprocess_min_component_volume_mm3,
+                connectivity=postprocess_connectivity,
+            )
+
+            m = compute_all_metrics(
+                metric_logits,
+                labels,
+                threshold=threshold,
+                compute_hd95=compute_hd95,
+            )
 
             n_all += 1
 
@@ -210,7 +235,7 @@ def validate(
             if not math.isnan(m["hd95"]):
                 hd95_values.append(m["hd95"])
 
-            del logits, images, labels, m
+            del metric_logits, logits, images, labels, m
 
     if n_all == 0:
         return {"dice": float("nan"), "iou": float("nan"),
@@ -245,6 +270,11 @@ def validate_with_oom_retry(
     use_amp: bool = False,
     amp_dtype: torch.dtype = torch.bfloat16,
     compute_hd95: bool = True,
+    threshold: float = 0.5,
+    postprocess_enabled: bool = False,
+    postprocess_min_component_volume_mm3: float = 30.0,
+    postprocess_connectivity: int = 26,
+    spacing_zyx: tuple[float, float, float] = (3.0, 0.5, 0.5),
 ) -> tuple[dict[str, float], int]:
     """
     Run validation and retry with smaller sw_batch_size on CUDA OOM.
@@ -267,6 +297,11 @@ def validate_with_oom_retry(
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
                 compute_hd95=compute_hd95,
+                threshold=threshold,
+                postprocess_enabled=postprocess_enabled,
+                postprocess_min_component_volume_mm3=postprocess_min_component_volume_mm3,
+                postprocess_connectivity=postprocess_connectivity,
+                spacing_zyx=spacing_zyx,
             )
             return metrics, current_sw_batch_size
         except RuntimeError as exc:
@@ -590,6 +625,25 @@ def main() -> None:
     keep_last_n: int = cfg.get("keep_last_checkpoints", 3)
     val_every: int = max(1, cfg.get("val_every", 1))
     val_start_epoch: int = max(1, int(cfg.get("val_start_epoch", 1)))
+    pred_threshold: float = float(cfg.get("pred_threshold", 0.5))
+    postprocess_enabled: bool = bool(cfg.get("postprocess_enabled", False))
+    postprocess_min_component_volume_mm3: float = float(
+        cfg.get("postprocess_min_component_volume_mm3", 30.0)
+    )
+    postprocess_connectivity: int = int(cfg.get("postprocess_connectivity", 26))
+
+    if not (0.0 <= pred_threshold <= 1.0):
+        raise ValueError(f"pred_threshold must be in [0, 1], got {pred_threshold}")
+    if postprocess_min_component_volume_mm3 < 0.0:
+        raise ValueError(
+            "postprocess_min_component_volume_mm3 must be >= 0.0, "
+            f"got {postprocess_min_component_volume_mm3}"
+        )
+    if postprocess_connectivity not in (6, 18, 26):
+        raise ValueError(
+            "postprocess_connectivity must be one of {6, 18, 26}, "
+            f"got {postprocess_connectivity}"
+        )
 
     # AMP dtype: "fp16" for Volta/Turing (TITAN V, V100), "bf16" for Ampere+/Blackwell.
     # FP16 requires GradScaler (limited exponent range); BF16 does not.
@@ -665,6 +719,13 @@ def main() -> None:
         "Best checkpoint metric: composite score "
         "(w_sensitivity=%.2f, w_dice=%.2f, w_hd95=%.2f, hd95_scale=%.1fmm)",
         w_sensitivity, w_dice, w_hd95, hd95_scale,
+    )
+    logger.info(
+        "Prediction: threshold=%.3f | postprocess=%s | min_component_volume=%.1f mm^3 | connectivity=%d",
+        pred_threshold,
+        "on" if postprocess_enabled else "off",
+        postprocess_min_component_volume_mm3,
+        postprocess_connectivity,
     )
     if es_enabled:
         logger.info(
@@ -808,6 +869,11 @@ def main() -> None:
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
                 compute_hd95=compute_hd95_now,
+                threshold=pred_threshold,
+                postprocess_enabled=postprocess_enabled,
+                postprocess_min_component_volume_mm3=postprocess_min_component_volume_mm3,
+                postprocess_connectivity=postprocess_connectivity,
+                spacing_zyx=target_spacing,
             )
 
             if used_sw_batch_size != sw_batch_size:

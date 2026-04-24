@@ -28,8 +28,9 @@ src/                        # All importable source code (PYTHONPATH=.)
   utils.py                  # Shared helpers (checkpointing, run directories, composite score)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|learnability|download|shell)
+  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|visualize-3d|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
+  visualize_3d.py           # Interactive 3-D HTML visualizer (GT only or GT vs model prediction)
   count_positives.py        # Print dataset statistics (positive/negative case counts)
   download_dataset.sh       # Download PI-CAI image folds + labels (single command)
   list_checkpoints.sh       # List saved checkpoints for a run
@@ -201,7 +202,9 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Train | `docker compose run --rm trainer train` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
 | TensorBoard | `docker compose run --rm --service-ports trainer tensorboard` |
-| Evaluate checkpoint | `docker compose run --rm trainer evaluate --checkpoint <path>` |
+| 3-D visualizer (GT only) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha` |
+| 3-D visualizer (GT vs model) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>` |
+| Evaluate checkpoint | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name>` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
 ### Local
@@ -210,6 +213,8 @@ PYTHONPATH=. python scripts/count_positives.py \
 |---|---|
 | Train | `PYTHONPATH=. python src/train.py --config configs/local_default.yaml` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
+| 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
+| 3-D visualizer (GT vs model) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --run outputs/runs/<run_name>` |
 | Estimate resources | `PYTHONPATH=. python scripts/estimate_resources.py --config configs/default.yaml` |
 | TensorBoard | `tensorboard --logdir outputs/runs --port 6006` |
 

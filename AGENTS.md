@@ -6,10 +6,13 @@
 - Train in Docker: `docker compose run --rm trainer train`
 - Smoke test (primary regression check): `docker compose run --rm trainer smoke-test`
 - TensorBoard: `docker compose run --rm --service-ports trainer tensorboard`
+- 3-D visualizer (GT only): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha`
+- 3-D visualizer (GT vs model): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>`
 - Learnability sanity run: `docker compose run --rm trainer learnability [N]`
 - Shell in container: `docker compose run --rm trainer shell`
 - Local train: `PYTHONPATH=. python -m src.train --config configs/local_default.yaml`
 - Local smoke test: `PYTHONPATH=. python scripts/smoke_test.py`
+- Local 3-D visualizer: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha [--run outputs/runs/<run_name>]`
 
 ## Evaluation is easy to run wrong
 

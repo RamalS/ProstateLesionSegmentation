@@ -15,6 +15,58 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# CUDA runtime compatibility
+# ---------------------------------------------------------------------------
+
+def _parse_supported_sm_arches(arch_list: list[str]) -> list[tuple[int, int]]:
+    """
+    Parse `torch.cuda.get_arch_list()` entries into sorted `(major, minor)` SM tuples.
+    """
+    parsed: set[tuple[int, int]] = set()
+    for arch in arch_list:
+        m = re.match(r"^sm_(\d+)(?:a)?$", arch)
+        if m is None:
+            continue
+        sm = int(m.group(1))
+        parsed.add((sm // 10, sm % 10))
+    return sorted(parsed)
+
+
+def ensure_cuda_binary_compatibility(device: torch.device) -> None:
+    """
+    Raise a clear error when the current CUDA device is not supported by the
+    installed PyTorch CUDA binaries.
+
+    This catches unsupported-SM failures early (before training starts), instead
+    of surfacing later as generic CUDA kernel launch/runtime errors.
+    """
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return
+
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    cc_major, cc_minor = torch.cuda.get_device_capability(device_index)
+    supported_sms = _parse_supported_sm_arches(torch.cuda.get_arch_list())
+
+    if not supported_sms:
+        return
+    if (cc_major, cc_minor) in supported_sms:
+        return
+
+    gpu_name = torch.cuda.get_device_name(device_index)
+    detected_sm = f"sm_{cc_major}{cc_minor}"
+    supported_sm_str = ", ".join(f"sm_{m}{n}" for m, n in supported_sms)
+
+    raise RuntimeError(
+        "Installed PyTorch CUDA binaries are incompatible with the detected GPU: "
+        f"'{gpu_name}' ({detected_sm}). Supported SM architectures in this build: "
+        f"[{supported_sm_str}]. For TITAN V / Volta, use the cu126 stack: "
+        "`docker compose -f compose.yml -f compose.volta.yml build trainer` and run "
+        "commands with the same `-f` flags. To force CPU mode, set "
+        "`CUDA_VISIBLE_DEVICES=\"\"`."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Composite score
 # ---------------------------------------------------------------------------
 

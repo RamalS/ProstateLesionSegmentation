@@ -28,6 +28,7 @@ from src.dataset import PiCaiDataset, active_modality_pairs, discover_unlabeled_
 from src.models import build_model
 from src.utils import (
     create_run_dir,
+    ensure_cuda_binary_compatibility,
     ensure_dir,
     get_encoder_state_dict,
     rotate_checkpoints,
@@ -205,6 +206,9 @@ def main() -> None:
     device = torch.device(
         "cuda" if torch.cuda.is_available() and cfg.get("device", "cuda") == "cuda" else "cpu"
     )
+    if cfg.get("device", "cuda") == "cuda" and device.type != "cuda":
+        logger.warning("CUDA requested in config but unavailable; falling back to CPU.")
+    ensure_cuda_binary_compatibility(device)
 
     # Output directories
     base_output_dir = str(cfg.get("base_output_dir", "/outputs/pretrain_runs"))
@@ -270,8 +274,16 @@ def main() -> None:
     model = build_model(ssl_cfg).to(device)
 
     if cfg.get("use_compile", False):
-        logger.info("Compiling model with torch.compile ...")
-        model = torch.compile(model)  # type: ignore[assignment]
+        cc_major, cc_minor = torch.cuda.get_device_capability(device) if device.type == "cuda" else (0, 0)
+        if device.type == "cuda" and (cc_major, cc_minor) < (7, 5):
+            logger.warning(
+                "Disabling torch.compile: GPU is sm_%d%d (requires sm_75+ for stable Triton support).",
+                cc_major,
+                cc_minor,
+            )
+        else:
+            logger.info("Compiling model with torch.compile ...")
+            model = torch.compile(model)  # type: ignore[assignment]
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(
@@ -297,6 +309,15 @@ def main() -> None:
     _dtype_map: dict[str, torch.dtype] = {"fp16": torch.float16, "bf16": torch.bfloat16}
     amp_dtype: torch.dtype = _dtype_map.get(amp_dtype_str, torch.bfloat16)
     use_amp: bool = bool(cfg.get("use_amp", True)) and device.type == "cuda"
+    bf16_supported_fn = getattr(torch.cuda, "is_bf16_supported", None)
+    bf16_supported = bool(bf16_supported_fn()) if callable(bf16_supported_fn) else False
+    if use_amp and amp_dtype == torch.bfloat16 and not bf16_supported:
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        gpu_name = torch.cuda.get_device_name(device_index)
+        raise RuntimeError(
+            "amp_dtype=bf16 requested, but detected device does not support BF16 autocast: "
+            f"{gpu_name}. Set `amp_dtype: fp16` for Volta/Turing GPUs."
+        )
     use_fp16: bool = use_amp and amp_dtype == torch.float16
     autocast_device = "cuda" if device.type == "cuda" else "cpu"
     scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)  # type: ignore[attr-defined]

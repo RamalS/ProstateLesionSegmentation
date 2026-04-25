@@ -1980,22 +1980,27 @@ else:
             )
 
         # --- BF16 (laptop path: RTX 5070 / Blackwell) -------------------------
-        amp_model.zero_grad()
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore[attr-defined]
-            out_bf16 = amp_model(dummy)
-            loss_bf16 = amp_criterion(out_bf16, tgt)
-
-        loss_bf16.backward()   # no scaler needed for BF16
-
-        if out_bf16.shape == (1, 1, 20, 64, 64) and torch.isfinite(loss_bf16):
-            ok(
-                f"BF16 forward+backward OK — "
-                f"output dtype={out_bf16.dtype}, loss={loss_bf16.item():.4f}"
-            )
+        bf16_supported_fn = getattr(torch.cuda, "is_bf16_supported", None)
+        bf16_supported = bool(bf16_supported_fn()) if callable(bf16_supported_fn) else False
+        if not bf16_supported:
+            skip("BF16 autocast skipped — GPU does not report BF16 support")
         else:
-            fail(
-                f"BF16: shape={tuple(out_bf16.shape)}, loss={loss_bf16.item()}"
-            )
+            amp_model.zero_grad()
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):  # type: ignore[attr-defined]
+                out_bf16 = amp_model(dummy)
+                loss_bf16 = amp_criterion(out_bf16, tgt)
+
+            loss_bf16.backward()   # no scaler needed for BF16
+
+            if out_bf16.shape == (1, 1, 20, 64, 64) and torch.isfinite(loss_bf16):
+                ok(
+                    f"BF16 forward+backward OK — "
+                    f"output dtype={out_bf16.dtype}, loss={loss_bf16.item():.4f}"
+                )
+            else:
+                fail(
+                    f"BF16: shape={tuple(out_bf16.shape)}, loss={loss_bf16.item()}"
+                )
 
     except Exception as exc:
         fail("AMP autocast test failed", exc)

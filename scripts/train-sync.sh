@@ -3,10 +3,27 @@ set -euo pipefail
 
 PROJECT_DIR="/home/spajic/Projects/ProstteLesionSegmentation"
 BRANCH="train"
+TORCH_STACK="${TORCH_STACK:-volta}"
+
+case "${TORCH_STACK}" in
+  modern)
+    COMPOSE_FILES=(-f compose.yml)
+    STACK_LABEL="modern-cu128"
+    ;;
+  volta)
+    COMPOSE_FILES=(-f compose.yml -f compose.volta.yml)
+    STACK_LABEL="volta-cu126"
+    ;;
+  *)
+    echo "Error: unsupported TORCH_STACK='${TORCH_STACK}' (use 'modern' or 'volta')"
+    exit 1
+    ;;
+esac
 
 echo "Starting sync on $(hostname)"
 echo "Project directory: ${PROJECT_DIR}"
 echo "Branch: ${BRANCH}"
+echo "Torch stack: ${STACK_LABEL}"
 
 if [ ! -d "${PROJECT_DIR}/.git" ]; then
   echo "Error: ${PROJECT_DIR} is not a git repository"
@@ -48,17 +65,21 @@ git reset --hard "origin/${BRANCH}"
 git clean -fd
 
 echo "Checking if Docker image needs rebuilding..."
-# Hash the two files that affect the built image (Dockerfile and requirements.txt).
+# Hash the files that affect the built image.
 # src/, scripts/, configs/ are volume-mounted at runtime so they never need a rebuild.
-HASH=$(sha256sum Dockerfile requirements.txt | sha256sum | cut -d' ' -f1)
-HASH_FILE="${PROJECT_DIR}/.docker_build_hash"
+HASH_INPUTS=(Dockerfile requirements.txt compose.yml)
+if [ "${TORCH_STACK}" = "volta" ]; then
+  HASH_INPUTS+=(compose.volta.yml)
+fi
+HASH=$(sha256sum "${HASH_INPUTS[@]}" | sha256sum | cut -d' ' -f1)
+HASH_FILE="${PROJECT_DIR}/.docker_build_hash_${TORCH_STACK}"
 
 if [ ! -f "${HASH_FILE}" ] || [ "$(cat "${HASH_FILE}")" != "${HASH}" ]; then
-    echo "Dockerfile or requirements.txt changed — rebuilding Docker image..."
-    docker compose build && echo "${HASH}" > "${HASH_FILE}"
+    echo "Build inputs changed for ${STACK_LABEL} — rebuilding Docker image..."
+    docker compose "${COMPOSE_FILES[@]}" build && echo "${HASH}" > "${HASH_FILE}"
     echo "Docker image rebuilt successfully."
 else
-    echo "Docker image is up to date — skipping rebuild."
+    echo "Docker image is up to date for ${STACK_LABEL} — skipping rebuild."
 fi
 
 echo "Finished successfully."

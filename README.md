@@ -76,9 +76,13 @@ Requires Docker Engine + Compose v2 and the NVIDIA Container Toolkit.
 
 ```bash
 docker compose build
+
+# Volta/TITAN V (sm_70) stack
+docker compose -f compose.yml -f compose.volta.yml build
 ```
 
-The image is based on `nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04` with PyTorch 2.7.0 + CUDA 12.8 wheels.
+The default stack (`compose.yml`) uses `torch==2.7.0` CUDA 12.8 wheels (`cu128`) for modern GPUs.
+Use `compose.volta.yml` to switch to CUDA 12.6 wheels (`cu126`) for Volta/TITAN V compatibility.
 
 ### Local (Python venv)
 
@@ -86,6 +90,8 @@ The image is based on `nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04` with PyTorch 
 python -m venv .venv
 source .venv/bin/activate
 pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+# Volta/TITAN V alternative:
+# pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu126
 pip install -r requirements.txt
 export PYTHONPATH=$(pwd)
 ```
@@ -116,6 +122,7 @@ export PYTHONPATH=$(pwd)
 | **Storage** | 128 GB QEMU virtual disk |
 | **GPU** | NVIDIA TITAN V — Volta (sm_70), 12 GB VRAM |
 | **AMP** | `default.yaml` — `amp_dtype: fp16` |
+| **Docker stack** | `compose.yml + compose.volta.yml` (`cu126`) |
 
 ---
 
@@ -209,10 +216,13 @@ PYTHONPATH=. python scripts/count_positives.py \
 
 | Task | Command |
 |---|---|
-| Build image | `docker compose build` |
+| Build image (modern default) | `docker compose build` |
+| Build image (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml build` |
 | Download data | `docker compose run --rm trainer download` |
 | Train | `docker compose run --rm trainer train` |
+| Train (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train` |
 | Pretrain encoder (SSL) | `docker compose run --rm trainer pretrain` |
+| Pretrain encoder (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
 | TensorBoard | `docker compose run --rm --service-ports trainer tensorboard` |
 | 3-D visualizer (GT only) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha` |

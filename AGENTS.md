@@ -2,10 +2,13 @@
 
 ## Fast commands (repo root)
 
-- Build image: `docker compose build` (uses `compose.yml`, service `trainer`).
+- Build image (modern default, cu128): `docker compose build` (uses `compose.yml`, service `trainer`).
+- Build image (Volta/TITAN V, cu126): `docker compose -f compose.yml -f compose.volta.yml build`
 - Train in Docker: `docker compose run --rm trainer train`
 - Pretrain encoder (SSL) in Docker: `docker compose run --rm trainer pretrain`
 - Smoke test (primary regression check): `docker compose run --rm trainer smoke-test`
+- Train in Docker (Volta/TITAN V): `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train`
+- Pretrain in Docker (Volta/TITAN V): `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain`
 - TensorBoard: `docker compose run --rm --service-ports trainer tensorboard`
 - 3-D visualizer (GT only): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha`
 - 3-D visualizer (GT vs model): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>`
@@ -63,8 +66,9 @@
 
 ## Dependency and CI gotchas
 
-- Docker pins `torch==2.7.0`, `torchvision==0.22.0`, `torchaudio==2.7.0` in `Dockerfile`.
+- Docker pins `torch==2.7.0`, `torchvision==0.22.0`, `torchaudio==2.7.0` in `compose.yml` build args (passed into `Dockerfile`).
+- Default Docker stack is `cu128` (modern GPUs); Volta/TITAN V uses `compose.volta.yml` override (`cu126`).
 - Docker filters torch packages out of `requirements.txt`; update `Dockerfile` too when changing torch versions.
 - `setuptools<80` is intentional (TensorBoard still depends on `pkg_resources`).
 - Pushing to branch `train` triggers `.github/workflows/train-sync.yml` on a self-hosted runner.
-- `scripts/train-sync.sh` hard-resets and cleans the remote clone before checkout; treat pushes to `train` as destructive sync/deploy triggers.
+- `scripts/train-sync.sh` hard-resets and cleans the remote clone before checkout; treat pushes to `train` as destructive sync/deploy triggers. It defaults to the Volta stack (`TORCH_STACK=volta`).

@@ -1,0 +1,9 @@
+services:
+  trainer:
+    image: ramal/prostate-lesion-segmentation:cu126
+    build:
+      args:
+        TORCH_VERSION: "2.7.0"
+        TORCHVISION_VERSION: "0.22.0"
+        TORCHAUDIO_VERSION: "2.7.0"
+        TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu126"

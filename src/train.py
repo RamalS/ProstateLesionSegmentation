@@ -50,6 +50,7 @@ from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     compute_composite_score,
     create_run_dir,
+    ensure_cuda_binary_compatibility,
     ensure_dir,
     load_checkpoint,
     load_pretrained_encoder,
@@ -370,6 +371,9 @@ def main() -> None:
     device = torch.device(
         "cuda" if torch.cuda.is_available() and cfg["device"] == "cuda" else "cpu"
     )
+    if cfg.get("device", "cuda") == "cuda" and device.type != "cuda":
+        logger.warning("CUDA requested in config but unavailable; falling back to CPU.")
+    ensure_cuda_binary_compatibility(device)
 
     # ---- Output directories ----
     ensure_dir(cfg["base_output_dir"])
@@ -557,8 +561,16 @@ def main() -> None:
     # the config.  Safe here because patch_size is fixed, so no recompilation.
     compiled_model: torch.nn.Module = model
     if cfg.get("use_compile", False):
-        logger.info("Compiling model with torch.compile …")
-        compiled_model = torch.compile(model)  # type: ignore[assignment]
+        cc_major, cc_minor = torch.cuda.get_device_capability(device) if device.type == "cuda" else (0, 0)
+        if device.type == "cuda" and (cc_major, cc_minor) < (7, 5):
+            logger.warning(
+                "Disabling torch.compile: GPU is sm_%d%d (requires sm_75+ for stable Triton support).",
+                cc_major,
+                cc_minor,
+            )
+        else:
+            logger.info("Compiling model with torch.compile …")
+            compiled_model = torch.compile(model)  # type: ignore[assignment]
     model = compiled_model
 
     # ---- Optimizer + scheduler ----
@@ -683,6 +695,15 @@ def main() -> None:
     _dtype_map: dict[str, torch.dtype] = {"fp16": torch.float16, "bf16": torch.bfloat16}
     amp_dtype: torch.dtype = _dtype_map.get(amp_dtype_str, torch.bfloat16)
     use_amp: bool = cfg.get("use_amp", True) and device.type == "cuda"
+    bf16_supported_fn = getattr(torch.cuda, "is_bf16_supported", None)
+    bf16_supported = bool(bf16_supported_fn()) if callable(bf16_supported_fn) else False
+    if use_amp and amp_dtype == torch.bfloat16 and not bf16_supported:
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        gpu_name = torch.cuda.get_device_name(device_index)
+        raise RuntimeError(
+            "amp_dtype=bf16 requested, but detected device does not support BF16 autocast: "
+            f"{gpu_name}. Set `amp_dtype: fp16` for Volta/Turing GPUs."
+        )
     amp_ctx = (
         torch.amp.autocast(device_type="cuda", dtype=amp_dtype)  # type: ignore[attr-defined]
         if use_amp

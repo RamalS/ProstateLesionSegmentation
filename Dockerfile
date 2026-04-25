@@ -1,5 +1,10 @@
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
+ARG TORCH_VERSION=2.7.0
+ARG TORCHVISION_VERSION=0.22.0
+ARG TORCHAUDIO_VERSION=2.7.0
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -52,10 +57,11 @@ RUN mkdir -p /workspace /data /outputs /cache && \
 
 WORKDIR /workspace
 
-# Install PyTorch explicitly first (cu128 wheels support sm_70 Volta through sm_120 Blackwell)
+# Install PyTorch explicitly first.
+# Compute-capability support depends on the selected wheel index.
 RUN pip install --no-cache-dir \
-    torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
-    --index-url https://download.pytorch.org/whl/cu128
+    torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} \
+    --index-url ${TORCH_INDEX_URL}
 
 # Install the rest of requirements, but WITHOUT torch/torchvision/torchaudio in requirements.txt
 COPY requirements.txt /workspace/requirements.txt

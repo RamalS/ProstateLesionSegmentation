@@ -1,3 +1,51 @@
+"""
+Training script for prostate lesion segmentation.
+
+Usage (inside Docker):
+    python -m src.train --config /workspace/configs/default.yaml
+
+Pipeline
+--------
+1. Load config and set up output directories / TensorBoard.
+2. Discover PI-CAI cases and split into train / validation sets.
+3. Build PiCaiDataset with MONAI augmentation transforms.
+4. Instantiate model via build_model(cfg), DiceBCELoss, AdamW + CosineAnnealingLR.
+5. Train: random-patch forward pass → Dice+BCE loss → backward.
+6. Validate: sliding-window inference over full volumes → Dice, IoU,
+   Sensitivity, Specificity, HD95.
+7. Save regular checkpoints + best-model checkpoint by validation Dice.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import logging
+import math
+import random
+import warnings
+from pathlib import Path
+
+import monai.data.utils
+import numpy as np
+import torch
+from monai.inferers import sliding_window_inference
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+
+from src.config import load_config
+from src.dataset import (
+    PiCaiDataset,
+    active_modality_pairs,
+    discover_cases,
+    stratified_train_val_split,
+)
+from src.losses import DiceBCELoss, DeepSupervisionWrapper, TverskyBCELoss
+from src.metrics import compute_all_metrics
+from src.models import build_model
+from src.notify import send_ntfy
+from src.postprocess import postprocess_logits
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     compute_composite_score,

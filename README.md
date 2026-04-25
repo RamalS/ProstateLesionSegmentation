@@ -15,20 +15,21 @@ Evaluation is performed using standard metrics such as Dice, IoU, Sensitivity, S
 ```
 src/                        # All importable source code (PYTHONPATH=.)
   config.py                 # YAML config loader
-  dataset.py                # PiCaiDataset, discover_cases, stratified_train_val_split
+  dataset.py                # PiCaiDataset, discover_cases, discover_unlabeled_cases, stratified_train_val_split
   losses.py                 # DiceBCELoss, TverskyBCELoss, DeepSupervisionWrapper
   metrics.py                # dice, iou, sensitivity, specificity, hd95, compute_all_metrics
   models/
-    __init__.py             # build_model factory (selects unet3d or attention_unet3d)
+    __init__.py             # build_model factory (unet3d, attention_unet3d, deconver)
     unet3d.py               # UNet3D (3D encoder-decoder with skip connections)
     attention_unet3d.py     # AttentionUNet3D (UNet3D + attention gates on skip connections)
   notify.py                 # ntfy push notification helper
+  pretrain.py               # SSL masked-reconstruction encoder pretraining (unlabeled data)
   train.py                  # Training + validation loop (entry point)
   transforms.py             # MONAI augmentation pipelines
-  utils.py                  # Shared helpers (checkpointing, run directories, composite score)
+  utils.py                  # Shared helpers (checkpointing, run directories, composite score, encoder transfer)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|visualize-3d|visualize-3d-app|learnability|download|shell)
+  start.sh                  # Docker entrypoint dispatcher (train|pretrain|tensorboard|smoke-test|evaluate|visualize-3d|visualize-3d-app|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
   visualize_3d.py           # Interactive 3-D HTML visualizer (GT only or GT vs model prediction)
   visualize_3d_app.py       # Streamlit localhost app wrapper for visualize_3d.py
@@ -42,6 +43,8 @@ scripts/
 configs/
   default.yaml              # Production / Docker paths (300 epochs)
   local_default.yaml        # Local dev paths (5 epochs, relative paths)
+  pretrain_default.yaml     # Docker SSL pretraining config (unlabeled Prostate158)
+  pretrain_local.yaml       # Local SSL pretraining config
 ```
 
 ---
@@ -124,6 +127,7 @@ Place the PI-CAI dataset under `./data/`:
 data/
   images/          # Multi-channel MRI volumes (T2w, ADC, HBV)
   labels/          # Binary lesion segmentation masks
+  unlabeled_images/ # Prostate158 flattened files: <case>_{t2,adc,dwi}.nii.gz (for SSL pretraining)
 ```
 
 The Docker Compose file mounts `./data` → `/data` inside the container.
@@ -208,6 +212,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Build image | `docker compose build` |
 | Download data | `docker compose run --rm trainer download` |
 | Train | `docker compose run --rm trainer train` |
+| Pretrain encoder (SSL) | `docker compose run --rm trainer pretrain` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
 | TensorBoard | `docker compose run --rm --service-ports trainer tensorboard` |
 | 3-D visualizer (GT only) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha` |
@@ -220,7 +225,8 @@ PYTHONPATH=. python scripts/count_positives.py \
 
 | Task | Command |
 |---|---|
-| Train | `PYTHONPATH=. python src/train.py --config configs/local_default.yaml` |
+| Train | `PYTHONPATH=. python -m src.train --config configs/local_default.yaml` |
+| Pretrain encoder (SSL) | `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
 | 3-D visualizer (GT vs model) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --run outputs/runs/<run_name>` |
@@ -244,7 +250,7 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 | `pos_fraction` | 0.85 | 0.75 | Fraction of patches containing a lesion |
 | `target_spacing` | `[3.0, 0.5, 0.5]` | `[3.0, 0.5, 0.5]` | Voxel spacing (z, y, x) in mm after resampling |
 | `val_fraction` | 0.2 | 0.2 | Fraction of data held out for validation |
-| `model` | `attention_unet3d` | `unet3d` | Model architecture (`unet3d` or `attention_unet3d`) |
+| `model` | `attention_unet3d` | `unet3d` | Model architecture (`unet3d`, `attention_unet3d`, or `deconver`) |
 | `use_t2w / use_adc / use_hbv` | `true` | `true` | Modality flags (control number of input channels) |
 | `features` | `[32, 64, 128, 256]` | `[32, 64, 128, 256]` | Encoder feature map sizes |
 | `deep_supervision` | `false` | `false` | Auxiliary losses at each decoder level |
@@ -257,6 +263,8 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 | `sw_overlap` | 0.5 | 0.5 | Sliding-window overlap fraction during validation |
 | `val_every` | 2 | 1 | Run validation every N epochs |
 | `keep_last_checkpoints` | 3 | 3 | Recent `epoch_NNNN.pt` files to keep (0 = keep all) |
+| `pretrained_encoder_checkpoint` | `""` | `""` | Optional SSL checkpoint path used to initialize encoder weights |
+| `freeze_encoder_epochs` | 0 | 0 | Freeze encoder for first N supervised epochs after loading SSL weights |
 | `early_stopping_patience` | 30 | 0 | Consecutive val epochs without improvement before stopping (0 = disabled) |
 | `amp_dtype` | `fp16` | `bf16` | AMP dtype (`fp16` for Volta/Turing, `bf16` for Ampere+/Blackwell) |
 | `ntfy_url / ntfy_topic` | set | `""` | ntfy push notification server URL and topic (empty = disabled) |
@@ -268,11 +276,21 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 1. Load YAML config and set up output directories + TensorBoard.
 2. Discover PI-CAI cases and split into train/validation sets (`stratified_train_val_split` preserves positive/negative ratio).
 3. Build `PiCaiDataset` with MONAI augmentation transforms; optionally cache preprocessed volumes in RAM.
-4. Instantiate model via `build_model(cfg)` (UNet3D or AttentionUNet3D), loss (`DiceBCELoss` or `TverskyBCELoss`), AdamW + linear warm-up + CosineAnnealingLR.
+4. Instantiate model via `build_model(cfg)` (`UNet3D`, `AttentionUNet3D`, or `Deconver`), loss (`DiceBCELoss` or `TverskyBCELoss`), AdamW + linear warm-up + CosineAnnealingLR.
 5. **Train**: random-patch forward pass → loss → backward; `WeightedRandomSampler` equalises positive/negative case frequency per epoch.
 6. **Validate** (every `val_every` epochs): sliding-window inference over full volumes → Dice, IoU, Sensitivity, Specificity, HD95.
 7. Save per-epoch checkpoints (rotating, keep last N) and a `best.pt` checkpoint by composite score (weighted sensitivity + Dice + HD95).
 8. Send ntfy push notifications on training events when `ntfy_url` / `ntfy_topic` are set.
+
+### SSL Pretraining + Transfer (optional)
+
+1. Run SSL pretraining on `data/unlabeled_images` (Prostate158; DWI is mapped to HBV channel):
+   - Docker: `docker compose run --rm trainer pretrain`
+   - Local: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
+2. Take the best SSL checkpoint: `outputs/pretrain_runs/<run>/checkpoints/best.pt`.
+3. Set `pretrained_encoder_checkpoint` in `configs/default.yaml` or `configs/local_default.yaml`.
+4. Optionally set `freeze_encoder_epochs > 0` for a short supervised warm-up.
+5. Run normal supervised training (`train`) on PI-CAI labeled data.
 
 Training artifacts are written to `./outputs/runs/<experiment_name>_<timestamp>/`:
 
@@ -313,7 +331,7 @@ docker compose run --rm trainer smoke-test
 PYTHONPATH=. python scripts/smoke_test.py
 ```
 
-Checks (14 test groups): PyTorch + CUDA availability, optional imports, `UNet3D` and `AttentionUNet3D` forward passes, `build_model` factory and modality flags, deep supervision, `DiceBCELoss` and `TverskyBCELoss`, LR warm-up schedule, loss robustness (negative-sample exclusion + FP16 overflow guard), all five metrics, `discover_cases` / `stratified_train_val_split` with synthetic fixtures, MONAI transforms on a dummy batch, checkpoint save/load round-trip, `evaluate_checkpoint` helpers, `compute_composite_score`, `PiCaiDataset` in-memory cache, AMP (FP16 + BF16), and `send_ntfy` no-op / error handling.
+Checks include: PyTorch + CUDA availability, optional imports, `UNet3D`/`AttentionUNet3D`/`Deconver` forward passes, `build_model` modality handling, deep supervision, `DiceBCELoss` and `TverskyBCELoss`, LR warm-up schedule, loss robustness (negative-sample exclusion + FP16 overflow guard), metrics, dataset helpers (`discover_cases`, `stratified_train_val_split`, `discover_unlabeled_cases`, DWI preprocessing), MONAI transforms, checkpoint save/load round-trip, SSL encoder transfer helpers (`get_encoder_state_dict`, `load_pretrained_encoder`, `set_encoder_trainable`), `evaluate_checkpoint` and `visualize_3d` helpers, `compute_composite_score`, `PiCaiDataset` in-memory cache, AMP (FP16 + BF16), and `send_ntfy` no-op/error handling.
 
 ---
 

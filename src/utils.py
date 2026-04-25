@@ -257,3 +257,141 @@ def save_latest_pointer(base_output_dir: str, run_dir: Path) -> None:
     if latest_path.exists() or latest_path.is_symlink():
         latest_path.unlink()
     latest_path.symlink_to(run_dir, target_is_directory=True)
+
+
+# ---------------------------------------------------------------------------
+# Encoder transfer utilities (SSL pretraining -> supervised fine-tuning)
+# ---------------------------------------------------------------------------
+
+def _unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    """
+    Return the underlying module for torch.compile-wrapped models.
+    """
+    return getattr(model, "_orig_mod", model)
+
+
+def _encoder_prefixes(model: torch.nn.Module) -> tuple[str, ...]:
+    """
+    Return state-dict key prefixes considered part of the encoder.
+    """
+    prefixes: list[str] = []
+
+    # UNet3D / AttentionUNet3D
+    if hasattr(model, "encoders") and hasattr(model, "bottleneck"):
+        prefixes.extend(["encoders.", "bottleneck."])
+
+    # Deconver
+    if hasattr(model, "stem") and hasattr(model, "encoder"):
+        prefixes.extend(["stem.", "encoder."])
+
+    if not prefixes:
+        raise ValueError(
+            f"Unsupported model type for encoder transfer: {type(model).__name__}"
+        )
+
+    return tuple(prefixes)
+
+
+def get_encoder_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """
+    Extract encoder-only tensors from ``model.state_dict()``.
+    """
+    base_model = _unwrap_model(model)
+    prefixes = _encoder_prefixes(base_model)
+    return {
+        k: v
+        for k, v in base_model.state_dict().items()
+        if any(k.startswith(p) for p in prefixes)
+    }
+
+
+def load_pretrained_encoder(
+    model: torch.nn.Module,
+    path: str | Path,
+    device: torch.device | None = None,
+) -> dict[str, object]:
+    """
+    Load encoder weights from checkpoint into *model*.
+
+    Accepted checkpoint layouts:
+      1) ``{"encoder_state_dict": ...}``
+      2) ``{"model_state_dict": ...}``
+      3) raw state-dict mapping
+    """
+    base_model = _unwrap_model(model)
+    map_location: torch.device | str = device if device is not None else "cpu"
+    ckpt = torch.load(path, map_location=map_location, weights_only=False)
+
+    if isinstance(ckpt, dict) and "encoder_state_dict" in ckpt:
+        source_sd = ckpt["encoder_state_dict"]
+    elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        source_sd = ckpt["model_state_dict"]
+    else:
+        source_sd = ckpt
+
+    if not isinstance(source_sd, dict):
+        raise ValueError(
+            f"Checkpoint at {path} does not contain a valid state_dict mapping."
+        )
+
+    prefixes = _encoder_prefixes(base_model)
+    model_sd = base_model.state_dict()
+    matched: dict[str, torch.Tensor] = {}
+    shape_mismatch: list[str] = []
+
+    for k, v in source_sd.items():
+        if k not in model_sd:
+            continue
+        if not any(k.startswith(p) for p in prefixes):
+            continue
+        if model_sd[k].shape != v.shape:
+            shape_mismatch.append(k)
+            continue
+        matched[k] = v
+
+    if not matched:
+        raise ValueError(f"No encoder tensors from {path} matched current model.")
+
+    updated_sd = model_sd.copy()
+    updated_sd.update(matched)
+    base_model.load_state_dict(updated_sd, strict=False)
+
+    missing = [
+        k
+        for k in model_sd.keys()
+        if any(k.startswith(p) for p in prefixes) and k not in matched
+    ]
+
+    return {
+        "loaded": len(matched),
+        "missing": missing,
+        "shape_mismatch": shape_mismatch,
+    }
+
+
+def set_encoder_trainable(model: torch.nn.Module, trainable: bool) -> int:
+    """
+    Enable/disable gradients for encoder params.
+
+    Returns the number of encoder parameters affected.
+    """
+    base_model = _unwrap_model(model)
+    prefixes = _encoder_prefixes(base_model)
+
+    n_params = 0
+    for name, param in base_model.named_parameters():
+        if any(name.startswith(p) for p in prefixes):
+            param.requires_grad = trainable
+            n_params += param.numel()
+
+    # Keep normalization/dropout behavior consistent when frozen.
+    if hasattr(base_model, "encoders"):
+        base_model.encoders.train(trainable)
+    if hasattr(base_model, "bottleneck"):
+        base_model.bottleneck.train(trainable)
+    if hasattr(base_model, "stem"):
+        base_model.stem.train(trainable)
+    if hasattr(base_model, "encoder"):
+        base_model.encoder.train(trainable)
+
+    return n_params

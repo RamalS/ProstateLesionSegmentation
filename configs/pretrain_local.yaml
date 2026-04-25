@@ -1,0 +1,51 @@
+experiment_name: ssl_pretrain_local
+epochs: 20
+learning_rate: 2.0e-4
+weight_decay: 1.0e-5
+num_workers: 2
+device: cuda
+base_output_dir: outputs/pretrain_runs
+random_seed: 42
+deterministic: false
+
+# Data
+unlabeled_images_dir: data/unlabeled_images
+target_spacing: [3.0, 0.5, 0.5]
+
+# SSL patch/mask setup
+patch_size: [16, 128, 128]
+num_patches_per_volume: 2
+mask_ratio: 0.60
+mask_block_size: [4, 16, 16]
+full_l1_weight: 0.1
+
+# Model
+model: deconver
+use_t2w: true
+use_adc: true
+use_hbv: true
+deep_supervision: false
+
+# Deconver-specific hyperparameters
+deconver_encoder_depth: [1, 1, 1, 1]
+deconver_encoder_width: [64, 128, 256, 512]
+deconver_strides: [1, 2, 2, 2]
+deconver_kernel_size: [3, 3, 3]
+deconver_groups: -1
+deconver_ndc_ratio: 4
+
+# DWI -> HBV preprocessing for Prostate158
+dwi_hbv_preprocess:
+  enabled: true
+  clip_percentiles: [1.0, 99.5]
+  log1p: true
+
+# Runtime
+use_amp: true
+amp_dtype: bf16
+use_compile: false
+cache_dataset: true
+cache_rate: 1.0
+
+# Checkpointing
+keep_last_checkpoints: 3

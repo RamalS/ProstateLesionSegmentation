@@ -1,60 +1,14 @@
-"""
-Training script for prostate lesion segmentation.
-
-Usage (inside Docker):
-    python -m src.train --config /workspace/configs/default.yaml
-
-Pipeline
---------
-1. Load config and set up output directories / TensorBoard.
-2. Discover PI-CAI cases and split into train / validation sets.
-3. Build PiCaiDataset with MONAI augmentation transforms.
-4. Instantiate model via build_model(cfg), DiceBCELoss, AdamW + CosineAnnealingLR.
-5. Train: random-patch forward pass → Dice+BCE loss → backward.
-6. Validate: sliding-window inference over full volumes → Dice, IoU,
-   Sensitivity, Specificity, HD95.
-7. Save regular checkpoints + best-model checkpoint by validation Dice.
-"""
-
-from __future__ import annotations
-
-import argparse
-import gc
-import logging
-import math
-import random
-import warnings
-from pathlib import Path
-
-import monai.data.utils
-import numpy as np
-import torch
-from monai.inferers import sliding_window_inference
-from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
-
-from src.config import load_config
-from src.dataset import (
-    PiCaiDataset,
-    active_modality_pairs,
-    discover_cases,
-    stratified_train_val_split,
-)
-from src.losses import DiceBCELoss, DeepSupervisionWrapper, TverskyBCELoss
-from src.metrics import compute_all_metrics
-from src.models import build_model
-from src.notify import send_ntfy
-from src.postprocess import postprocess_logits
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     compute_composite_score,
     create_run_dir,
     ensure_dir,
     load_checkpoint,
+    load_pretrained_encoder,
     rotate_checkpoints,
     save_checkpoint,
     save_config_copy,
+    set_encoder_trainable,
     save_latest_pointer,
     save_metadata,
 )
@@ -529,6 +483,23 @@ def main() -> None:
     # ---- Model ----
     model = build_model(cfg).to(device)
 
+    pretrained_encoder_checkpoint: str = str(
+        cfg.get("pretrained_encoder_checkpoint", "")
+    ).strip()
+    if pretrained_encoder_checkpoint:
+        enc_stats = load_pretrained_encoder(
+            model=model,
+            path=pretrained_encoder_checkpoint,
+            device=device,
+        )
+        logger.info(
+            "Loaded pretrained encoder from %s | tensors=%d | missing=%d | shape_mismatch=%d",
+            pretrained_encoder_checkpoint,
+            enc_stats["loaded"],
+            len(enc_stats["missing"]),
+            len(enc_stats["shape_mismatch"]),
+        )
+
     model_name = cfg.get("model", "unet3d")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("%s | trainable parameters: %s", model_name, f"{n_params:,}")
@@ -610,6 +581,19 @@ def main() -> None:
             "Deep supervision enabled: %d levels, weights %s",
             _num_ds_levels,
             [f"{w:.3f}" for w in criterion.weights],
+        )
+
+    # Optional: freeze encoder for a few warm-up epochs after loading
+    # pretrained encoder weights.
+    freeze_encoder_epochs: int = max(0, int(cfg.get("freeze_encoder_epochs", 0)))
+    encoder_is_frozen: bool = False
+    if freeze_encoder_epochs > 0:
+        n_frozen = set_encoder_trainable(model, trainable=False)
+        encoder_is_frozen = True
+        logger.info(
+            "Encoder frozen for first %d epoch(s) (%s parameters).",
+            freeze_encoder_epochs,
+            f"{n_frozen:,}",
         )
 
     # ---- Training loop ----
@@ -767,6 +751,20 @@ def main() -> None:
 
         # ---- Train ----
         model.train()
+        if freeze_encoder_epochs > 0:
+            if epoch <= freeze_encoder_epochs:
+                set_encoder_trainable(model, trainable=False)
+                writer.add_scalar("train/encoder_frozen", 1.0, epoch)
+            else:
+                if encoder_is_frozen:
+                    n_unfrozen = set_encoder_trainable(model, trainable=True)
+                    encoder_is_frozen = False
+                    logger.info(
+                        "Encoder unfrozen at epoch %d (%s parameters).",
+                        epoch,
+                        f"{n_unfrozen:,}",
+                    )
+                writer.add_scalar("train/encoder_frozen", 0.0, epoch)
         epoch_loss = 0.0
 
         batch_bar = tqdm(train_loader, desc=f"Train {epoch}/{epochs}", leave=False, unit="batch")

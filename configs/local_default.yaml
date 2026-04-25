@@ -68,7 +68,11 @@ cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all case
 # Checkpointing
 keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep (0 = keep all)
 # resume_checkpoint:              # uncomment and set path to resume from a checkpoint
-                                  # e.g. resume_checkpoint: outputs/runs/my_run/checkpoints/epoch_0003.pt
+                                   # e.g. resume_checkpoint: outputs/runs/my_run/checkpoints/epoch_0003.pt
+
+# SSL encoder initialization (optional)
+pretrained_encoder_checkpoint: ""   # e.g. outputs/pretrain_runs/<run>/checkpoints/best.pt
+freeze_encoder_epochs: 0            # >0 freezes encoder for first N epochs
 
 # Best checkpoint selection (composite score)
 best_ckpt_w_sensitivity: 0.5

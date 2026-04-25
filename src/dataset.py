@@ -41,7 +41,7 @@ import random
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from tqdm import tqdm
 
@@ -179,6 +179,34 @@ def _zscore_normalize(arr: np.ndarray, clip: float = 5.0) -> np.ndarray:
 
     arr = (arr - mean) / std
     return np.clip(arr, -clip, clip).astype(np.float32)
+
+
+def _preprocess_dwi_as_hbv(
+    arr: np.ndarray,
+    clip_percentiles: tuple[float, float] = (1.0, 99.5),
+    use_log1p: bool = True,
+) -> np.ndarray:
+    """
+    Preprocess Prostate158 DWI (b>=1000) when used as an HBV proxy.
+
+    Steps:
+      1) NaN/inf guard
+      2) clamp to non-negative values
+      3) percentile clipping
+      4) optional log1p dynamic-range compression
+    """
+    arr = np.nan_to_num(arr.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    arr = np.maximum(arr, 0.0)
+
+    lo, hi = clip_percentiles
+    if 0.0 <= lo < hi <= 100.0:
+        p_lo, p_hi = np.percentile(arr, [lo, hi])
+        arr = np.clip(arr, p_lo, p_hi)
+
+    if use_log1p:
+        arr = np.log1p(arr)
+
+    return arr.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +399,64 @@ def discover_cases(
     return cases
 
 
+def discover_unlabeled_cases(
+    images_dir: Path,
+    active_keys: Sequence[str] = MODALITY_KEYS,
+) -> list[dict]:
+    """
+    Discover Prostate158 unlabeled cases in flattened layout::
+
+        <images_dir>/
+            <case_id>_t2.nii.gz
+            <case_id>_adc.nii.gz
+            <case_id>_dwi.nii.gz
+
+    Returned dicts are PiCaiDataset-compatible:
+      - ``t2w`` points to ``*_t2.nii.gz``
+      - ``adc`` points to ``*_adc.nii.gz`` when ADC is active
+      - ``hbv`` points to ``*_dwi.nii.gz`` when HBV is active
+      - ``hbv_source`` is set to ``"dwi"`` for optional DWI-specific preprocessing
+      - ``label`` is always ``None``
+    """
+    images_dir = Path(images_dir)
+    t2_suffix = "_t2.nii.gz"
+    adc_suffix = "_adc.nii.gz"
+    dwi_suffix = "_dwi.nii.gz"
+
+    cases: list[dict] = []
+    for t2_path in sorted(images_dir.glob(f"*{t2_suffix}")):
+        case_id = t2_path.name[: -len(t2_suffix)]
+        paths: dict = {
+            "case_id": case_id,
+            "t2w": t2_path,
+            "label": None,
+        }
+        complete = True
+
+        if "adc" in active_keys:
+            adc_path = images_dir / f"{case_id}{adc_suffix}"
+            if not adc_path.exists():
+                logger.warning("Unlabeled case %s: missing ADC (%s)", case_id, adc_path)
+                complete = False
+            else:
+                paths["adc"] = adc_path
+
+        if "hbv" in active_keys:
+            dwi_path = images_dir / f"{case_id}{dwi_suffix}"
+            if not dwi_path.exists():
+                logger.warning("Unlabeled case %s: missing DWI (%s)", case_id, dwi_path)
+                complete = False
+            else:
+                paths["hbv"] = dwi_path
+                paths["hbv_source"] = "dwi"
+
+        if complete:
+            cases.append(paths)
+
+    logger.info("Discovered %d unlabeled cases in %s", len(cases), images_dir)
+    return cases
+
+
 def train_val_split(
     cases: list[dict],
     val_fraction: float = 0.2,
@@ -557,6 +643,7 @@ class PiCaiDataset(Dataset):
         use_cache: bool = False,
         cache_rate: float = 1.0,
         active_modalities: Optional[Sequence[str]] = None,
+        dwi_hbv_preprocess: Optional[dict[str, Any]] = None,
     ) -> None:
         """
         Parameters
@@ -581,11 +668,15 @@ class PiCaiDataset(Dataset):
                           selected deterministically (first ``ceil(N * rate)``
                           cases by index).  Default 1.0 caches the full dataset.
         active_modalities Ordered sequence of modality keys to include in the
-                          output image tensor.  Must be a subset of
-                          ``("t2w", "adc", "hbv")``.  Defaults to all three
-                          when ``None``.  The canonical channel order
-                          ``[T2w, ADC, HBV]`` is always preserved regardless
-                          of the order supplied here.
+                           output image tensor.  Must be a subset of
+                           ``("t2w", "adc", "hbv")``.  Defaults to all three
+                           when ``None``.  The canonical channel order
+                           ``[T2w, ADC, HBV]`` is always preserved regardless
+                           of the order supplied here.
+        dwi_hbv_preprocess Optional configuration for DWI-as-HBV preprocessing
+                           when a case sets ``hbv_source="dwi"``.
+                           Supported keys: ``enabled`` (bool),
+                           ``clip_percentiles`` ([low, high]), ``log1p`` (bool).
         """
         self.images_dir = Path(images_dir)
         self.labels_dir = Path(labels_dir)
@@ -599,6 +690,18 @@ class PiCaiDataset(Dataset):
             if active_modalities is not None
             else MODALITY_KEYS
         )
+        dwi_hbv_preprocess = dwi_hbv_preprocess or {}
+        self.dwi_hbv_preprocess_enabled: bool = bool(
+            dwi_hbv_preprocess.get("enabled", False)
+        )
+        clip = dwi_hbv_preprocess.get("clip_percentiles", (1.0, 99.5))
+        if not isinstance(clip, (list, tuple)) or len(clip) != 2:
+            clip = (1.0, 99.5)
+        self.dwi_hbv_clip_percentiles: tuple[float, float] = (
+            float(clip[0]),
+            float(clip[1]),
+        )
+        self.dwi_hbv_log1p: bool = bool(dwi_hbv_preprocess.get("log1p", True))
 
         if cases is not None:
             self.cases = list(cases)
@@ -618,7 +721,7 @@ class PiCaiDataset(Dataset):
 
         logger.info(
             "PiCaiDataset ready: %d cases, modalities=%s, spacing=%s, "
-            "transform=%s, cache=%s (%.0f%% = %d cases)",
+            "transform=%s, cache=%s (%.0f%% = %d cases), dwi_hbv_preprocess=%s",
             len(self.cases),
             list(self.active_modalities),
             target_spacing,
@@ -626,6 +729,7 @@ class PiCaiDataset(Dataset):
             use_cache,
             self.cache_rate * 100,
             n_cache,
+            "on" if self.dwi_hbv_preprocess_enabled else "off",
         )
 
         # Eager cache warmup: load all cacheable cases now, in the main process,
@@ -750,7 +854,18 @@ class PiCaiDataset(Dataset):
                 resampled = _resample(
                     secondary[key], self.target_spacing, sitk.sitkLinear
                 )
-                arrays.append(_zscore_normalize(_to_numpy(resampled)))
+                arr = _to_numpy(resampled)
+                if (
+                    key == "hbv"
+                    and case.get("hbv_source", "hbv") == "dwi"
+                    and self.dwi_hbv_preprocess_enabled
+                ):
+                    arr = _preprocess_dwi_as_hbv(
+                        arr,
+                        clip_percentiles=self.dwi_hbv_clip_percentiles,
+                        use_log1p=self.dwi_hbv_log1p,
+                    )
+                arrays.append(_zscore_normalize(arr))
 
         # 5. Stack → (C, D, H, W)
         image_np = np.stack(arrays, axis=0)

@@ -15,9 +15,12 @@ What this tests (no real data required):
   4d. Loss robustness: negative-sample exclusion + FP16 overflow guard
   5. All metrics: dice, iou, sensitivity, precision, hd95
   6. Dataset helpers: discover_cases + train_val_split on a synthetic fixture
+   6d. Prostate158 helpers: discover_unlabeled_cases + DWI-as-HBV preprocessing
   7. Transforms: get_train_transforms / get_val_transforms on a dummy batch
   8. Checkpoint save/load round-trip (save_checkpoint + load_checkpoint),
-     including best_composite_score, last_hd95 persistence, and GradScaler state
+      including best_composite_score, last_hd95 persistence, and GradScaler state
+   8b. SSL transfer helpers: get_encoder_state_dict, load_pretrained_encoder,
+       set_encoder_trainable
    9b. visualize_3d helpers: seg auto-detection, downsampling, Plotly HTML output
   10. compute_composite_score: normal case, hd95_scale parameter, HD95=NaN
       redistribution, sensitivity=NaN guard, cached-HD95 consistency,
@@ -1145,6 +1148,104 @@ else:
         fail("stratified_train_val_split test failed", exc)
 
 # ---------------------------------------------------------------------------
+# 6d. Prostate158 helpers: discover_unlabeled_cases + DWI preprocess
+# ---------------------------------------------------------------------------
+section("6d. Prostate158 helpers (discover_unlabeled_cases + DWI-as-HBV preprocess)")
+
+try:
+    import tempfile
+
+    import numpy as np
+
+    from dataset import _preprocess_dwi_as_hbv, discover_unlabeled_cases
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        unlabeled_dir = root / "unlabeled_images"
+        unlabeled_dir.mkdir(parents=True, exist_ok=True)
+
+        case_complete = "00020"
+        case_missing = "00021"
+
+        # Complete triplet (should be discovered when HBV active).
+        for suffix in ("_t2.nii.gz", "_adc.nii.gz", "_dwi.nii.gz"):
+            (unlabeled_dir / f"{case_complete}{suffix}").touch()
+
+        # Missing DWI (should be skipped when HBV active).
+        for suffix in ("_t2.nii.gz", "_adc.nii.gz"):
+            (unlabeled_dir / f"{case_missing}{suffix}").touch()
+
+        cases_all = discover_unlabeled_cases(
+            unlabeled_dir, active_keys=["t2w", "adc", "hbv"]
+        )
+        if len(cases_all) == 1 and cases_all[0]["case_id"] == case_complete:
+            ok("discover_unlabeled_cases keeps only complete t2/adc/dwi triplets")
+        else:
+            fail(
+                f"discover_unlabeled_cases expected 1 complete case, got {len(cases_all)}"
+            )
+
+        if cases_all and cases_all[0].get("hbv_source") == "dwi":
+            ok("discover_unlabeled_cases maps dwi -> hbv and tags hbv_source='dwi'")
+        else:
+            fail("hbv_source='dwi' missing on discovered unlabeled case")
+
+        cases_no_hbv = discover_unlabeled_cases(
+            unlabeled_dir, active_keys=["t2w", "adc"]
+        )
+        if len(cases_no_hbv) == 2:
+            ok("active_keys=['t2w','adc'] does not require DWI")
+        else:
+            fail(
+                "active_keys=['t2w','adc'] should include both synthetic cases "
+                f"(got {len(cases_no_hbv)})"
+            )
+
+        if all("hbv" not in c for c in cases_no_hbv):
+            ok("inactive HBV key is absent from unlabeled case dicts")
+        else:
+            fail("HBV key unexpectedly present when active_keys excludes 'hbv'")
+
+    raw = np.array([-5.0, 0.0, 1.0, np.nan, np.inf], dtype=np.float32)
+    proc = _preprocess_dwi_as_hbv(
+        raw,
+        clip_percentiles=(0.0, 100.0),
+        use_log1p=True,
+    )
+
+    if np.isfinite(proc).all():
+        ok("_preprocess_dwi_as_hbv removes NaN/inf")
+    else:
+        fail("_preprocess_dwi_as_hbv still contains non-finite values")
+
+    if proc.min() >= 0.0:
+        ok("_preprocess_dwi_as_hbv clamps negatives to non-negative range")
+    else:
+        fail(f"_preprocess_dwi_as_hbv produced negative values (min={proc.min():.4f})")
+
+    expected_log1p_one = np.log1p(1.0)
+    if np.any(np.isclose(proc, expected_log1p_one, atol=1e-6)):
+        ok("_preprocess_dwi_as_hbv applies log1p when enabled")
+    else:
+        fail("_preprocess_dwi_as_hbv did not apply log1p as expected")
+
+    proc_no_log = _preprocess_dwi_as_hbv(
+        np.array([0.0, 1.0, 10.0], dtype=np.float32),
+        clip_percentiles=(0.0, 100.0),
+        use_log1p=False,
+    )
+    if np.isclose(proc_no_log[-1], 10.0, atol=1e-6):
+        ok("_preprocess_dwi_as_hbv respects use_log1p=False")
+    else:
+        fail(
+            "_preprocess_dwi_as_hbv use_log1p=False mismatch: "
+            f"got {proc_no_log[-1]:.4f}, expected 10.0"
+        )
+
+except Exception as exc:
+    fail("Prostate158 helper test failed", exc)
+
+# ---------------------------------------------------------------------------
 # 7. Transforms (requires MONAI)
 # ---------------------------------------------------------------------------
 section("7. MONAI transforms")
@@ -1291,6 +1392,71 @@ try:
 
 except Exception as exc:
     fail("Checkpoint round-trip test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 8b. SSL transfer helpers
+# ---------------------------------------------------------------------------
+section("8b. SSL transfer helpers (get_encoder_state_dict + load/freeze encoder)")
+
+try:
+    import tempfile
+
+    from utils import (
+        get_encoder_state_dict,
+        load_pretrained_encoder,
+        set_encoder_trainable,
+    )
+
+    enc_prefixes = ("encoders.", "bottleneck.")
+
+    src_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16))
+    enc_sd = get_encoder_state_dict(src_model)
+
+    if len(enc_sd) > 0 and all(k.startswith(enc_prefixes) for k in enc_sd):
+        ok(f"get_encoder_state_dict exported {len(enc_sd)} encoder tensors")
+    else:
+        fail("get_encoder_state_dict returned empty or non-encoder keys")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ckpt_path = Path(tmp) / "ssl_best.pt"
+        torch.save({"encoder_state_dict": enc_sd}, ckpt_path)
+
+        tgt_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16))
+        stats = load_pretrained_encoder(tgt_model, ckpt_path, device=torch.device("cpu"))
+
+        if int(stats["loaded"]) > 0:
+            ok(
+                "load_pretrained_encoder loaded encoder tensors "
+                f"(loaded={stats['loaded']}, missing={len(stats['missing'])}, "
+                f"shape_mismatch={len(stats['shape_mismatch'])})"
+            )
+        else:
+            fail("load_pretrained_encoder loaded zero tensors")
+
+        n_frozen = set_encoder_trainable(tgt_model, trainable=False)
+        enc_flags = [
+            p.requires_grad
+            for n, p in tgt_model.named_parameters()
+            if n.startswith(enc_prefixes)
+        ]
+        if n_frozen > 0 and enc_flags and not any(enc_flags):
+            ok(f"set_encoder_trainable(False) froze encoder params ({n_frozen:,} parameters)")
+        else:
+            fail("set_encoder_trainable(False) did not freeze encoder parameters")
+
+        n_unfrozen = set_encoder_trainable(tgt_model, trainable=True)
+        enc_flags_after = [
+            p.requires_grad
+            for n, p in tgt_model.named_parameters()
+            if n.startswith(enc_prefixes)
+        ]
+        if n_unfrozen == n_frozen and enc_flags_after and all(enc_flags_after):
+            ok("set_encoder_trainable(True) restored encoder trainability")
+        else:
+            fail("set_encoder_trainable(True) did not fully restore trainability")
+
+except Exception as exc:
+    fail("SSL transfer helper test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 9. evaluate_checkpoint helpers

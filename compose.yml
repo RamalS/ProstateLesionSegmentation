@@ -24,6 +24,7 @@ services:
       BRANCH: main
     ports:
       - "6006:6006"
+      - "8501:8501"
     deploy:
       resources:
         reservations:

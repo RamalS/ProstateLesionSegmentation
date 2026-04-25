@@ -77,7 +77,7 @@ RUN chmod +x /workspace/scripts/*.sh
 
 USER trainer
 
-EXPOSE 6006
+EXPOSE 6006 8501
 
 ENTRYPOINT ["/workspace/scripts/start.sh"]
 CMD ["shell"]

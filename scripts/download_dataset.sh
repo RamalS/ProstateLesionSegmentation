@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# download_dataset.sh - Download PI-CAI images and labels
+# download_dataset.sh - Download PI-CAI data + Prostate158 unlabeled images
 #
 # Usage:
 #   bash scripts/download_dataset.sh [N] [OPTIONS]
 #
-#   [N]            Optional number of image folds to download (1-5).
+#   [N]            Optional number of PI-CAI image folds to download (1-5).
 #                  Fold indices are 0-based, so N=2 downloads fold0 + fold1.
 #                  Default: 5
 #
 # Options:
 #   --out-dir DIR   Root data directory (default: ./data)
 #   --keep-zip      Keep image .zip files after extraction (default: delete)
-#   --no-images     Skip image download/extraction
+#   --no-images     Skip PI-CAI image download/extraction
 #   --no-labels     Skip label download
+#   --no-unlabeled  Skip Prostate158 unlabeled image download
 #   --images-only   Alias for --no-labels
-#   --labels-only   Alias for --no-images
+#   --labels-only   Alias for --no-images --no-unlabeled
 #   --dry-run       Print what would be downloaded without doing anything
 #   -h, --help      Show this help message
 #
@@ -23,6 +24,7 @@
 #   bash scripts/download_dataset.sh
 #   bash scripts/download_dataset.sh 2
 #   bash scripts/download_dataset.sh --images-only
+#   bash scripts/download_dataset.sh --no-unlabeled
 #   docker compose run --rm trainer download
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -57,10 +59,13 @@ KEEP_ZIP=false
 DRY_RUN=false
 DOWNLOAD_IMAGES=true
 DOWNLOAD_LABELS=true
+DOWNLOAD_UNLABELED=true
 N_FOLDS=5
 
 IMAGE_BASE_URL="https://zenodo.org/records/6624726/files"
 TOTAL_FOLDS=5
+UNLABELED_ZIP_URL="https://zenodo.org/records/6481141/files/prostate158_train.zip?download=1"
+UNLABELED_ZIP_NAME="prostate158_train.zip"
 
 LABELS_REPO="https://github.com/DIAGNijmegen/picai_labels"
 SPARSE_PATHS=(
@@ -91,17 +96,18 @@ print_help() {
 Usage:
   bash scripts/download_dataset.sh [N] [OPTIONS]
 
-  [N]            Optional number of image folds to download (1-5).
+  [N]            Optional number of PI-CAI image folds to download (1-5).
                  Fold indices are 0-based, so N=2 downloads fold0 + fold1.
                  Default: 5
 
 Options:
   --out-dir DIR   Root data directory (default: ./data)
   --keep-zip      Keep image .zip files after extraction (default: delete)
-  --no-images     Skip image download/extraction
+  --no-images     Skip PI-CAI image download/extraction
   --no-labels     Skip label download
+  --no-unlabeled  Skip Prostate158 unlabeled image download
   --images-only   Alias for --no-labels
-  --labels-only   Alias for --no-images
+  --labels-only   Alias for --no-images --no-unlabeled
   --dry-run       Print what would be downloaded without doing anything
   -h, --help      Show this help message
 
@@ -109,6 +115,7 @@ Examples:
   bash scripts/download_dataset.sh
   bash scripts/download_dataset.sh 2
   bash scripts/download_dataset.sh --images-only
+  bash scripts/download_dataset.sh --no-unlabeled
   docker compose run --rm trainer download
 EOF
     exit 0
@@ -178,12 +185,21 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=true
             shift
             ;;
-        --no-images|--labels-only)
+        --no-images)
             DOWNLOAD_IMAGES=false
+            shift
+            ;;
+        --labels-only)
+            DOWNLOAD_IMAGES=false
+            DOWNLOAD_UNLABELED=false
             shift
             ;;
         --no-labels|--images-only)
             DOWNLOAD_LABELS=false
+            shift
+            ;;
+        --no-unlabeled)
+            DOWNLOAD_UNLABELED=false
             shift
             ;;
         [1-5])
@@ -202,8 +218,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$DOWNLOAD_IMAGES" == false && "$DOWNLOAD_LABELS" == false ]]; then
-    error "Nothing to do: both images and labels are disabled."
+if [[ "$DOWNLOAD_IMAGES" == false && "$DOWNLOAD_LABELS" == false && "$DOWNLOAD_UNLABELED" == false ]]; then
+    error "Nothing to do: images, labels, and unlabeled images are all disabled."
     exit 1
 fi
 
@@ -219,12 +235,14 @@ fi
 IMAGES_DIR="$OUT_DIR/images"
 TEST_IMAGES_DIR="$OUT_DIR/test_images"
 LABELS_DIR="$OUT_DIR/labels"
+UNLABELED_DIR="$OUT_DIR/unlabeled_images"
 LABELS_CLONE_DIR="$OUT_DIR/.picai_labels_tmp"
 LABELS_DONE_MARKER="$OUT_DIR/.labels_done"
+UNLABELED_DONE_MARKER="$OUT_DIR/.prostate158_unlabeled_done"
 
 if [[ "$DRY_RUN" == false ]]; then
     require_python3
-    if [[ "$DOWNLOAD_IMAGES" == true ]]; then
+    if [[ "$DOWNLOAD_IMAGES" == true || "$DOWNLOAD_UNLABELED" == true ]]; then
         detect_downloader
         info "Using downloader: $DOWNLOADER"
     fi
@@ -391,6 +409,150 @@ PYEOF
     fi
 }
 
+download_unlabeled_images() {
+    local zip_name
+    local zip_path
+    local n_files
+
+    zip_name="$UNLABELED_ZIP_NAME"
+    zip_path="$OUT_DIR/$zip_name"
+
+    if [[ "$DRY_RUN" == false ]]; then
+        mkdir -p "$UNLABELED_DIR"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Prostate158 Unlabeled Download${RESET}"
+    echo "  Source            : $UNLABELED_ZIP_URL"
+    echo "  Output directory  : $UNLABELED_DIR"
+    echo "  Keep zip files    : $KEEP_ZIP"
+    echo "  Dry run           : $DRY_RUN"
+    echo ""
+
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] Would download: $UNLABELED_ZIP_URL"
+        info "[dry-run] Would extract only t2/adc/dwi from prostate158_train/train/<case_id>/"
+        info "[dry-run] Would flatten to: <case_id>_{t2,adc,dwi}.nii.gz"
+        if [[ "$KEEP_ZIP" == false ]]; then
+            info "[dry-run] Would remove: $zip_path"
+        fi
+        success "Unlabeled image dry run complete."
+        return
+    fi
+
+    if [[ -f "$UNLABELED_DONE_MARKER" ]]; then
+        n_files="$(find "$UNLABELED_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
+        success "Unlabeled images already downloaded ($n_files .nii.gz files in $UNLABELED_DIR) - skipping."
+        echo "  Delete $UNLABELED_DONE_MARKER to force a re-download."
+        return
+    fi
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Downloading $zip_name (~2.8 GB)..."
+    if [[ "$DOWNLOADER" == "wget" ]]; then
+        wget -c --show-progress -O "$zip_path" "$UNLABELED_ZIP_URL"
+    else
+        curl -L -C - --progress-bar -o "$zip_path" "$UNLABELED_ZIP_URL"
+    fi
+    success "Download complete: $zip_path"
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Extracting t2/adc/dwi files -> $UNLABELED_DIR (flattened) ..."
+
+    python3 - <<PYEOF
+import shutil
+import zipfile
+from collections import defaultdict
+from pathlib import Path, PurePosixPath
+
+zip_path = "$zip_path"
+out_dir = Path("$UNLABELED_DIR")
+out_dir.mkdir(parents=True, exist_ok=True)
+
+wanted = {
+    "t2.nii.gz": "t2",
+    "adc.nii.gz": "adc",
+    "dwi.nii.gz": "dwi",
+}
+
+written = 0
+already_present = 0
+ignored = 0
+case_modalities = defaultdict(set)
+
+print(f"  Opening {zip_path} ...")
+with zipfile.ZipFile(zip_path, "r") as zf:
+    members = zf.namelist()
+    total = len(members)
+    print(f"  {total} entries in archive")
+
+    for idx, member in enumerate(members, 1):
+        if idx % 1000 == 0 or idx == total:
+            pct = idx / total * 100
+            print(f"  [{idx}/{total}]  {pct:.0f}%", flush=True)
+
+        path = PurePosixPath(member)
+        parts = path.parts
+
+        if len(parts) != 4:
+            ignored += 1
+            continue
+        if parts[0] != "prostate158_train" or parts[1] != "train":
+            ignored += 1
+            continue
+
+        case_id = parts[2]
+        filename = parts[3]
+
+        if not (case_id.isdigit() and 20 <= int(case_id) <= 158):
+            ignored += 1
+            continue
+
+        modality = wanted.get(filename)
+        if modality is None:
+            ignored += 1
+            continue
+
+        target = out_dir / f"{case_id}_{modality}.nii.gz"
+        if target.exists():
+            already_present += 1
+            case_modalities[case_id].add(modality)
+            continue
+
+        with zf.open(member) as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+        written += 1
+        case_modalities[case_id].add(modality)
+
+cases = sorted(case_modalities.keys(), key=int)
+complete_cases = sum(1 for cid in cases if len(case_modalities[cid]) == 3)
+incomplete_cases = [cid for cid in cases if len(case_modalities[cid]) != 3]
+
+print("  Extraction complete.")
+print(f"  Cases found      : {len(cases)}")
+print(f"  Complete cases   : {complete_cases}")
+print(f"  Files written    : {written}")
+print(f"  Files pre-existing: {already_present}")
+print(f"  Archive entries ignored: {ignored}")
+
+if incomplete_cases:
+    preview = ", ".join(incomplete_cases[:10])
+    suffix = " ..." if len(incomplete_cases) > 10 else ""
+    print(f"  [WARN] Incomplete modality set for: {preview}{suffix}")
+PYEOF
+
+    n_files="$(find "$UNLABELED_DIR" -name '*.nii.gz' | wc -l | tr -d ' ')"
+    success "Prepared $n_files unlabeled files in $UNLABELED_DIR"
+
+    if [[ "$KEEP_ZIP" == false ]]; then
+        rm -f "$zip_path"
+        info "Removed $zip_name"
+    fi
+
+    touch "$UNLABELED_DONE_MARKER"
+}
+
 download_labels() {
     local sp
     local n_labels
@@ -500,13 +662,14 @@ PYEOF
 # Main
 # ---------------------------------------------------------------------------
 echo ""
-echo -e "${BOLD}PI-CAI Data Download${RESET}"
+echo -e "${BOLD}Dataset Download${RESET}"
 echo "  Output root      : $OUT_DIR"
 echo "  Download images  : $DOWNLOAD_IMAGES"
 if [[ "$DOWNLOAD_IMAGES" == true ]]; then
     echo "  Image folds      : fold0 - fold$((N_FOLDS - 1))  ($N_FOLDS of $TOTAL_FOLDS)"
 fi
 echo "  Download labels  : $DOWNLOAD_LABELS"
+echo "  Download unlabeled: $DOWNLOAD_UNLABELED"
 echo "  Keep zip files   : $KEEP_ZIP"
 echo "  Dry run          : $DRY_RUN"
 
@@ -522,6 +685,12 @@ else
     info "Skipping label download."
 fi
 
+if [[ "$DOWNLOAD_UNLABELED" == true ]]; then
+    download_unlabeled_images
+else
+    info "Skipping unlabeled image download."
+fi
+
 echo ""
 echo -e "${BOLD}------------------------------------------${RESET}"
 if [[ "$DRY_RUN" == true ]]; then
@@ -534,6 +703,9 @@ else
     fi
     if [[ "$DOWNLOAD_LABELS" == true ]]; then
         echo "  Labels      : $LABELS_DIR"
+    fi
+    if [[ "$DOWNLOAD_UNLABELED" == true ]]; then
+        echo "  Unlabeled   : $UNLABELED_DIR"
     fi
     echo ""
     echo "Start training with:"

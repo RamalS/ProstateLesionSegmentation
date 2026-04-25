@@ -3,17 +3,17 @@ visualize_3d.py - Interactive 3-D visualisation for a single PI-CAI case.
 
 Two modes
 ---------
-1) GT-only visualisation (no model inference):
-   - Load T2w MRI volume and segmentation mask
-   - Align segmentation into T2w grid (nearest-neighbour)
+1) Image / GT visualisation (no model inference):
+   - Load T2w MRI volume and optional segmentation mask
+   - If provided, align segmentation into T2w grid (nearest-neighbour)
    - Save rotatable Plotly HTML scene
 
-2) GT + model comparison (optional):
+2) Model prediction visualisation (optional):
    - Load run config + checkpoint
    - Preprocess case exactly like training/evaluation pipeline
    - Run sliding-window inference
-   - Visualise GT-only / Pred-only / Overlap surfaces
-   - Print per-case metrics (Dice/IoU/Sensitivity/Precision/HD95)
+   - Visualise GT-only / Pred-only / Overlap (or prediction-only when GT absent)
+   - Print per-case metrics when GT is available
 
 Usage
 -----
@@ -180,11 +180,41 @@ def _resolve_seg_path(t2w_path: Path, seg_arg: str | None) -> Path:
     )
 
 
-def _resolve_checkpoint_path(run_dir: Path, checkpoint_arg: str | None) -> Path:
-    """Resolve checkpoint path from --run and optional --checkpoint argument."""
+def resolve_run_dir(run_dir_arg: str | Path) -> Path:
+    """Resolve and validate a run directory path."""
+    run_dir = Path(run_dir_arg).resolve()
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+    cfg_path = run_dir / "config.yaml"
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"config.yaml not found in run directory: {cfg_path}")
+    return run_dir
+
+
+def list_available_checkpoints(run_dir: Path) -> list[Path]:
+    """Return run checkpoints with best.pt first, then newest epoch filenames."""
     ckpt_dir = run_dir / "checkpoints"
     if not ckpt_dir.is_dir():
         raise FileNotFoundError(f"checkpoints/ directory not found: {ckpt_dir}")
+
+    all_pts = [p.resolve() for p in ckpt_dir.glob("*.pt") if p.is_file()]
+    if not all_pts:
+        raise FileNotFoundError(f"No .pt checkpoints found in {ckpt_dir}")
+
+    best = [p for p in all_pts if p.name == "best.pt"]
+    others = sorted(
+        [p for p in all_pts if p.name != "best.pt"],
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    return best + others
+
+
+def _resolve_checkpoint_path(run_dir: Path, checkpoint_arg: str | None) -> Path:
+    """Resolve checkpoint path from --run and optional --checkpoint argument."""
+    ckpt_paths = list_available_checkpoints(run_dir)
+    ckpt_dir = run_dir / "checkpoints"
 
     if checkpoint_arg:
         raw = Path(checkpoint_arg)
@@ -200,14 +230,7 @@ def _resolve_checkpoint_path(run_dir: Path, checkpoint_arg: str | None) -> Path:
             f"Checked as absolute/relative path and under {ckpt_dir}."
         )
 
-    best = ckpt_dir / "best.pt"
-    if best.is_file():
-        return best.resolve()
-
-    all_pts = sorted(ckpt_dir.glob("*.pt"), key=lambda p: p.name, reverse=True)
-    if not all_pts:
-        raise FileNotFoundError(f"No .pt checkpoints found in {ckpt_dir}")
-    return all_pts[0].resolve()
+    return ckpt_paths[0]
 
 
 def _maybe_autodetect_modality(
@@ -235,36 +258,50 @@ def _maybe_autodetect_modality(
     return None
 
 
+def _load_native_t2w_and_optional_gt(
+    t2w_path: Path,
+    seg_path: Path | None,
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float, float], bool]:
+    """
+    Load native-space T2w and optional GT mask for visualisation mode.
+
+    When *seg_path* is ``None``, returns an all-zero GT mask and
+    ``has_ground_truth=False``.
+    """
+    t2w_img = sitk.ReadImage(str(t2w_path))
+    t2w_np = _normalize_for_display(_to_numpy(t2w_img))
+
+    has_ground_truth = seg_path is not None
+    if has_ground_truth:
+        seg_img = sitk.ReadImage(str(seg_path))
+        seg_on_t2w = _resample_to_reference(
+            moving=seg_img,
+            reference=t2w_img,
+            interpolator=sitk.sitkNearestNeighbor,
+            default_value=0.0,
+        )
+        gt_np = (_to_numpy(seg_on_t2w) > 0).astype(np.uint8)
+    else:
+        gt_np = np.zeros(t2w_np.shape, dtype=np.uint8)
+
+    sx, sy, sz = t2w_img.GetSpacing()  # SITK: (x, y, z)
+    spacing_zyx = (float(sz), float(sy), float(sx))
+    return t2w_np, gt_np, spacing_zyx, has_ground_truth
+
+
 def _load_native_t2w_and_gt(
     t2w_path: Path,
     seg_path: Path,
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float, float]]:
-    """
-    Load native-space T2w + GT mask for GT-only visualisation mode.
-
-    GT mask is resampled to T2w grid with nearest-neighbour interpolation.
-    """
-    t2w_img = sitk.ReadImage(str(t2w_path))
-    seg_img = sitk.ReadImage(str(seg_path))
-    seg_on_t2w = _resample_to_reference(
-        moving=seg_img,
-        reference=t2w_img,
-        interpolator=sitk.sitkNearestNeighbor,
-        default_value=0.0,
-    )
-
-    t2w_np = _normalize_for_display(_to_numpy(t2w_img))
-    gt_np = (_to_numpy(seg_on_t2w) > 0).astype(np.uint8)
-
-    sx, sy, sz = t2w_img.GetSpacing()  # SITK: (x, y, z)
-    spacing_zyx = (float(sz), float(sy), float(sx))
+    """Backwards-compatible wrapper for GT-available native-space loading."""
+    t2w_np, gt_np, spacing_zyx, _ = _load_native_t2w_and_optional_gt(t2w_path, seg_path)
     return t2w_np, gt_np, spacing_zyx
 
 
 def _load_model_inputs(
     cfg: dict,
     t2w_path: Path,
-    seg_path: Path,
+    seg_path: Path | None,
     adc_path: str | None,
     hbv_path: str | None,
 ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, tuple[float, float, float], dict[str, Path]]:
@@ -274,7 +311,7 @@ def _load_model_inputs(
     Returns
     -------
     image_t      : (C, D, H, W) model input tensor
-    label_t      : (1, D, H, W) GT tensor (binary)
+    label_t      : (1, D, H, W) GT tensor (binary). All-zero when GT unavailable.
     t2w_display  : (D, H, W) normalized T2w volume in model grid
     spacing_zyx  : voxel spacing of returned arrays
     used_paths   : modality file paths used for model input
@@ -318,7 +355,7 @@ def _load_model_inputs(
 
     ds = PiCaiDataset(
         images_dir=t2w_path.parent,
-        labels_dir=seg_path.parent,
+        labels_dir=seg_path.parent if seg_path is not None else t2w_path.parent,
         target_spacing=target_spacing,
         transform=None,
         cases=[case],
@@ -487,6 +524,7 @@ def _build_3d_figure(
     pred_mask: np.ndarray | None,
     spacing_zyx: tuple[float, float, float],
     case_id: str,
+    has_ground_truth: bool = True,
 ):
     """Build Plotly 3-D figure with MRI volume + segmentation surfaces."""
     try:
@@ -517,7 +555,7 @@ def _build_3d_figure(
         )
     )
 
-    if pred_mask is None:
+    if pred_mask is None and has_ground_truth:
         gt_trace = _make_mask_trace(
             x=x,
             y=y,
@@ -529,7 +567,7 @@ def _build_3d_figure(
         )
         if gt_trace is not None:
             fig.add_trace(gt_trace)
-    else:
+    elif pred_mask is not None and has_ground_truth:
         gt_bool = gt_mask > 0
         pred_bool = pred_mask > 0
         gt_only = gt_bool & ~pred_bool
@@ -543,10 +581,26 @@ def _build_3d_figure(
         ):
             if trace is not None:
                 fig.add_trace(trace)
+    elif pred_mask is not None:
+        pred_trace = _make_mask_trace(
+            x=x,
+            y=y,
+            z=z,
+            mask=(pred_mask > 0),
+            color="#FF0000",
+            name="Prediction",
+            opacity=0.55,
+        )
+        if pred_trace is not None:
+            fig.add_trace(pred_trace)
 
     title = f"{case_id} - 3D lesion view"
-    if pred_mask is not None:
+    if pred_mask is None and not has_ground_truth:
+        title += " (image only)"
+    elif pred_mask is not None and has_ground_truth:
         title += " (GT vs prediction)"
+    elif pred_mask is not None:
+        title += " (prediction only)"
 
     fig.update_layout(
         title=title,
@@ -574,6 +628,7 @@ def save_3d_visualization_html(
     output_path: Path,
     case_id: str,
     max_voxels: int = 250_000,
+    has_ground_truth: bool = True,
 ) -> Path:
     """Render and save standalone interactive Plotly HTML visualisation."""
     t2w_ds, gt_ds, pred_ds, spacing_ds, stride_zyx = _downsample_for_render(
@@ -597,6 +652,7 @@ def save_3d_visualization_html(
         pred_mask=pred_ds,
         spacing_zyx=spacing_ds,
         case_id=case_id,
+        has_ground_truth=has_ground_truth,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -626,7 +682,8 @@ def main() -> None:
         default=None,
         help=(
             "Optional segmentation mask path (.nii.gz). "
-            "If omitted, auto-detected as data/labels/<case_id>.nii.gz"
+            "If omitted, auto-detected as data/labels/<case_id>.nii.gz. "
+            "If not found, visualization proceeds without GT."
         ),
     )
     parser.add_argument("--adc", type=str, default=None, help="Optional ADC .mha path")
@@ -689,7 +746,13 @@ def main() -> None:
         raise FileNotFoundError(f"T2w file not found: {t2w_path}")
 
     case_id = _case_id_from_t2w(t2w_path)
-    seg_path = _resolve_seg_path(t2w_path, args.seg)
+    try:
+        seg_path: Path | None = _resolve_seg_path(t2w_path, args.seg)
+    except FileNotFoundError:
+        if args.seg is not None:
+            raise
+        seg_path = None
+        logger.warning("No segmentation found for case '%s' - continuing without GT.", case_id)
 
     if not (0.0 <= args.threshold <= 1.0):
         raise ValueError(f"--threshold must be in [0, 1], got {args.threshold}")
@@ -702,18 +765,20 @@ def main() -> None:
         output_path = (Path("outputs") / "visualizations" / f"{case_id}_3d.html").resolve()
 
     pred_mask: np.ndarray | None = None
+    has_ground_truth = seg_path is not None
 
     if args.run is None:
-        logger.info("Mode: GT-only visualisation (no model inference)")
-        t2w_vol, gt_mask, spacing_zyx = _load_native_t2w_and_gt(t2w_path, seg_path)
+        logger.info(
+            "Mode: %s visualisation (no model inference)",
+            "GT-only" if has_ground_truth else "image-only",
+        )
+        t2w_vol, gt_mask, spacing_zyx, has_ground_truth = _load_native_t2w_and_optional_gt(
+            t2w_path,
+            seg_path,
+        )
     else:
-        run_dir = Path(args.run).resolve()
+        run_dir = resolve_run_dir(args.run)
         cfg_path = run_dir / "config.yaml"
-
-        if not run_dir.is_dir():
-            raise FileNotFoundError(f"Run directory not found: {run_dir}")
-        if not cfg_path.is_file():
-            raise FileNotFoundError(f"config.yaml not found in run directory: {cfg_path}")
 
         ckpt_path = _resolve_checkpoint_path(run_dir, args.checkpoint)
         cfg = load_config(str(cfg_path))
@@ -734,7 +799,10 @@ def main() -> None:
                 f"got {postprocess_connectivity}"
             )
 
-        logger.info("Mode: GT + model comparison")
+        logger.info(
+            "Mode: %s",
+            "GT + model comparison" if has_ground_truth else "model prediction (no GT)",
+        )
         logger.info("Run directory : %s", run_dir)
         logger.info("Checkpoint    : %s", ckpt_path)
         logger.info("Device        : %s", device)
@@ -776,20 +844,23 @@ def main() -> None:
         pred_mask = pred_bin[0, 0].numpy().astype(np.uint8)
         gt_mask = label_t[0].numpy().astype(np.uint8)
 
-        metrics = compute_all_metrics(
-            preds=metric_logits,
-            targets=label_t.unsqueeze(0),
-            threshold=args.threshold,
-            compute_hd95=True,
-        )
+        if has_ground_truth:
+            metrics = compute_all_metrics(
+                preds=metric_logits,
+                targets=label_t.unsqueeze(0),
+                threshold=args.threshold,
+                compute_hd95=True,
+            )
 
-        print("\nMetrics (single case):")
-        print(f"  case_id      : {case_id}")
-        print(f"  dice         : {_fmt(metrics['dice'])}")
-        print(f"  iou          : {_fmt(metrics['iou'])}")
-        print(f"  sensitivity  : {_fmt(metrics['sensitivity'])}")
-        print(f"  precision    : {_fmt(metrics['precision'])}")
-        print(f"  hd95         : {_fmt(metrics['hd95'])} voxels")
+            print("\nMetrics (single case):")
+            print(f"  case_id      : {case_id}")
+            print(f"  dice         : {_fmt(metrics['dice'])}")
+            print(f"  iou          : {_fmt(metrics['iou'])}")
+            print(f"  sensitivity  : {_fmt(metrics['sensitivity'])}")
+            print(f"  precision    : {_fmt(metrics['precision'])}")
+            print(f"  hd95         : {_fmt(metrics['hd95'])} voxels")
+        else:
+            print("\nMetrics skipped: no ground-truth label provided.")
 
     out = save_3d_visualization_html(
         t2w_vol=t2w_vol,
@@ -799,6 +870,7 @@ def main() -> None:
         output_path=output_path,
         case_id=case_id,
         max_voxels=args.max_voxels,
+        has_ground_truth=has_ground_truth,
     )
 
     print(f"\n3D visualization saved: {out}")

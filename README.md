@@ -28,11 +28,12 @@ src/                        # All importable source code (PYTHONPATH=.)
   utils.py                  # Shared helpers (checkpointing, run directories, composite score)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|visualize-3d|learnability|download|shell)
+  start.sh                  # Docker entrypoint dispatcher (train|tensorboard|smoke-test|evaluate|visualize-3d|visualize-3d-app|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
   visualize_3d.py           # Interactive 3-D HTML visualizer (GT only or GT vs model prediction)
+  visualize_3d_app.py       # Streamlit localhost app wrapper for visualize_3d.py
   count_positives.py        # Print dataset statistics (positive/negative case counts)
-  download_dataset.sh       # Download PI-CAI image folds + labels (single command)
+  download_dataset.sh       # Download PI-CAI + Prostate158 unlabeled images (single command)
   list_checkpoints.sh       # List saved checkpoints for a run
   select_checkpoint.py      # Interactive checkpoint selection helper
   select_checkpoint.sh      # Shell wrapper for select_checkpoint.py
@@ -173,15 +174,22 @@ The ~1:2.5 case-level and ~1:50+ voxel-level imbalance is addressed at four stac
 ### Downloading the Data
 
 ```bash
-# Full dataset (default): all 5 image folds + labels
+# Full dataset (default): PI-CAI (all 5 folds + labels) + Prostate158 unlabeled MRI
 bash scripts/download_dataset.sh
+# Prostate158 files are flattened into data/unlabeled_images as <case>_{t2,adc,dwi}.nii.gz
 
 # Docker equivalent
 docker compose run --rm trainer download
 
-# Optional: images only or labels only
-bash scripts/download_dataset.sh 5 --no-labels
-bash scripts/download_dataset.sh --no-images
+# Skip Prostate158 unlabeled download when needed
+bash scripts/download_dataset.sh --no-unlabeled
+
+# Optional PI-CAI subsets
+bash scripts/download_dataset.sh 5 --no-labels --no-unlabeled
+bash scripts/download_dataset.sh --labels-only
+
+# Prostate158 unlabeled only (no PI-CAI images/labels)
+bash scripts/download_dataset.sh --no-images --no-labels
 
 # Verify dataset statistics after download
 PYTHONPATH=. python scripts/count_positives.py \
@@ -204,6 +212,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | TensorBoard | `docker compose run --rm --service-ports trainer tensorboard` |
 | 3-D visualizer (GT only) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha` |
 | 3-D visualizer (GT vs model) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>` |
+| 3-D visualizer app (localhost) | `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501` |
 | Evaluate checkpoint | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name>` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
@@ -215,6 +224,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
 | 3-D visualizer (GT vs model) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --run outputs/runs/<run_name>` |
+| 3-D visualizer app (localhost) | `PYTHONPATH=. streamlit run scripts/visualize_3d_app.py --server.address 0.0.0.0 --server.port 8501` |
 | Estimate resources | `PYTHONPATH=. python scripts/estimate_resources.py --config configs/default.yaml` |
 | TensorBoard | `tensorboard --logdir outputs/runs --port 6006` |
 

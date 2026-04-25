@@ -8,6 +8,7 @@ numpy
 pandas
 matplotlib
 plotly
+streamlit
 scikit-learn
 tqdm
 pyyaml

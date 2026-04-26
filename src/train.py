@@ -211,7 +211,7 @@ def validate(
             # transforms and other numpy-backed metric operations).
             logits = logits.float()
             metric_logits, _ = postprocess_logits(
-
+                logits=logits,
                 threshold=threshold,
                 enabled=postprocess_enabled,
                 spacing_zyx=spacing_zyx,

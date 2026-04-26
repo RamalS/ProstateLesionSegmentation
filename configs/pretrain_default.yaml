@@ -24,7 +24,7 @@ model: attention_unet3d
 use_t2w: true
 use_adc: true
 use_hbv: true
-features: [32, 64, 128, 256]
+features: [64, 128, 256, 512]
 deep_supervision: false
 
 # DWI -> HBV preprocessing for Prostate158

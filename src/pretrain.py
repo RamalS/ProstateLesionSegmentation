@@ -35,6 +35,7 @@ from src.dataset import (
     resolve_train_val_split_from_manifest,
 )
 from src.models import build_model
+from src.notify import send_ntfy
 from src.utils import (
     create_run_dir,
     ensure_cuda_binary_compatibility,
@@ -541,6 +542,19 @@ def main() -> None:
     )
     logger.info("Run directory: %s", run_dir)
 
+    send_ntfy(
+        cfg,
+        title=f"SSL pretraining started: {cfg.get('experiment_name', 'ssl_pretrain')}",
+        message=(
+            f"Epochs: {epochs}\n"
+            f"SSL cases: {len(unlabeled_cases)}\n"
+            f"Device: {device} | AMP: {amp_dtype_str.upper() if use_amp else 'off'}\n"
+            f"Run dir: {run_dir}"
+        ),
+        tags=["rocket"],
+        priority="default",
+    )
+
     best_loss = float("inf")
 
     for epoch in tqdm(range(1, epochs + 1), desc="Epochs", unit="epoch"):
@@ -658,6 +672,39 @@ def main() -> None:
     logger.info("Best loss: %.4f", best_loss)
     logger.info("Artifacts saved to: %s", run_dir)
 
+    send_ntfy(
+        cfg,
+        title=f"SSL pretraining complete: {cfg.get('experiment_name', 'ssl_pretrain')}",
+        message=(
+            f"Best loss: {best_loss:.4f}\n"
+            f"Artifacts: {run_dir}"
+        ),
+        tags=["white_check_mark"],
+        priority="default",
+    )
+
 
 if __name__ == "__main__":
-    main()
+    # Pre-load config for failure notification without duplicating full parser.
+    _pre_parser = argparse.ArgumentParser(add_help=False)
+    _pre_parser.add_argument("--config", type=str, default=None)
+    _known, _ = _pre_parser.parse_known_args()
+
+    _ntfy_cfg: dict = {}
+    if _known.config:
+        try:
+            _ntfy_cfg = load_config(_known.config)
+        except Exception:
+            pass
+
+    try:
+        main()
+    except Exception as _exc:
+        send_ntfy(
+            _ntfy_cfg,
+            title=f"SSL pretraining FAILED: {_ntfy_cfg.get('experiment_name', 'unknown')}",
+            message=f"{type(_exc).__name__}: {_exc}",
+            tags=["x", "rotating_light"],
+            priority="urgent",
+        )
+        raise

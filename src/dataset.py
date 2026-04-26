@@ -39,6 +39,7 @@ import math
 import os
 import random
 import sys
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -56,6 +57,7 @@ logger = logging.getLogger(__name__)
 MODALITY_SUFFIXES = ("_t2w.mha", "_adc.mha", "_hbv.mha")
 MODALITY_KEYS = ("t2w", "adc", "hbv")
 LABEL_SUFFIX = ".nii.gz"
+SPLIT_MANIFEST_VERSION = 1
 
 
 def active_modality_pairs(cfg: dict) -> list[tuple[str, str]]:
@@ -505,6 +507,285 @@ def _case_has_lesion(case: dict) -> bool:
         return False
 
 
+def _load_lesion_flag_cache(cache_path: Path | None) -> dict[str, bool]:
+    """
+    Load ``{case_id: has_lesion}`` flags from JSON sidecar.
+
+    Returns an empty dict when no cache is configured, the cache file does
+    not exist, or parsing fails.
+    """
+    if cache_path is None or not cache_path.exists():
+        return {}
+
+    try:
+        with cache_path.open() as fh:
+            flags = {str(k): bool(v) for k, v in json.load(fh).items()}
+        logger.info("Loaded %d cached lesion flags from %s", len(flags), cache_path)
+        return flags
+    except Exception as exc:
+        logger.warning("Could not read lesion flag cache %s: %s", cache_path, exc)
+        return {}
+
+
+def _persist_lesion_flag_cache(cache_path: Path | None, flags: dict[str, bool]) -> None:
+    """
+    Persist lesion-flag cache to disk.
+    """
+    if cache_path is None:
+        return
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w") as fh:
+            json.dump(flags, fh)
+        logger.info("Saved %d lesion flags to %s", len(flags), cache_path)
+    except Exception as exc:
+        logger.warning("Could not write lesion flag cache %s: %s", cache_path, exc)
+
+
+def annotate_cases_with_lesion_flags(
+    cases: list[dict],
+    cache_path: Path | None = None,
+) -> None:
+    """
+    Annotate each case dict in-place with ``has_lesion``.
+
+    When *cache_path* is provided, known labels are reused from
+    ``{case_id: has_lesion}`` JSON cache and newly-computed flags are written
+    back.
+    """
+    flag_cache = _load_lesion_flag_cache(cache_path)
+
+    new_flags = False
+    seen_case_ids: set[str] = set()
+
+    for case in cases:
+        cid = str(case["case_id"])
+        if cid in seen_case_ids:
+            raise ValueError(f"Duplicate case_id in case list: {cid}")
+        seen_case_ids.add(cid)
+
+        if "has_lesion" in case:
+            flag = bool(case["has_lesion"])
+            case["has_lesion"] = flag
+            if flag_cache.get(cid) != flag:
+                flag_cache[cid] = flag
+                new_flags = True
+            continue
+
+        if cid in flag_cache:
+            case["has_lesion"] = flag_cache[cid]
+            continue
+
+        flag = _case_has_lesion(case)
+        case["has_lesion"] = flag
+        flag_cache[cid] = flag
+        new_flags = True
+
+    if new_flags:
+        _persist_lesion_flag_cache(cache_path, flag_cache)
+
+
+def default_split_manifest_path(base_output_dir: str | Path) -> Path:
+    """
+    Return the shared default split-manifest path for a run root.
+
+    Examples:
+      - ``/outputs/runs``         -> ``/outputs/splits/picai_train_val_split.json``
+      - ``/outputs/pretrain_runs`` -> ``/outputs/splits/picai_train_val_split.json``
+    """
+    return Path(base_output_dir).parent / "splits" / "picai_train_val_split.json"
+
+
+def _build_split_manifest(
+    train_cases: list[dict],
+    val_cases: list[dict],
+    seed: int,
+    val_fraction: float,
+) -> dict[str, object]:
+    return {
+        "version": SPLIT_MANIFEST_VERSION,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "seed": int(seed),
+        "val_fraction": float(val_fraction),
+        "num_total": len(train_cases) + len(val_cases),
+        "num_train": len(train_cases),
+        "num_val": len(val_cases),
+        "train_case_ids": [str(c["case_id"]) for c in train_cases],
+        "val_case_ids": [str(c["case_id"]) for c in val_cases],
+    }
+
+
+def save_split_manifest(path: Path, manifest: dict[str, object]) -> None:
+    """
+    Save split manifest JSON to *path*.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+        fh.write("\n")
+
+
+def load_split_manifest(path: Path) -> dict[str, object]:
+    """
+    Load and minimally validate a split-manifest JSON file.
+    """
+    with path.open(encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    if not isinstance(manifest, dict):
+        raise ValueError(f"Split manifest at {path} must contain a JSON object.")
+
+    for key in ("train_case_ids", "val_case_ids"):
+        value = manifest.get(key)
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(
+                f"Split manifest at {path} must contain '{key}' as a list of strings."
+            )
+
+    return manifest
+
+
+def _cases_from_split_manifest(
+    cases: list[dict],
+    manifest: dict[str, object],
+    manifest_path: Path,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Resolve train/val case lists from a split manifest.
+
+    Raises when the manifest is inconsistent with the current discovered case
+    list (e.g. stale IDs, overlaps, duplicates).
+    """
+    train_case_ids = [str(v) for v in manifest["train_case_ids"]]
+    val_case_ids = [str(v) for v in manifest["val_case_ids"]]
+
+    if len(train_case_ids) != len(set(train_case_ids)):
+        raise ValueError(f"Split manifest has duplicate train IDs: {manifest_path}")
+    if len(val_case_ids) != len(set(val_case_ids)):
+        raise ValueError(f"Split manifest has duplicate val IDs: {manifest_path}")
+
+    overlap = set(train_case_ids) & set(val_case_ids)
+    if overlap:
+        sample = ", ".join(sorted(overlap)[:5])
+        raise ValueError(
+            "Split manifest has case IDs in both train and val: "
+            f"{sample} (path={manifest_path})"
+        )
+
+    case_map: dict[str, dict] = {}
+    for case in cases:
+        cid = str(case["case_id"])
+        if cid in case_map:
+            raise ValueError(f"Duplicate case_id discovered in dataset: {cid}")
+        case_map[cid] = case
+
+    manifest_ids = set(train_case_ids) | set(val_case_ids)
+    discovered_ids = set(case_map.keys())
+
+    missing_in_data = sorted(manifest_ids - discovered_ids)
+    missing_in_manifest = sorted(discovered_ids - manifest_ids)
+
+    if missing_in_data or missing_in_manifest:
+        details: list[str] = []
+        if missing_in_data:
+            details.append(
+                "manifest IDs missing in current data="
+                f"{len(missing_in_data)} (e.g. {', '.join(missing_in_data[:5])})"
+            )
+        if missing_in_manifest:
+            details.append(
+                "current data IDs missing in manifest="
+                f"{len(missing_in_manifest)} (e.g. {', '.join(missing_in_manifest[:5])})"
+            )
+        joined = " | ".join(details)
+        raise RuntimeError(
+            f"Split manifest does not match current dataset: {joined}. "
+            "Use --new-split-manifest to regenerate."
+        )
+
+    train_cases = [case_map[cid] for cid in train_case_ids]
+    val_cases = [case_map[cid] for cid in val_case_ids]
+    return train_cases, val_cases
+
+
+def resolve_train_val_split_from_manifest(
+    cases: list[dict],
+    val_fraction: float,
+    seed: int,
+    manifest_path: Path,
+    new_split_manifest: bool = False,
+    cache_path: Path | None = None,
+) -> tuple[list[dict], list[dict], dict[str, object], bool]:
+    """
+    Resolve train/val split using a persisted manifest.
+
+    Behavior:
+      - If ``manifest_path`` does not exist, it is created automatically.
+      - If ``new_split_manifest`` is True, the manifest is regenerated.
+      - Otherwise, existing manifest IDs are reused exactly.
+
+    Returns
+    -------
+    (train_cases, val_cases, manifest, was_created)
+    """
+    manifest_path = Path(manifest_path)
+    existed_before = manifest_path.exists()
+    should_create = new_split_manifest or not existed_before
+
+    if should_create:
+        train_cases, val_cases = stratified_train_val_split(
+            cases,
+            val_fraction=val_fraction,
+            seed=seed,
+            cache_path=cache_path,
+        )
+        manifest = _build_split_manifest(
+            train_cases=train_cases,
+            val_cases=val_cases,
+            seed=seed,
+            val_fraction=val_fraction,
+        )
+        save_split_manifest(manifest_path, manifest)
+        logger.info(
+            "%s split manifest at %s",
+            "Regenerated" if new_split_manifest and existed_before else "Created",
+            manifest_path,
+        )
+        return train_cases, val_cases, manifest, True
+
+    manifest = load_split_manifest(manifest_path)
+    annotate_cases_with_lesion_flags(cases, cache_path=cache_path)
+
+    train_cases, val_cases = _cases_from_split_manifest(
+        cases=cases,
+        manifest=manifest,
+        manifest_path=manifest_path,
+    )
+
+    manifest_seed = manifest.get("seed")
+    manifest_val_fraction = manifest.get("val_fraction")
+    if (
+        manifest_seed is not None
+        and int(manifest_seed) != int(seed)
+    ) or (
+        manifest_val_fraction is not None
+        and float(manifest_val_fraction) != float(val_fraction)
+    ):
+        logger.warning(
+            "Using existing split manifest %s (seed=%s, val_fraction=%s) "
+            "which differs from current config (seed=%s, val_fraction=%s).",
+            manifest_path,
+            manifest_seed,
+            manifest_val_fraction,
+            seed,
+            val_fraction,
+        )
+
+    logger.info("Loaded existing split manifest from %s", manifest_path)
+    return train_cases, val_cases, manifest, False
+
+
 def stratified_train_val_split(
     cases: list[dict],
     val_fraction: float = 0.2,
@@ -535,39 +816,7 @@ def stratified_train_val_split(
     (train_cases, val_cases) — both lists preserve the dataset's
     positive/negative ratio within ±1 case.
     """
-    # Load cached lesion flags from JSON sidecar (if available).
-    flag_cache: dict[str, bool] = {}
-    if cache_path is not None and cache_path.exists():
-        try:
-            with cache_path.open() as fh:
-                flag_cache = {k: bool(v) for k, v in json.load(fh).items()}
-            logger.info(
-                "Loaded %d cached lesion flags from %s", len(flag_cache), cache_path
-            )
-        except Exception as exc:
-            logger.warning("Could not read lesion flag cache %s: %s", cache_path, exc)
-
-    # Annotate cases with positivity flag (reads label files only for cache misses).
-    new_flags = False
-    for case in cases:
-        if "has_lesion" not in case:
-            cid = case["case_id"]
-            if cid in flag_cache:
-                case["has_lesion"] = flag_cache[cid]
-            else:
-                case["has_lesion"] = _case_has_lesion(case)
-                flag_cache[cid] = case["has_lesion"]
-                new_flags = True
-
-    # Persist updated flag cache if anything new was computed.
-    if new_flags and cache_path is not None:
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with cache_path.open("w") as fh:
-                json.dump(flag_cache, fh)
-            logger.info("Saved %d lesion flags to %s", len(flag_cache), cache_path)
-        except Exception as exc:
-            logger.warning("Could not write lesion flag cache %s: %s", cache_path, exc)
+    annotate_cases_with_lesion_flags(cases, cache_path=cache_path)
 
     pos_cases = [c for c in cases if c["has_lesion"]]
     neg_cases = [c for c in cases if not c["has_lesion"]]

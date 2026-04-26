@@ -11,9 +11,11 @@ Checkpoint stores encoder_state_dict for transfer into src.train.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,14 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.config import load_config
-from src.dataset import PiCaiDataset, active_modality_pairs, discover_unlabeled_cases
+from src.dataset import (
+    PiCaiDataset,
+    active_modality_pairs,
+    default_split_manifest_path,
+    discover_cases,
+    discover_unlabeled_cases,
+    resolve_train_val_split_from_manifest,
+)
 from src.models import build_model
 from src.utils import (
     create_run_dir,
@@ -158,6 +167,55 @@ def _build_block_mask(
     return mask.unsqueeze(1)
 
 
+def _sample_labeled_cases_for_ssl(
+    train_cases: list[dict],
+    fraction: float,
+    seed: int,
+) -> list[dict]:
+    """
+    Sample a fraction of labeled train cases for SSL pretraining.
+
+    Sampling preserves the positive/negative case ratio as closely as possible
+    when ``has_lesion`` annotations are present.
+    """
+    if not train_cases or fraction <= 0.0:
+        return []
+
+    if fraction >= 1.0:
+        return train_cases.copy()
+
+    n_total = len(train_cases)
+    n_target = min(n_total, max(1, int(math.ceil(n_total * fraction))))
+
+    rng = random.Random(seed)
+    pos_cases = [c for c in train_cases if bool(c.get("has_lesion", False))]
+    neg_cases = [c for c in train_cases if not bool(c.get("has_lesion", False))]
+
+    if not pos_cases or not neg_cases:
+        return rng.sample(train_cases, n_target)
+
+    pos_ratio = len(pos_cases) / n_total
+    n_pos = int(round(n_target * pos_ratio))
+    n_pos = min(len(pos_cases), max(1, n_pos))
+    n_neg = n_target - n_pos
+
+    if n_neg > len(neg_cases):
+        deficit = n_neg - len(neg_cases)
+        n_neg = len(neg_cases)
+        n_pos = min(len(pos_cases), n_pos + deficit)
+    elif n_neg < 0:
+        n_neg = 0
+
+    if n_pos > len(pos_cases):
+        deficit = n_pos - len(pos_cases)
+        n_pos = len(pos_cases)
+        n_neg = min(len(neg_cases), n_neg + deficit)
+
+    sampled = rng.sample(pos_cases, n_pos) + rng.sample(neg_cases, n_neg)
+    rng.shuffle(sampled)
+    return sampled
+
+
 def _save_ssl_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -185,6 +243,11 @@ def main() -> None:
         description="Self-supervised encoder pretraining on unlabeled MRI"
     )
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument(
+        "--new-split-manifest",
+        action="store_true",
+        help="Regenerate train/val split manifest before this run.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -240,6 +303,145 @@ def main() -> None:
             f"No unlabeled cases found in {unlabeled_images_dir}. "
             "Expected <case>_{t2,adc,dwi}.nii.gz files."
         )
+
+    pretrain_labeled_fraction = float(cfg.get("pretrain_labeled_fraction", 0.0))
+    if pretrain_labeled_fraction < 0.0 or pretrain_labeled_fraction > 1.0:
+        raise ValueError(
+            f"pretrain_labeled_fraction must be in [0, 1], got {pretrain_labeled_fraction}."
+        )
+
+    split_manifest_raw = cfg.get("split_manifest_path", "")
+    split_manifest_cfg = (
+        str(split_manifest_raw).strip()
+        if split_manifest_raw is not None
+        else ""
+    )
+    split_manifest_path = (
+        Path(split_manifest_cfg)
+        if split_manifest_cfg
+        else default_split_manifest_path(base_output_dir)
+    )
+    split_manifest_copy_path = run_dir / "train_val_split_manifest.json"
+    lesion_flag_cache_path = split_manifest_path.parent / "lesion_flags.json"
+
+    guessed_labeled_root = unlabeled_images_dir.parent
+    labeled_images_dir = Path(
+        str(cfg.get("labeled_images_dir", guessed_labeled_root / "images"))
+    )
+    labeled_labels_dir = Path(
+        str(cfg.get("labeled_labels_dir", guessed_labeled_root / "labels"))
+    )
+    labeled_val_fraction = float(cfg.get("val_fraction", 0.2))
+
+    train_labeled_cases: list[dict] = []
+    val_labeled_cases: list[dict] = []
+
+    must_resolve_manifest = (
+        args.new_split_manifest
+        or pretrain_labeled_fraction > 0.0
+        or not split_manifest_path.exists()
+    )
+
+    if must_resolve_manifest:
+        if not labeled_images_dir.exists():
+            raise FileNotFoundError(
+                f"labeled_images_dir not found: {labeled_images_dir}"
+            )
+        if not labeled_labels_dir.exists():
+            raise FileNotFoundError(
+                f"labeled_labels_dir not found: {labeled_labels_dir}"
+            )
+
+        labeled_all_cases = discover_cases(
+            images_dir=labeled_images_dir,
+            labels_dir=labeled_labels_dir,
+            active_keys=active_keys,
+        )
+        if not labeled_all_cases:
+            raise RuntimeError(
+                f"No labeled cases found in {labeled_images_dir} / {labeled_labels_dir}."
+            )
+
+        train_labeled_cases, val_labeled_cases, _, manifest_created = (
+            resolve_train_val_split_from_manifest(
+                cases=labeled_all_cases,
+                val_fraction=labeled_val_fraction,
+                seed=seed,
+                manifest_path=split_manifest_path,
+                new_split_manifest=args.new_split_manifest,
+                cache_path=lesion_flag_cache_path,
+            )
+        )
+        logger.info(
+            "Split manifest: %s (%s)",
+            split_manifest_path,
+            "created" if manifest_created else "reused",
+        )
+    else:
+        logger.info("Using existing split manifest at %s", split_manifest_path)
+
+    if not split_manifest_path.exists():
+        raise FileNotFoundError(
+            f"Split manifest missing after resolution: {split_manifest_path}"
+        )
+    shutil.copy2(split_manifest_path, split_manifest_copy_path)
+    logger.info("Copied split manifest to %s", split_manifest_copy_path)
+
+    if pretrain_labeled_fraction > 0.0:
+        if not train_labeled_cases:
+            raise RuntimeError(
+                "No train-labeled cases available in split manifest. "
+                "Cannot sample labeled pretraining subset."
+            )
+        sampled_labeled_cases = _sample_labeled_cases_for_ssl(
+            train_cases=train_labeled_cases,
+            fraction=pretrain_labeled_fraction,
+            seed=seed,
+        )
+        sampled_ids = {str(case["case_id"]) for case in sampled_labeled_cases}
+        val_case_ids = {str(case["case_id"]) for case in val_labeled_cases}
+        overlap = sampled_ids & val_case_ids
+        if overlap:
+            sample = ", ".join(sorted(overlap)[:5])
+            raise RuntimeError(
+                "Leakage detected: sampled pretrain labeled cases overlap with "
+                f"validation IDs ({sample})."
+            )
+
+        labeled_ssl_cases: list[dict] = []
+        for case in sampled_labeled_cases:
+            ssl_case = dict(case)
+            ssl_case["label"] = None
+            labeled_ssl_cases.append(ssl_case)
+
+        labeled_subset_path = run_dir / "pretrain_labeled_subset.json"
+        with labeled_subset_path.open("w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "pretrain_labeled_fraction": pretrain_labeled_fraction,
+                    "num_train_labeled_cases": len(train_labeled_cases),
+                    "num_sampled_labeled_cases": len(sampled_labeled_cases),
+                    "sampled_case_ids": sorted(sampled_ids),
+                },
+                fh,
+                indent=2,
+            )
+            fh.write("\n")
+
+        n_unlabeled = len(unlabeled_cases)
+        unlabeled_cases = unlabeled_cases + labeled_ssl_cases
+        rng = random.Random(seed)
+        rng.shuffle(unlabeled_cases)
+
+        logger.info(
+            "Added labeled training subset to SSL data: %d unlabeled + %d labeled "
+            "(fraction=%.4f of %d train labeled cases)",
+            n_unlabeled,
+            len(labeled_ssl_cases),
+            pretrain_labeled_fraction,
+            len(train_labeled_cases),
+        )
+        logger.info("Saved labeled pretraining subset IDs to %s", labeled_subset_path)
 
     target_spacing: tuple[float, ...] = tuple(cfg.get("target_spacing", [3.0, 0.5, 0.5]))
     train_ds = PiCaiDataset(

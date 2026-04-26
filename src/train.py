@@ -23,6 +23,7 @@ import gc
 import logging
 import math
 import random
+import shutil
 import warnings
 from pathlib import Path
 
@@ -38,8 +39,9 @@ from src.config import load_config
 from src.dataset import (
     PiCaiDataset,
     active_modality_pairs,
+    default_split_manifest_path,
     discover_cases,
-    stratified_train_val_split,
+    resolve_train_val_split_from_manifest,
 )
 from src.losses import DiceBCELoss, DeepSupervisionWrapper, TverskyBCELoss
 from src.metrics import compute_all_metrics
@@ -350,6 +352,11 @@ def main() -> None:
              "for both training and validation (no split). "
              "Useful to verify the model can overfit a small subset.",
     )
+    parser.add_argument(
+        "--new-split-manifest",
+        action="store_true",
+        help="Regenerate train/val split manifest before this run.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -410,6 +417,39 @@ def main() -> None:
             "Check that your data is mounted correctly (./data -> /data)."
         )
 
+    split_manifest_raw = cfg.get("split_manifest_path", "")
+    split_manifest_cfg = (
+        str(split_manifest_raw).strip()
+        if split_manifest_raw is not None
+        else ""
+    )
+    split_manifest_path = (
+        Path(split_manifest_cfg)
+        if split_manifest_cfg
+        else default_split_manifest_path(cfg["base_output_dir"])
+    )
+    lesion_flag_cache_path = split_manifest_path.parent / "lesion_flags.json"
+
+    manifest_train_cases, manifest_val_cases, _, manifest_created = (
+        resolve_train_val_split_from_manifest(
+            cases=all_cases,
+            val_fraction=float(cfg.get("val_fraction", 0.2)),
+            seed=seed,
+            manifest_path=split_manifest_path,
+            new_split_manifest=args.new_split_manifest,
+            cache_path=lesion_flag_cache_path,
+        )
+    )
+
+    split_manifest_copy_path = run_dir / "train_val_split_manifest.json"
+    shutil.copy2(split_manifest_path, split_manifest_copy_path)
+    logger.info(
+        "Split manifest: %s (%s) | copied to %s",
+        split_manifest_path,
+        "created" if manifest_created else "reused",
+        split_manifest_copy_path,
+    )
+
     if args.learnability is not None:
         n = max(1, args.learnability)
         n = min(n, len(all_cases))
@@ -422,12 +462,8 @@ def main() -> None:
             n,
         )
     else:
-        train_cases, val_cases = stratified_train_val_split(
-            all_cases,
-            val_fraction=cfg.get("val_fraction", 0.2),
-            seed=seed,
-            cache_path=Path(cfg["base_output_dir"]) / "lesion_flags.json",
-        )
+        train_cases = manifest_train_cases
+        val_cases = manifest_val_cases
         logger.info("Split: %d train | %d val", len(train_cases), len(val_cases))
 
     train_ds = PiCaiDataset(

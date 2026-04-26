@@ -297,10 +297,19 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 1. Run SSL pretraining on `data/unlabeled_images` (Prostate158; DWI is mapped to HBV channel):
    - Docker: `docker compose run --rm trainer pretrain`
    - Local: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
+   - Regenerate split manifest if needed: add `--new-split-manifest`
 2. Take the best SSL checkpoint: `outputs/pretrain_runs/<run>/checkpoints/best.pt`.
 3. Set `pretrained_encoder_checkpoint` in `configs/default.yaml` or `configs/local_default.yaml`.
 4. Optionally set `freeze_encoder_epochs > 0` for a short supervised warm-up.
 5. Run normal supervised training (`train`) on PI-CAI labeled data.
+
+Split-manifest workflow:
+
+- Train and pretrain share one split manifest (default: `outputs/splits/picai_train_val_split.json`; Docker: `/outputs/splits/picai_train_val_split.json`).
+- If the manifest does not exist, it is created automatically.
+- Pass `--new-split-manifest` to `train` or `pretrain` to regenerate it.
+- Each run copies the active manifest into its run folder as `train_val_split_manifest.json`.
+- SSL pretraining can include a labeled subset by setting `pretrain_labeled_fraction` (0 to 1) in `configs/pretrain*.yaml`; only manifest train IDs are eligible (val IDs are excluded).
 
 Training artifacts are written to `./outputs/runs/<experiment_name>_<timestamp>/`:
 

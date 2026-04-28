@@ -38,6 +38,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.1291 |
@@ -95,6 +96,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.2306 |
@@ -152,6 +154,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.6470 |
@@ -209,6 +212,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.6332 |
@@ -266,6 +270,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.5914 |
@@ -323,6 +328,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.4731 |
@@ -380,6 +386,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.6143 |
@@ -437,6 +444,7 @@
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
+
 | Metric | Value |
 | --- | --- |
 | dice | 0.4864 |

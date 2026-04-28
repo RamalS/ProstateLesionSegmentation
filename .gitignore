@@ -11,3 +11,7 @@ __pycache__/
 
 # OpenCode
 .opencode/
+
+# Visualization artifacts
+visualizations/*.html
+visualizations/**/*.html

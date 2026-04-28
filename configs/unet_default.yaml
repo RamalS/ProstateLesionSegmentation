@@ -22,7 +22,7 @@ num_samples: 1                     # patches extracted per volume per __getitem_
                                    # effective batch size = batch_size × num_samples
 
 # Model
-model: attention_unet3             # options: unet3d, attention_unet3d, deconver
+model: attention_unet3d            # options: unet3d, attention_unet3d, deconver
 use_t2w: true                      # include T2w channel
 use_adc: true                      # include ADC channel — most discriminative for csPCa
 use_hbv: true                      # include HBV channel — complementary DWI information
@@ -66,7 +66,7 @@ sw_batch_size: 40                  # number of patches processed per SW step
 val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
 val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
 val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
-val_start_epoch: 50                # skip validation entirely before this epoch (saves time during early training)
+val_start_epoch: 0                 # skip validation entirely before this epoch (saves time during early training)
 
 # Prediction / post-processing
 pred_threshold: 0.5                        # sigmoid threshold before binarization

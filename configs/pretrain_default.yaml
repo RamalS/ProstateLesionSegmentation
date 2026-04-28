@@ -1,5 +1,5 @@
 experiment_name: ssl_pretrain_mae
-epochs: 120
+epochs: 250
 learning_rate: 2.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
@@ -14,7 +14,7 @@ labeled_images_dir: /data/images
 labeled_labels_dir: /data/labels
 target_spacing: [3.0, 0.5, 0.5]
 val_fraction: 0.2
-pretrain_labeled_fraction: 0.0
+pretrain_labeled_fraction: 0.5
 # split_manifest_path: /outputs/splits/picai_train_val_split.json
 
 # SSL patch/mask setup
@@ -47,3 +47,6 @@ cache_rate: 1.0
 
 # Checkpointing
 keep_last_checkpoints: 3
+
+ntfy_url: "https://ntfy.sh"
+ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"

@@ -1535,7 +1535,7 @@ except Exception as exc:
 # ---------------------------------------------------------------------------
 # 9b. visualize_3d helpers
 # ---------------------------------------------------------------------------
-section("9b. visualize_3d helpers (_resolve_seg_path, _downsample_for_render, save_3d_visualization_html)")
+section("9b. visualize_3d helpers (_resolve_seg_path, _downsample_for_render, save_3d_visualization_html, save_3d_visualization_gif)")
 
 try:
     import importlib.util
@@ -1553,6 +1553,7 @@ try:
     _downsample = _vis_mod._downsample_for_render
     _resolve_seg = _vis_mod._resolve_seg_path
     _save_html = _vis_mod.save_3d_visualization_html
+    _save_gif = _vis_mod.save_3d_visualization_gif
 
     # Seg auto-detection smoke check from <root>/test_images/<case>_t2w.mha
     # to <root>/labels/<case>.nii.gz.
@@ -1619,6 +1620,11 @@ try:
         html_text = out_html.read_text(encoding="utf-8", errors="ignore")
         assert "plotly" in html_text.lower(), "output HTML does not look like Plotly export"
         ok(f"save_3d_visualization_html wrote {out_html.name} ({out_html.stat().st_size / 1024:.0f} KB)")
+
+    if callable(_save_gif):
+        ok("save_3d_visualization_gif helper is available")
+    else:
+        fail("save_3d_visualization_gif helper is missing or not callable")
 
 except ImportError as exc:
     skip(f"visualize_3d helper test skipped ({exc})")

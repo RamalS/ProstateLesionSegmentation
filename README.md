@@ -8,11 +8,17 @@ The work includes analysis of prostate MRI modalities (T2-weighted, ADC, DWI), i
 
 Evaluation is performed using standard metrics such as Dice, IoU, Sensitivity, Specificity, and 95th-percentile Hausdorff Distance (HD95), with comparisons across different model variants.
 
+Latest consolidated run report: [`report.md`](report.md)
+
 ---
 
 ## Project Layout
 
 ```
+report.md                   # Generated run summary (tracked in git)
+visualizations/             # Tracked PNG/GIF/HTML artifacts referenced by report.md
+outputs/                    # Runtime artifacts (gitignored)
+  runs/                     # Per-run checkpoints/tensorboard/metadata
 src/                        # All importable source code (PYTHONPATH=.)
   config.py                 # YAML config loader
   dataset.py                # PiCaiDataset, discover_cases, discover_unlabeled_cases, stratified_train_val_split
@@ -29,8 +35,9 @@ src/                        # All importable source code (PYTHONPATH=.)
   utils.py                  # Shared helpers (checkpointing, run directories, composite score, encoder transfer)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher (train|pretrain|tensorboard|smoke-test|evaluate|visualize-3d|visualize-3d-app|learnability|download|shell)
+  start.sh                  # Docker entrypoint dispatcher (train|pretrain|tensorboard|smoke-test|evaluate|visualize-3d|visualize-3d-app|report-runs|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
+  report_pipeline.py        # Orchestrate evaluate + GIF export + run report regeneration
   visualize_3d.py           # Interactive 3-D HTML visualizer (GT only or GT vs model prediction)
   visualize_3d_app.py       # Streamlit localhost app wrapper for visualize_3d.py
   count_positives.py        # Print dataset statistics (positive/negative case counts)
@@ -229,6 +236,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | 3-D visualizer (GT vs model) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>` |
 | 3-D visualizer app (localhost) | `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501` |
 | Evaluate checkpoint | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name>` |
+| Generate run report | `docker compose run --rm trainer report-runs --visualizations-dir /workspace/visualizations --output /workspace/report.md` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
 ### Local
@@ -241,6 +249,8 @@ PYTHONPATH=. python scripts/count_positives.py \
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
 | 3-D visualizer (GT vs model) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --run outputs/runs/<run_name>` |
 | 3-D visualizer app (localhost) | `PYTHONPATH=. streamlit run scripts/visualize_3d_app.py --server.address 0.0.0.0 --server.port 8501` |
+| Reporting pipeline (missing-only) | `PYTHONPATH=. python scripts/report_pipeline.py` |
+| Reporting pipeline (all runs) | `PYTHONPATH=. python scripts/report_pipeline.py --all` |
 | Estimate resources | `PYTHONPATH=. python scripts/estimate_resources.py --config configs/default.yaml` |
 | TensorBoard | `tensorboard --logdir outputs/runs --port 6006` |
 

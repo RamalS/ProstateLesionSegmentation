@@ -33,6 +33,7 @@ RUN set -eux; \
         git \
         curl \
         ca-certificates \
+        gnupg \
         build-essential \
         pkg-config \
         ffmpeg \
@@ -42,6 +43,15 @@ RUN set -eux; \
         libxrender1 \
         nano \
         htop; \
+    ARCH="$(dpkg --print-architecture)"; \
+    if [ "$ARCH" = "amd64" ]; then \
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor --yes -o /usr/share/keyrings/google-chrome.gpg; \
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends google-chrome-stable; \
+    else \
+        echo "Skipping google-chrome-stable install on unsupported architecture: ${ARCH}"; \
+    fi; \
     rm -rf /var/lib/apt/lists/*
 
 # Create Python virtual environment

@@ -13,11 +13,13 @@ UI controls
 
 from __future__ import annotations
 
+from io import BytesIO
+import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import streamlit as st
@@ -46,6 +48,8 @@ def _init_session_state() -> None:
         "loaded_hbv_path": None,
         "loaded_seg_path": None,
         "last_result": None,
+        "last_orbit_gif": None,
+        "last_orbit_gif_filename": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -418,6 +422,209 @@ def _show_metrics(metrics: dict[str, float] | None) -> None:
     cols[4].metric("HD95 (vox)", vis._fmt(metrics["hd95"]))
 
 
+def _camera_xyz(raw: Any, *, fallback: tuple[float, float, float]) -> dict[str, float]:
+    out = {"x": fallback[0], "y": fallback[1], "z": fallback[2]}
+    if raw is None:
+        return out
+
+    for axis in ("x", "y", "z"):
+        if isinstance(raw, dict):
+            value = raw.get(axis)
+        else:
+            value = getattr(raw, axis, None)
+        if value is None:
+            continue
+        try:
+            out[axis] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _extract_scene_camera(figure: Any) -> dict[str, dict[str, float]]:
+    defaults = {
+        "eye": (1.25, 1.25, 1.25),
+        "up": (0.0, 0.0, 1.0),
+        "center": (0.0, 0.0, 0.0),
+    }
+    scene = getattr(getattr(figure, "layout", None), "scene", None)
+    camera = getattr(scene, "camera", None) if scene is not None else None
+
+    if isinstance(camera, dict):
+        eye_raw = camera.get("eye")
+        up_raw = camera.get("up")
+        center_raw = camera.get("center")
+    else:
+        eye_raw = getattr(camera, "eye", None)
+        up_raw = getattr(camera, "up", None)
+        center_raw = getattr(camera, "center", None)
+
+    return {
+        "eye": _camera_xyz(eye_raw, fallback=defaults["eye"]),
+        "up": _camera_xyz(up_raw, fallback=defaults["up"]),
+        "center": _camera_xyz(center_raw, fallback=defaults["center"]),
+    }
+
+
+def _safe_case_slug(case_id: str) -> str:
+    slug = "".join(ch if (ch.isalnum() or ch in ("_", "-")) else "_" for ch in case_id)
+    slug = slug.strip("_")
+    return slug or "case"
+
+
+def _is_missing_kaleido_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return 'requires the "kaleido" engine' in msg or "requires the kaleido package" in msg
+
+
+def _is_missing_chrome_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "kaleido requires google chrome" in msg or ("kaleido" in msg and "requires chrome" in msg)
+
+
+def _plotly_chrome_install_dir() -> Path | None:
+    # Prefer /cache in Docker to persist Chrome across container runs.
+    candidates = [
+        Path("/cache/plotly_chrome"),
+        Path.home() / ".cache" / "plotly_chrome",
+    ]
+    for candidate in candidates:
+        parent = candidate.parent
+        if parent.exists() and os.access(parent, os.W_OK):
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+    return None
+
+
+def _chrome_setup_message(*, attempted_auto_install: bool, install_detail: str | None = None) -> str:
+    lines = [
+        "Kaleido needs a Chrome/Chromium binary for GIF export.",
+        "Install Chrome for Plotly with: plotly_get_chrome",
+        "You can also call plotly.io.get_chrome() from Python.",
+    ]
+    if attempted_auto_install:
+        lines.append("Automatic Chrome install was attempted but did not complete.")
+    if install_detail:
+        lines.append(f"Install error: {install_detail}")
+    return "\n".join(lines)
+
+
+def _render_plotly_png_bytes(fig: Any) -> bytes:
+    try:
+        return fig.to_image(format="png")
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing_kaleido_error(exc):
+            raise RuntimeError(
+                "GIF export requires kaleido. Install with: pip install --upgrade kaleido"
+            ) from exc
+        if not _is_missing_chrome_error(exc):
+            raise
+
+    chrome_dir = _plotly_chrome_install_dir()
+    try:
+        import plotly.io as pio
+
+        if chrome_dir is not None:
+            pio.get_chrome(path=chrome_dir)
+        else:
+            pio.get_chrome()
+    except Exception as install_exc:  # noqa: BLE001
+        raise RuntimeError(
+            _chrome_setup_message(
+                attempted_auto_install=True,
+                install_detail=str(install_exc).strip() or None,
+            )
+        ) from install_exc
+
+    try:
+        return fig.to_image(format="png")
+    except Exception as retry_exc:  # noqa: BLE001
+        if _is_missing_chrome_error(retry_exc):
+            raise RuntimeError(_chrome_setup_message(attempted_auto_install=True)) from retry_exc
+        raise
+
+
+def _export_orbit_gif_bytes(
+    figure: Any,
+    *,
+    frame_count: int,
+    fps: int,
+    turns: float,
+    width_px: int,
+    height_px: int,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> bytes:
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:
+        raise ImportError(
+            "plotly is required for GIF export. Install with: pip install plotly"
+        ) from exc
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError(
+            "Pillow is required for GIF export. Install with: pip install Pillow"
+        ) from exc
+
+    if frame_count < 2:
+        raise ValueError("frame_count must be >= 2")
+    if fps < 1:
+        raise ValueError("fps must be >= 1")
+    if turns <= 0:
+        raise ValueError("turns must be > 0")
+    if width_px < 320:
+        raise ValueError("width_px must be >= 320")
+    if height_px < 320:
+        raise ValueError("height_px must be >= 320")
+
+    base_camera = _extract_scene_camera(figure)
+    base_eye = base_camera["eye"]
+    radius_xy = float(np.hypot(base_eye["x"], base_eye["y"]))
+    if radius_xy < 1e-6:
+        radius_xy = 1.25
+    start_angle = float(np.arctan2(base_eye["y"], base_eye["x"]))
+
+    fig = go.Figure(figure)
+    fig.update_layout(width=int(width_px), height=int(height_px))
+
+    duration_ms = max(10, int(round(1000.0 / float(fps))))
+    step = (2.0 * np.pi * float(turns)) / float(frame_count)
+    frames: list[Image.Image] = []
+    if on_progress is not None:
+        on_progress(0, frame_count, "rendering")
+    for idx in range(frame_count):
+        angle = start_angle + float(idx) * step
+        eye = {
+            "x": radius_xy * float(np.cos(angle)),
+            "y": radius_xy * float(np.sin(angle)),
+            "z": float(base_eye["z"]),
+        }
+        fig.update_scenes(camera={"eye": eye, "up": base_camera["up"], "center": base_camera["center"]})
+        png_bytes = _render_plotly_png_bytes(fig)
+        image = Image.open(BytesIO(png_bytes)).convert("RGB")
+        frames.append(image)
+        if on_progress is not None:
+            on_progress(idx + 1, frame_count, "rendering")
+
+    if not frames:
+        raise RuntimeError("No frames were generated for GIF export.")
+
+    out = BytesIO()
+    if on_progress is not None:
+        on_progress(frame_count, frame_count, "finalizing")
+    frames[0].save(
+        out,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    return out.getvalue()
+
+
 def main() -> None:
     st.set_page_config(page_title="Prostate Lesion 3-D Visualizer", layout="wide")
     _init_session_state()
@@ -685,6 +892,8 @@ def main() -> None:
                 with st.spinner("Rendering 3-D visualization..."):
                     result = _render_pipeline(**run_request)
                 st.session_state.last_result = result
+                st.session_state.last_orbit_gif = None
+                st.session_state.last_orbit_gif_filename = None
                 st.success("Visualization ready (rendered in Streamlit).")
             except Exception as exc:  # noqa: BLE001
                 st.error(str(exc))
@@ -715,6 +924,99 @@ def main() -> None:
                 _show_metrics(result.get("metrics"))
                 figure.update_layout(height=int(st.session_state.renderer_height))
                 st.plotly_chart(figure, use_container_width=True, theme=None)
+
+                with st.expander("Export orbit GIF", expanded=False):
+                    gif_col_a, gif_col_b = st.columns(2)
+                    frame_count = int(
+                        gif_col_a.slider(
+                            "Frames",
+                            min_value=16,
+                            max_value=120,
+                            value=48,
+                            step=4,
+                            key="orbit_frame_count",
+                        )
+                    )
+                    fps = int(
+                        gif_col_b.slider(
+                            "FPS",
+                            min_value=4,
+                            max_value=30,
+                            value=12,
+                            step=1,
+                            key="orbit_fps",
+                        )
+                    )
+
+                    gif_col_c, gif_col_d = st.columns(2)
+                    turns = float(
+                        gif_col_c.slider(
+                            "Turns",
+                            min_value=0.25,
+                            max_value=3.0,
+                            value=1.0,
+                            step=0.25,
+                            key="orbit_turns",
+                        )
+                    )
+                    width_px = int(
+                        gif_col_d.number_input(
+                            "Width (px)",
+                            min_value=480,
+                            max_value=1920,
+                            value=960,
+                            step=80,
+                            key="orbit_width_px",
+                        )
+                    )
+
+                    if st.button("Export GIF", use_container_width=True):
+                        progress_slot = st.empty()
+                        status_slot = st.empty()
+                        progress_bar = progress_slot.progress(0)
+
+                        def _update_gif_export_progress(done: int, total: int, stage: str) -> None:
+                            safe_total = max(1, int(total))
+                            safe_done = max(0, min(int(done), safe_total))
+                            if stage == "rendering":
+                                percent = int(round((100.0 * float(safe_done)) / float(safe_total)))
+                                progress_bar.progress(percent)
+                                status_slot.caption(f"Rendering frames: {safe_done}/{safe_total}")
+                            else:
+                                progress_bar.progress(100)
+                                status_slot.caption("Finalizing GIF...")
+
+                        try:
+                            gif_bytes = _export_orbit_gif_bytes(
+                                figure=figure,
+                                frame_count=frame_count,
+                                fps=fps,
+                                turns=turns,
+                                width_px=width_px,
+                                height_px=int(st.session_state.renderer_height),
+                                on_progress=_update_gif_export_progress,
+                            )
+                            case_slug = _safe_case_slug(str(result.get("case_id", "case")))
+                            st.session_state.last_orbit_gif = gif_bytes
+                            st.session_state.last_orbit_gif_filename = f"{case_slug}_orbit.gif"
+                            progress_slot.empty()
+                            status_slot.empty()
+                            st.success("GIF export ready.")
+                        except Exception as exc:  # noqa: BLE001
+                            progress_slot.empty()
+                            status_slot.empty()
+                            st.error(f"GIF export failed: {exc}")
+
+                    gif_data = st.session_state.get("last_orbit_gif")
+                    gif_name = st.session_state.get("last_orbit_gif_filename")
+                    if isinstance(gif_data, (bytes, bytearray)) and isinstance(gif_name, str):
+                        st.download_button(
+                            "Download GIF",
+                            data=bytes(gif_data),
+                            file_name=gif_name,
+                            mime="image/gif",
+                            use_container_width=True,
+                        )
         else:
             st.info("Renderer output appears here after you click Run.")
 

@@ -26,8 +26,9 @@ Output
 ------
 - Per-case metrics table printed to stdout.
 - Aggregate metric summary printed to stdout.
-- eval_visualization.png (5 rows × 20 axial slices) saved in the run dir next to the
-  selected checkpoint file, with semi-transparent colour overlays:
+- eval_visualization.png (5 rows × 20 axial slices) saved to
+  ``visualizations/<run_name>_eval_visualization.png`` by default,
+  with semi-transparent colour overlays:
       Green  = ground truth only
       Red    = prediction only
       Yellow = overlap (both masks active)
@@ -37,10 +38,12 @@ from __future__ import annotations
 
 import argparse
 import curses
+import json
 import logging
 import math
 import sys
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -57,7 +60,12 @@ _SRC = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(_SRC))
 
 from config import load_config  # noqa: E402
-from dataset import PiCaiDataset, discover_cases, stratified_train_val_split  # noqa: E402
+from dataset import (  # noqa: E402
+    PiCaiDataset,
+    active_modality_pairs,
+    discover_cases,
+    stratified_train_val_split,
+)
 from metrics import compute_all_metrics  # noqa: E402
 from models import build_model  # noqa: E402
 from postprocess import postprocess_logits  # noqa: E402
@@ -102,6 +110,11 @@ _OVERLAY_ALPHA: float = 0.50
 def _fmt(v: float) -> str:
     """Format a metric value to 4 d.p.; return 'n/a' for NaN."""
     return f"{v:.4f}" if not math.isnan(v) else "n/a"
+
+
+def _json_float(v: float) -> float | None:
+    """Convert metric to JSON-safe float; return null for NaN/inf."""
+    return float(v) if math.isfinite(v) else None
 
 
 def _section(title: str) -> None:
@@ -572,6 +585,26 @@ def main() -> None:
             "Useful when the GPU is not compatible with the installed PyTorch build."
         ),
     )
+    parser.add_argument(
+        "--summary-json",
+        type=str,
+        default="",
+        metavar="PATH",
+        help=(
+            "Write aggregate evaluation summary JSON to this path. "
+            "Default writes to <run>/evaluation_summary.json."
+        ),
+    )
+    parser.add_argument(
+        "--vis-output",
+        type=str,
+        default="",
+        metavar="PATH",
+        help=(
+            "Write eval visualization PNG to this path. "
+            "Default writes to <repo_root>/visualizations/<run_name>_eval_visualization.png."
+        ),
+    )
     args = parser.parse_args()
 
     # ---- Validate run directory -------------------------------------------------
@@ -671,6 +704,7 @@ def main() -> None:
     )
     sw_overlap    = float(cfg.get("sw_overlap", 0.5))
     sw_batch_size = int(cfg.get("sw_batch_size", 4))
+    active_modalities = [key for key, _ in active_modality_pairs(cfg)]
 
     ds = PiCaiDataset(
         images_dir=images_dir,
@@ -678,6 +712,7 @@ def main() -> None:
         target_spacing=target_spacing,
         transform=get_val_transforms(),
         cases=test_cases,
+        active_modalities=active_modalities,
     )
 
     loader = DataLoader(
@@ -695,6 +730,7 @@ def main() -> None:
     print(f"  Device      : {device}")
     print(f"  Test cases  : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
     print(f"  Images dir  : {images_dir}")
+    print(f"  Modalities  : {active_modalities}")
     print(f"  Patch size  : {patch_size}   SW overlap: {sw_overlap}")
     print(f"  Threshold   : {pred_threshold:.3f}")
     print(
@@ -803,15 +839,26 @@ def main() -> None:
         f"Aggregate Metrics  "
         f"({len(pos_rows)} positive | {len(neg_rows)} negative | {len(per_case)} total)"
     )
-    print(f"  Dice         (positive cases only) : {_fmt(_mean(dice_vals))}")
-    print(f"  IoU          (positive cases only) : {_fmt(_mean(iou_vals))}")
-    print(f"  Sensitivity  (positive cases only) : {_fmt(_mean(sens_vals))}")
-    print(f"  Precision    (positive cases only) : {_fmt(_mean(prec_vals))}")
-    print(f"  HD95         (non-empty pairs)     : {_fmt(_mean(hd95_vals))} voxels")
+    agg_dice = _mean(dice_vals)
+    agg_iou = _mean(iou_vals)
+    agg_sensitivity = _mean(sens_vals)
+    agg_precision = _mean(prec_vals)
+    agg_hd95 = _mean(hd95_vals)
+
+    print(f"  Dice         (positive cases only) : {_fmt(agg_dice)}")
+    print(f"  IoU          (positive cases only) : {_fmt(agg_iou)}")
+    print(f"  Sensitivity  (positive cases only) : {_fmt(agg_sensitivity)}")
+    print(f"  Precision    (positive cases only) : {_fmt(agg_precision)}")
+    print(f"  HD95         (non-empty pairs)     : {_fmt(agg_hd95)} voxels")
 
     # ---- Visualization ----------------------------------------------------------
     _section("Visualization  (5 rows × 20 axial slices)")
-    vis_path = run_dir / "eval_visualization.png"
+    if args.vis_output:
+        vis_path = Path(args.vis_output).expanduser().resolve()
+    else:
+        repo_root = Path(__file__).resolve().parent.parent
+        vis_path = (repo_root / "visualizations" / f"{run_dir.name}_eval_visualization.png").resolve()
+    vis_path.parent.mkdir(parents=True, exist_ok=True)
     save_visualization(vis_data, vis_path, n_cols=_N_VIS_COLS)
     print(
         "\n  Colour key:\n"
@@ -819,6 +866,56 @@ def main() -> None:
         "    Red    = prediction only\n"
         "    Yellow = overlap (GT ∩ Pred)\n"
     )
+
+    # ---- Machine-readable summary ----------------------------------------------
+    summary_path = Path(args.summary_json).expanduser().resolve() if args.summary_json else (
+        run_dir / "evaluation_summary.json"
+    )
+    summary = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "run_dir": str(run_dir),
+        "checkpoint": {
+            "path": str(ckpt_path),
+            "name": ckpt_path.name,
+            "epoch": ckpt_epoch,
+            "best_val_dice_training": _json_float(best_val_dice),
+        },
+        "dataset": {
+            "images_dir": str(images_dir),
+            "labels_dir": str(labels_dir),
+            "total_cases": len(per_case),
+            "positive_cases": len(pos_rows),
+            "negative_cases": len(neg_rows),
+        },
+        "inference": {
+            "device": str(device),
+            "active_modalities": list(active_modalities),
+            "patch_size": list(patch_size),
+            "sw_overlap": sw_overlap,
+            "sw_batch_size": sw_batch_size,
+            "pred_threshold": pred_threshold,
+            "postprocess_enabled": postprocess_enabled,
+            "postprocess_min_component_volume_mm3": postprocess_min_component_volume_mm3,
+            "postprocess_connectivity": postprocess_connectivity,
+        },
+        "aggregate_metrics": {
+            "dice_pos_only": _json_float(agg_dice),
+            "iou_pos_only": _json_float(agg_iou),
+            "sensitivity_pos_only": _json_float(agg_sensitivity),
+            "precision_pos_only": _json_float(agg_precision),
+            "hd95_non_empty_pairs_voxels": _json_float(agg_hd95),
+        },
+        "artifacts": {
+            "eval_visualization_png": str(vis_path),
+            "eval_visualization_png_exists": vis_path.exists(),
+            "visualized_positive_cases": len(vis_data),
+            "visualization_cols": _N_VIS_COLS,
+        },
+    }
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+    print(f"  Summary saved       →  {summary_path}")
 
 
 if __name__ == "__main__":

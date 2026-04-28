@@ -30,16 +30,24 @@ With model comparison (checkpoint defaults to best.pt):
     PYTHONPATH=. python scripts/visualize_3d.py \
         --t2w data/test_images/10028_1000771_t2w.mha \
         --run outputs/runs/20260420_123456_baseline_run
+
+With orbit GIF export (writes HTML and GIF):
+    PYTHONPATH=. python scripts/visualize_3d.py \
+        --t2w data/test_images/10028_1000771_t2w.mha \
+        --gif
 """
 
 from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+from io import BytesIO
 import logging
 import math
+import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import SimpleITK as sitk
@@ -141,6 +149,29 @@ def _case_id_from_t2w(t2w_path: Path) -> str:
     if t2w_path.name.endswith("_t2w.mha"):
         return t2w_path.name[: -len("_t2w.mha")]
     return t2w_path.stem
+
+
+def _safe_filename_component(raw: str) -> str:
+    """Convert arbitrary label to filesystem-safe token."""
+    token = "".join(ch if (ch.isalnum() or ch in ("_", "-")) else "_" for ch in raw)
+    token = token.strip("_")
+    return token or "item"
+
+
+def _default_export_stem(t2w_path: Path, run_dir_arg: str | None) -> str:
+    """
+    Build default filename stem.
+
+    Uses image name (T2w stem) and prepends model run name when --run is set.
+    """
+    image_name = _safe_filename_component(t2w_path.stem)
+    if run_dir_arg is None:
+        return image_name
+
+    run_name = _safe_filename_component(Path(run_dir_arg).name)
+    if run_name:
+        return f"{run_name}_{image_name}"
+    return image_name
 
 
 def _resolve_seg_path(t2w_path: Path, seg_arg: str | None) -> Path:
@@ -620,17 +651,16 @@ def _build_3d_figure(
     return fig
 
 
-def save_3d_visualization_html(
+def _prepare_3d_figure_for_export(
     t2w_vol: np.ndarray,
     gt_mask: np.ndarray,
     pred_mask: np.ndarray | None,
     spacing_zyx: tuple[float, float, float],
-    output_path: Path,
     case_id: str,
-    max_voxels: int = 250_000,
-    has_ground_truth: bool = True,
-) -> Path:
-    """Render and save standalone interactive Plotly HTML visualisation."""
+    max_voxels: int,
+    has_ground_truth: bool,
+):
+    """Build Plotly figure after render-time downsampling."""
     t2w_ds, gt_ds, pred_ds, spacing_ds, stride_zyx = _downsample_for_render(
         t2w_vol=t2w_vol,
         gt_mask=gt_mask,
@@ -654,9 +684,270 @@ def save_3d_visualization_html(
         case_id=case_id,
         has_ground_truth=has_ground_truth,
     )
+    return fig
+
+
+def save_3d_visualization_html(
+    t2w_vol: np.ndarray,
+    gt_mask: np.ndarray,
+    pred_mask: np.ndarray | None,
+    spacing_zyx: tuple[float, float, float],
+    output_path: Path,
+    case_id: str,
+    max_voxels: int = 250_000,
+    has_ground_truth: bool = True,
+) -> Path:
+    """Render and save standalone interactive Plotly HTML visualisation."""
+    fig = _prepare_3d_figure_for_export(
+        t2w_vol=t2w_vol,
+        gt_mask=gt_mask,
+        pred_mask=pred_mask,
+        spacing_zyx=spacing_zyx,
+        case_id=case_id,
+        max_voxels=max_voxels,
+        has_ground_truth=has_ground_truth,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
+    return output_path
+
+
+def _camera_xyz(raw: Any, *, fallback: tuple[float, float, float]) -> dict[str, float]:
+    out = {"x": fallback[0], "y": fallback[1], "z": fallback[2]}
+    if raw is None:
+        return out
+
+    for axis in ("x", "y", "z"):
+        if isinstance(raw, dict):
+            value = raw.get(axis)
+        else:
+            value = getattr(raw, axis, None)
+        if value is None:
+            continue
+        try:
+            out[axis] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _extract_scene_camera(figure: Any) -> dict[str, dict[str, float]]:
+    defaults = {
+        "eye": (1.25, 1.25, 1.25),
+        "up": (0.0, 0.0, 1.0),
+        "center": (0.0, 0.0, 0.0),
+    }
+    scene = getattr(getattr(figure, "layout", None), "scene", None)
+    camera = getattr(scene, "camera", None) if scene is not None else None
+
+    if isinstance(camera, dict):
+        eye_raw = camera.get("eye")
+        up_raw = camera.get("up")
+        center_raw = camera.get("center")
+    else:
+        eye_raw = getattr(camera, "eye", None)
+        up_raw = getattr(camera, "up", None)
+        center_raw = getattr(camera, "center", None)
+
+    return {
+        "eye": _camera_xyz(eye_raw, fallback=defaults["eye"]),
+        "up": _camera_xyz(up_raw, fallback=defaults["up"]),
+        "center": _camera_xyz(center_raw, fallback=defaults["center"]),
+    }
+
+
+def _is_missing_kaleido_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return 'requires the "kaleido" engine' in msg or "requires the kaleido package" in msg
+
+
+def _is_missing_chrome_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "kaleido requires google chrome" in msg or ("kaleido" in msg and "requires chrome" in msg)
+
+
+def _plotly_chrome_install_dir() -> Path | None:
+    # Prefer /cache in Docker to persist Chrome across container runs.
+    candidates = [
+        Path("/cache/plotly_chrome"),
+        Path.home() / ".cache" / "plotly_chrome",
+    ]
+    for candidate in candidates:
+        parent = candidate.parent
+        if parent.exists() and os.access(parent, os.W_OK):
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+    return None
+
+
+def _chrome_setup_message(*, attempted_auto_install: bool, install_detail: str | None = None) -> str:
+    lines = [
+        "Kaleido needs a Chrome/Chromium binary for GIF export.",
+        "Install Chrome for Plotly with: plotly_get_chrome",
+        "You can also call plotly.io.get_chrome() from Python.",
+    ]
+    if attempted_auto_install:
+        lines.append("Automatic Chrome install was attempted but did not complete.")
+    if install_detail:
+        lines.append(f"Install error: {install_detail}")
+    return "\n".join(lines)
+
+
+def _render_plotly_png_bytes(fig: Any) -> bytes:
+    try:
+        return fig.to_image(format="png")
+    except Exception as exc:  # noqa: BLE001
+        if _is_missing_kaleido_error(exc):
+            raise RuntimeError(
+                "GIF export requires kaleido. Install with: pip install --upgrade kaleido"
+            ) from exc
+        if not _is_missing_chrome_error(exc):
+            raise
+
+    chrome_dir = _plotly_chrome_install_dir()
+    try:
+        import plotly.io as pio
+
+        if chrome_dir is not None:
+            pio.get_chrome(path=chrome_dir)
+        else:
+            pio.get_chrome()
+    except Exception as install_exc:  # noqa: BLE001
+        raise RuntimeError(
+            _chrome_setup_message(
+                attempted_auto_install=True,
+                install_detail=str(install_exc).strip() or None,
+            )
+        ) from install_exc
+
+    try:
+        return fig.to_image(format="png")
+    except Exception as retry_exc:  # noqa: BLE001
+        if _is_missing_chrome_error(retry_exc):
+            raise RuntimeError(_chrome_setup_message(attempted_auto_install=True)) from retry_exc
+        raise
+
+
+def _export_orbit_gif_bytes(
+    figure: Any,
+    *,
+    frame_count: int,
+    fps: int,
+    turns: float,
+    width_px: int,
+    height_px: int,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> bytes:
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:
+        raise ImportError(
+            "plotly is required for GIF export. Install with: pip install plotly"
+        ) from exc
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError(
+            "Pillow is required for GIF export. Install with: pip install Pillow"
+        ) from exc
+
+    if frame_count < 2:
+        raise ValueError("frame_count must be >= 2")
+    if fps < 1:
+        raise ValueError("fps must be >= 1")
+    if turns <= 0:
+        raise ValueError("turns must be > 0")
+    if width_px < 320:
+        raise ValueError("width_px must be >= 320")
+    if height_px < 320:
+        raise ValueError("height_px must be >= 320")
+
+    base_camera = _extract_scene_camera(figure)
+    base_eye = base_camera["eye"]
+    radius_xy = float(np.hypot(base_eye["x"], base_eye["y"]))
+    if radius_xy < 1e-6:
+        radius_xy = 1.25
+    start_angle = float(np.arctan2(base_eye["y"], base_eye["x"]))
+
+    fig = go.Figure(figure)
+    fig.update_layout(width=int(width_px), height=int(height_px))
+
+    duration_ms = max(10, int(round(1000.0 / float(fps))))
+    step = (2.0 * np.pi * float(turns)) / float(frame_count)
+    frames: list[Image.Image] = []
+    if on_progress is not None:
+        on_progress(0, frame_count, "rendering")
+    for idx in range(frame_count):
+        angle = start_angle + float(idx) * step
+        eye = {
+            "x": radius_xy * float(np.cos(angle)),
+            "y": radius_xy * float(np.sin(angle)),
+            "z": float(base_eye["z"]),
+        }
+        fig.update_scenes(camera={"eye": eye, "up": base_camera["up"], "center": base_camera["center"]})
+        png_bytes = _render_plotly_png_bytes(fig)
+        image = Image.open(BytesIO(png_bytes)).convert("RGB")
+        frames.append(image)
+        if on_progress is not None:
+            on_progress(idx + 1, frame_count, "rendering")
+
+    if not frames:
+        raise RuntimeError("No frames were generated for GIF export.")
+
+    out = BytesIO()
+    if on_progress is not None:
+        on_progress(frame_count, frame_count, "finalizing")
+    frames[0].save(
+        out,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    return out.getvalue()
+
+
+def save_3d_visualization_gif(
+    t2w_vol: np.ndarray,
+    gt_mask: np.ndarray,
+    pred_mask: np.ndarray | None,
+    spacing_zyx: tuple[float, float, float],
+    output_path: Path,
+    case_id: str,
+    *,
+    max_voxels: int = 250_000,
+    has_ground_truth: bool = True,
+    frame_count: int = 48,
+    fps: int = 12,
+    turns: float = 1.0,
+    width_px: int = 960,
+    height_px: int = 900,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> Path:
+    """Render and save orbit animation GIF from the same 3-D figure as HTML export."""
+    fig = _prepare_3d_figure_for_export(
+        t2w_vol=t2w_vol,
+        gt_mask=gt_mask,
+        pred_mask=pred_mask,
+        spacing_zyx=spacing_zyx,
+        case_id=case_id,
+        max_voxels=max_voxels,
+        has_ground_truth=has_ground_truth,
+    )
+    gif_bytes = _export_orbit_gif_bytes(
+        figure=fig,
+        frame_count=frame_count,
+        fps=fps,
+        turns=turns,
+        width_px=width_px,
+        height_px=height_px,
+        on_progress=on_progress,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(gif_bytes)
     return output_path
 
 
@@ -670,7 +961,7 @@ def main() -> None:
             "Interactive 3-D visualizer for a PI-CAI case. "
             "Loads T2w + segmentation (optional auto-detect), optionally runs "
             "model inference from a run directory, "
-            "and saves a rotatable Plotly HTML scene."
+            "and saves a rotatable Plotly HTML scene (with optional orbit GIF export)."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -734,11 +1025,58 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Output HTML path. Default: outputs/visualizations/<case_id>_3d.html"
+            "Output HTML path. Default: outputs/visualizations/<run_name>_<image_name>_3d.html "
+            "when --run is set; otherwise outputs/visualizations/<image_name>_3d.html."
         ),
+    )
+    parser.add_argument(
+        "--gif",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Also export orbit GIF. Optionally provide output path; "
+            "default when flag is present: outputs/visualizations/<run_name>_<image_name>_orbit.gif "
+            "when --run is set; otherwise outputs/visualizations/<image_name>_orbit.gif."
+        ),
+    )
+    parser.add_argument(
+        "--gif-frames",
+        type=int,
+        default=48,
+        help="Number of frames for GIF orbit animation",
+    )
+    parser.add_argument(
+        "--gif-fps",
+        type=int,
+        default=12,
+        help="Frames per second for GIF animation",
+    )
+    parser.add_argument(
+        "--gif-turns",
+        type=float,
+        default=1.0,
+        help="Number of full camera turns around the scene",
+    )
+    parser.add_argument(
+        "--gif-width",
+        type=int,
+        default=960,
+        help="GIF frame width in pixels",
+    )
+    parser.add_argument(
+        "--gif-height",
+        type=int,
+        default=900,
+        help="GIF frame height in pixels",
     )
 
     args = parser.parse_args()
+    quiet_for_gif = args.gif is not None
+    if quiet_for_gif:
+        logging.getLogger().setLevel(logging.WARNING)
+        logger.setLevel(logging.WARNING)
 
     t2w_path = Path(args.t2w).resolve()
 
@@ -746,6 +1084,7 @@ def main() -> None:
         raise FileNotFoundError(f"T2w file not found: {t2w_path}")
 
     case_id = _case_id_from_t2w(t2w_path)
+    default_export_stem = _default_export_stem(t2w_path, args.run)
     try:
         seg_path: Path | None = _resolve_seg_path(t2w_path, args.seg)
     except FileNotFoundError:
@@ -762,7 +1101,14 @@ def main() -> None:
     if args.output:
         output_path = Path(args.output).resolve()
     else:
-        output_path = (Path("outputs") / "visualizations" / f"{case_id}_3d.html").resolve()
+        output_path = (Path("outputs") / "visualizations" / f"{default_export_stem}_3d.html").resolve()
+    gif_output_path: Path | None
+    if args.gif is None:
+        gif_output_path = None
+    elif args.gif == "":
+        gif_output_path = (Path("outputs") / "visualizations" / f"{default_export_stem}_orbit.gif").resolve()
+    else:
+        gif_output_path = Path(args.gif).resolve()
 
     pred_mask: np.ndarray | None = None
     has_ground_truth = seg_path is not None
@@ -852,14 +1198,15 @@ def main() -> None:
                 compute_hd95=True,
             )
 
-            print("\nMetrics (single case):")
-            print(f"  case_id      : {case_id}")
-            print(f"  dice         : {_fmt(metrics['dice'])}")
-            print(f"  iou          : {_fmt(metrics['iou'])}")
-            print(f"  sensitivity  : {_fmt(metrics['sensitivity'])}")
-            print(f"  precision    : {_fmt(metrics['precision'])}")
-            print(f"  hd95         : {_fmt(metrics['hd95'])} voxels")
-        else:
+            if not quiet_for_gif:
+                print("\nMetrics (single case):")
+                print(f"  case_id      : {case_id}")
+                print(f"  dice         : {_fmt(metrics['dice'])}")
+                print(f"  iou          : {_fmt(metrics['iou'])}")
+                print(f"  sensitivity  : {_fmt(metrics['sensitivity'])}")
+                print(f"  precision    : {_fmt(metrics['precision'])}")
+                print(f"  hd95         : {_fmt(metrics['hd95'])} voxels")
+        elif not quiet_for_gif:
             print("\nMetrics skipped: no ground-truth label provided.")
 
     out = save_3d_visualization_html(
@@ -873,7 +1220,58 @@ def main() -> None:
         has_ground_truth=has_ground_truth,
     )
 
-    print(f"\n3D visualization saved: {out}")
+    if not quiet_for_gif:
+        print(f"\n3D visualization saved: {out}")
+
+    if gif_output_path is not None:
+        if args.gif_frames < 2:
+            raise ValueError(f"--gif-frames must be >= 2, got {args.gif_frames}")
+        if args.gif_fps < 1:
+            raise ValueError(f"--gif-fps must be >= 1, got {args.gif_fps}")
+        if args.gif_turns <= 0.0:
+            raise ValueError(f"--gif-turns must be > 0, got {args.gif_turns}")
+        if args.gif_width < 320:
+            raise ValueError(f"--gif-width must be >= 320, got {args.gif_width}")
+        if args.gif_height < 320:
+            raise ValueError(f"--gif-height must be >= 320, got {args.gif_height}")
+
+        def _print_gif_progress(done: int, total: int, stage: str) -> None:
+            safe_total = max(1, int(total))
+            safe_done = max(0, min(int(done), safe_total))
+            bar_width = 30
+            if stage == "rendering":
+                ratio = float(safe_done) / float(safe_total)
+                filled = int(round(ratio * float(bar_width)))
+                bar = "#" * filled + "-" * (bar_width - filled)
+                percent = int(round(ratio * 100.0))
+                sys.stdout.write(f"\r[{bar}] {percent:3d}% {safe_done}/{safe_total}")
+            else:
+                bar = "#" * bar_width
+                sys.stdout.write(f"\r[{bar}] 100% Finalizing GIF...")
+            sys.stdout.flush()
+
+        try:
+            gif_out = save_3d_visualization_gif(
+                t2w_vol=t2w_vol,
+                gt_mask=gt_mask,
+                pred_mask=pred_mask,
+                spacing_zyx=spacing_zyx,
+                output_path=gif_output_path,
+                case_id=case_id,
+                max_voxels=args.max_voxels,
+                has_ground_truth=has_ground_truth,
+                frame_count=args.gif_frames,
+                fps=args.gif_fps,
+                turns=args.gif_turns,
+                width_px=args.gif_width,
+                height_px=args.gif_height,
+                on_progress=_print_gif_progress,
+            )
+        finally:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        print(f"3D orbit GIF saved: {gif_out}")
 
 
 if __name__ == "__main__":

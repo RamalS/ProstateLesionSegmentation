@@ -8,6 +8,7 @@ numpy
 pandas
 matplotlib
 plotly
+kaleido
 streamlit
 scikit-learn
 tqdm

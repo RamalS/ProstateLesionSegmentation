@@ -12,13 +12,18 @@
 - TensorBoard: `docker compose run --rm --service-ports trainer tensorboard`
 - 3-D visualizer (GT only): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha`
 - 3-D visualizer (GT vs model): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>`
+- 3-D visualizer GIF export: `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --gif`
 - 3-D visualizer app (localhost): `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501`
+- Run report regeneration: `docker compose run --rm trainer report-runs --visualizations-dir /workspace/visualizations --output /workspace/report.md`
+- Full reporting pipeline (missing-only, Docker-first): `PYTHONPATH=. python scripts/report_pipeline.py`
+- Full reporting pipeline (force all runs): `PYTHONPATH=. python scripts/report_pipeline.py --all`
 - Learnability sanity run: `docker compose run --rm trainer learnability [N]`
 - Shell in container: `docker compose run --rm trainer shell`
 - Local train: `PYTHONPATH=. python -m src.train --config configs/local_default.yaml`
 - Local pretrain: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
 - Local smoke test: `PYTHONPATH=. python scripts/smoke_test.py`
 - Local 3-D visualizer: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha [--run outputs/runs/<run_name>]`
+- Local 3-D visualizer GIF export: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --gif`
 - Local 3-D visualizer app: `PYTHONPATH=. streamlit run scripts/visualize_3d_app.py --server.address 0.0.0.0 --server.port 8501`
 
 ## Evaluation is easy to run wrong

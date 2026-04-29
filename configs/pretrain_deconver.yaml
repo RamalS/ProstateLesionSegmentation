@@ -1,0 +1,59 @@
+experiment_name: ssl_pretrain_deconver_mae
+epochs: 250
+learning_rate: 2.0e-4
+weight_decay: 1.0e-5
+num_workers: 5
+device: cuda
+base_output_dir: /outputs/pretrain_runs
+random_seed: 42
+deterministic: false
+
+# Data
+unlabeled_images_dir: /data/unlabeled_images
+labeled_images_dir: /data/images
+labeled_labels_dir: /data/labels
+target_spacing: [3.0, 0.5, 0.5]
+val_fraction: 0.2
+pretrain_labeled_fraction: 0.5
+# split_manifest_path: /outputs/splits/picai_train_val_split.json
+
+# SSL patch/mask setup
+patch_size: [16, 128, 128]
+num_patches_per_volume: 4
+mask_ratio: 0.60
+mask_block_size: [4, 16, 16]
+full_l1_weight: 0.1
+
+# Model
+model: deconver
+use_t2w: true
+use_adc: true
+use_hbv: true
+deep_supervision: false
+
+# Deconver-specific hyperparameters (used only when model: deconver)
+deconver_encoder_depth: [1, 1, 1, 1]
+deconver_encoder_width: [64, 128, 256, 512]
+deconver_strides: [1, 2, 2, 2]
+deconver_kernel_size: [3, 3, 3]
+deconver_groups: -1
+deconver_ndc_ratio: 4
+
+# DWI -> HBV preprocessing for Prostate158
+dwi_hbv_preprocess:
+  enabled: true
+  clip_percentiles: [1.0, 99.5]
+  log1p: true
+
+# Runtime
+use_amp: true
+amp_dtype: fp16
+use_compile: false
+cache_dataset: true
+cache_rate: 1.0
+
+# Checkpointing
+keep_last_checkpoints: 3
+
+ntfy_url: "https://ntfy.sh"
+ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"

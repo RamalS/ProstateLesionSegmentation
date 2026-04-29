@@ -970,6 +970,8 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
         eval_rows: list[list[str]] = []
         for key in ("dice", "iou", "sensitivity", "precision", "hd95"):
             eval_rows.append([key, _fmt_float(report.eval_metrics.get(key))])
+        # Keep a blank line before tables so GitHub renders them outside lists.
+        lines.append("")
         lines.append(_markdown_table(eval_headers, eval_rows))
     else:
         lines.append("- aggregate_test_metrics: `n/a`")
@@ -1002,6 +1004,7 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
                 _fmt_float(last_v),
             ]
         )
+    lines.append("")
     lines.append(_markdown_table(headers, metric_rows))
     lines.append("")
     lines.append("### Config Highlights")

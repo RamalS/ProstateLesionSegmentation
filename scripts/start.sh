@@ -10,7 +10,7 @@ for arg in "$@"; do
     --local)
       USE_LOCAL=true
       ;;
-    train|pretrain|tensorboard|smoke-test|shell|evaluate|learnability|download|visualize-3d|visualize-3d-app|report-runs)
+    train|train-2d|pretrain|tensorboard|smoke-test|shell|evaluate|evaluate-2d|learnability|download|visualize-3d|visualize-3d-app|report-runs)
       MODE="$arg"
       ;;
     *)
@@ -23,12 +23,14 @@ if [ "$USE_LOCAL" = true ]; then
   echo "Using LOCAL paths"
   PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   CONFIG_PATH="$PROJECT_ROOT/configs/local_default.yaml"
+  CONFIG_2D_PATH="$PROJECT_ROOT/configs/deconver_2d_local.yaml"
   PRETRAIN_CONFIG_PATH="$PROJECT_ROOT/configs/pretrain_local.yaml"
   OUTPUTS_PATH="$PROJECT_ROOT/outputs"
 else
   echo "Using DEFAULT container paths"
   PROJECT_ROOT="/workspace"
   CONFIG_PATH="/workspace/configs/default.yaml"
+  CONFIG_2D_PATH="/workspace/configs/deconver_2d.yaml"
   PRETRAIN_CONFIG_PATH="/workspace/configs/pretrain_default.yaml"
   OUTPUTS_PATH="/outputs"
 fi
@@ -38,6 +40,11 @@ case "$MODE" in
     echo "Starting training..."
     cd "$PROJECT_ROOT"
     PYTHONPATH="$PROJECT_ROOT" python -m src.train --config "$CONFIG_PATH" "${EXTRA_ARGS[@]}"
+    ;;
+  train-2d)
+    echo "Starting 2D Deconver training..."
+    cd "$PROJECT_ROOT"
+    PYTHONPATH="$PROJECT_ROOT" python -m src.train_deconver_2d --config "$CONFIG_2D_PATH" "${EXTRA_ARGS[@]}"
     ;;
   pretrain)
     echo "Starting SSL encoder pretraining..."
@@ -57,6 +64,11 @@ case "$MODE" in
     echo "Running checkpoint evaluation..."
     cd "$PROJECT_ROOT"
     PYTHONPATH="$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/evaluate_checkpoint.py" "${EXTRA_ARGS[@]}"
+    ;;
+  evaluate-2d)
+    echo "Running 2D checkpoint evaluation..."
+    cd "$PROJECT_ROOT"
+    PYTHONPATH="$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/evaluate_checkpoint_2d.py" "${EXTRA_ARGS[@]}"
     ;;
   visualize-3d)
     echo "Running 3D visualizer..."
@@ -90,7 +102,7 @@ case "$MODE" in
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Available modes: train | pretrain | tensorboard | smoke-test | evaluate | visualize-3d | visualize-3d-app | report-runs | learnability | download | shell"
+    echo "Available modes: train | train-2d | pretrain | tensorboard | smoke-test | evaluate | evaluate-2d | visualize-3d | visualize-3d-app | report-runs | learnability | download | shell"
     exit 1
     ;;
 esac

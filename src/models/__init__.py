@@ -63,6 +63,8 @@ def build_model(cfg: dict) -> nn.Module:
         Training configuration dict.  Relevant keys (common):
 
         ``model``            — architecture name (see ``_MODEL_REGISTRY``).
+        ``input_channels``   — explicit input-channel override. When set, this
+                               takes precedence over modality flags.
         ``use_t2w``          — include T2w channel (default ``True``).
         ``use_adc``          — include ADC channel (default ``True``).
         ``use_hbv``          — include HBV channel (default ``True``).
@@ -78,10 +80,12 @@ def build_model(cfg: dict) -> nn.Module:
 
         Additional keys for ``model: deconver``:
 
+        ``spatial_dims``            — ``2`` or ``3`` (default ``3``).
         ``deconver_encoder_depth``  — blocks per encoder stage (default [1,1,1,1]).
         ``deconver_encoder_width``  — channels per encoder stage (default [64,128,256,512]).
         ``deconver_strides``        — stride per stage (default [1,2,2,2]).
-        ``deconver_kernel_size``    — NDC kernel size (default [3,3,3]).
+        ``deconver_kernel_size``    — NDC kernel size (default [3,3,3] for 3D,
+                                       [3,3] for 2D).
         ``deconver_groups``         — NDC groups; -1 = one group per channel (default -1).
         ``deconver_ndc_ratio``      — NDC channel expansion ratio (default 4).
 
@@ -98,6 +102,9 @@ def build_model(cfg: dict) -> nn.Module:
         ``model: deconver`` is requested but the package failed to import.
     """
     name = cfg.get("model", "unet3d").lower()
+    spatial_dims = int(cfg.get("spatial_dims", 3))
+    if spatial_dims not in (2, 3):
+        raise ValueError(f"spatial_dims must be 2 or 3, got {spatial_dims}")
 
     if name == "deconver" and not _DECONVER_AVAILABLE:
         raise ValueError(
@@ -113,15 +120,18 @@ def build_model(cfg: dict) -> nn.Module:
             f"Available architectures: {available}"
         )
 
-    in_channels = sum([
-        cfg.get("use_t2w", True),
-        cfg.get("use_adc", True),
-        cfg.get("use_hbv", True),
-    ])
+    if "input_channels" in cfg:
+        in_channels = int(cfg["input_channels"])
+    else:
+        in_channels = sum([
+            cfg.get("use_t2w", True),
+            cfg.get("use_adc", True),
+            cfg.get("use_hbv", True),
+        ])
     if in_channels == 0:
         raise ValueError(
-            "No modalities enabled. At least one of use_t2w, use_adc, "
-            "use_hbv must be true in the config."
+            "No input channels configured. Set input_channels > 0 or enable at least "
+            "one of use_t2w/use_adc/use_hbv."
         )
 
     # -----------------------------------------------------------------------
@@ -136,15 +146,22 @@ def build_model(cfg: dict) -> nn.Module:
             # Number of auxiliary heads = number of decoder stages = len(encoder_depth) - 1
             num_deep_supr = max(1, len(encoder_depth) - 1)
 
+        if spatial_dims == 2:
+            norm_layer: type[nn.Module] = nn.InstanceNorm2d
+            default_kernel_size = [3, 3]
+        else:
+            norm_layer = nn.InstanceNorm3d
+            default_kernel_size = [3, 3, 3]
+
         return _Deconver(  # type: ignore[misc]
             in_channels=in_channels,
             out_channels=cfg.get("out_channels", 1),
-            spatial_dims=3,
+            spatial_dims=spatial_dims,
             encoder_depth=tuple(cfg.get("deconver_encoder_depth", [1, 1, 1, 1])),
             encoder_width=tuple(cfg.get("deconver_encoder_width", [64, 128, 256, 512])),
             strides=tuple(cfg.get("deconver_strides", [1, 2, 2, 2])),
-            norm=nn.InstanceNorm3d,
-            kernel_size=tuple(cfg.get("deconver_kernel_size", [3, 3, 3])),
+            norm=norm_layer,
+            kernel_size=tuple(cfg.get("deconver_kernel_size", default_kernel_size)),
             groups=cfg.get("deconver_groups", -1),
             ratio=cfg.get("deconver_ndc_ratio", 4),
             num_deep_supr=num_deep_supr,
@@ -153,6 +170,12 @@ def build_model(cfg: dict) -> nn.Module:
     # -----------------------------------------------------------------------
     # UNet3D / AttentionUNet3D share the same constructor signature.
     # -----------------------------------------------------------------------
+    if spatial_dims != 3:
+        raise ValueError(
+            f"model='{name}' currently supports only spatial_dims=3, got {spatial_dims}. "
+            "Use model='deconver' for 2D training."
+        )
+
     cls = _MODEL_REGISTRY[name]
     return cls(
         in_channels=in_channels,

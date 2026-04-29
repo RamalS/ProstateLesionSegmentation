@@ -5,6 +5,7 @@
 - Build image (modern default, cu128): `docker compose build` (uses `compose.yml`, service `trainer`).
 - Build image (Volta/TITAN V, cu126): `docker compose -f compose.yml -f compose.volta.yml build`
 - Train in Docker: `docker compose run --rm trainer train`
+- Train 2-D Deconver in Docker (JPG/PNG): `docker compose run --rm trainer train-2d`
 - Pretrain encoder (SSL) in Docker: `docker compose run --rm trainer pretrain`
 - Smoke test (primary regression check): `docker compose run --rm trainer smoke-test`
 - Train in Docker (Volta/TITAN V): `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train`
@@ -20,6 +21,7 @@
 - Learnability sanity run: `docker compose run --rm trainer learnability [N]`
 - Shell in container: `docker compose run --rm trainer shell`
 - Local train: `PYTHONPATH=. python -m src.train --config configs/local_default.yaml`
+- Local 2-D Deconver train (JPG/PNG): `PYTHONPATH=. python -m src.train_deconver_2d --config configs/deconver_2d_local.yaml`
 - Local pretrain: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
 - Local smoke test: `PYTHONPATH=. python scripts/smoke_test.py`
 - Local 3-D visualizer: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha [--run outputs/runs/<run_name>]`
@@ -31,13 +33,16 @@
 - `scripts/evaluate_checkpoint.py` requires `--run <run_dir>`, not `--checkpoint`.
 - Docker: `docker compose run --rm -it trainer evaluate --run /outputs/runs/<run_name>`
 - Local: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name>`
+- Docker 2-D eval: `docker compose run --rm trainer evaluate-2d --run /outputs/runs/<run_name>`
+- Local 2-D eval: `PYTHONPATH=. python scripts/evaluate_checkpoint_2d.py --run outputs/runs/<run_name>`
 - Without a TTY, checkpoint selection auto-picks `best.pt` (or newest epoch file).
 - Defaults are `--images-dir data/test_images` and `--labels-dir data/labels`.
 
 ## Repo wiring
 
 - Source is imported from `src/` via `PYTHONPATH`; prefer `python -m src.train`.
-- Main supervised entrypoint: `src/train.py`; SSL pretraining entrypoint: `src/pretrain.py`.
+- Main supervised entrypoints: `src/train.py` (3-D) and `src/train_deconver_2d.py` (2-D Deconver JPG/PNG).
+- SSL pretraining entrypoint: `src/pretrain.py`.
 - Model factory: `src/models/__init__.py`.
 - Supported model names: `unet3d`, `attention_unet3d`, `deconver`.
 - `deconver` is vendored under `src/models/deconver/` and added to `sys.path` in `src/models/__init__.py`.
@@ -47,6 +52,7 @@
 
 - `compose.yml` mounts: `./ -> /workspace`, `./data -> /data`, `./outputs -> /outputs`, `./cache -> /cache`.
 - Docker train mode uses `configs/default.yaml`; local runs use `configs/local_default.yaml`.
+- Docker 2-D train mode uses `configs/deconver_2d.yaml`; local 2-D runs use `configs/deconver_2d_local.yaml`.
 - Docker pretrain mode uses `configs/pretrain_default.yaml`; local pretrain uses `configs/pretrain_local.yaml`.
 - Run artifacts go to `<base_output_dir>/<timestamp>_<experiment_name>/`.
 - Each run stores `checkpoints/`, `tensorboard/`, `config.yaml`, and `metadata.json`.
@@ -60,6 +66,12 @@
 - Unlabeled Prostate158 discovery expects flattened files in `data/unlabeled_images/` as `<case>_{t2,adc,dwi}.nii.gz`.
 - For SSL pretraining, Prostate158 DWI is mapped to the HBV channel (`hbv_source="dwi"`), with optional DWI preprocessing via `dwi_hbv_preprocess`.
 - Labels are `<case_id>.nii.gz`; labels are binarized at load time (`>0` means lesion).
+
+## 2-D JPG/PNG assumptions (`src/dataset_2d.py`)
+
+- Pairing is basename-based: `images/<case_id>.jpg` ↔ `labels/<case_id>.png`.
+- Labels are binarized at load time (`>0` means lesion).
+- `input_channels` controls image loading: `1` (grayscale) or `3` (RGB).
 
 ## Training and metric quirks for debugging
 

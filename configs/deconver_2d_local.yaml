@@ -1,0 +1,85 @@
+experiment_name: deconver_2d_local
+epochs: 5
+batch_size: 8
+learning_rate: 2.0e-4
+weight_decay: 1.0e-5
+num_workers: 2
+device: cuda
+base_output_dir: ./outputs/runs
+random_seed: 42
+deterministic: false
+
+# Data (basename pairing: <id>.jpg <-> <id>.png)
+images_dir: ./data/images_2d
+labels_dir: ./data/labels_2d
+image_ext: .jpg
+label_ext: .png
+recursive_discovery: false
+input_channels: 1               # 1 = grayscale, 3 = RGB
+target_spacing: [0.5, 0.5]      # (y, x)
+val_fraction: 0.2
+
+# Patch sampling (2D)
+patch_size: [256, 256]          # (H, W)
+pos_fraction: 0.75
+num_samples: 1
+
+# Model
+model: deconver
+spatial_dims: 2
+out_channels: 1
+deep_supervision: true
+deconver_encoder_depth: [1, 1, 1, 1]
+deconver_encoder_width: [64, 128, 256, 512]
+deconver_strides: [1, 2, 2, 2]
+deconver_kernel_size: [3, 3]
+deconver_groups: -1
+deconver_ndc_ratio: 4
+
+# Loss
+loss_fn: tversky_bce
+tversky_alpha: 0.3
+tversky_beta: 0.7
+dice_weight: 1.0
+bce_weight: 1.0
+bce_pos_weight: 10.0
+
+# Validation (sliding window 2D)
+sw_overlap: 0.50
+sw_batch_size: 8
+val_min_sw_batch_size: 1
+val_compute_hd95_every: 0
+val_every: 1
+val_start_epoch: 1
+
+# Prediction / post-processing
+pred_threshold: 0.5
+postprocess_enabled: false
+postprocess_min_component_volume_mm3: 30.0
+postprocess_connectivity: 8      # 4 or 8 for 2D
+
+# Performance
+use_amp: true
+amp_dtype: bf16
+use_compile: false
+cache_dataset: true
+cache_rate: 1.0
+
+# Checkpointing
+keep_last_checkpoints: 3
+
+# Best checkpoint selection
+best_ckpt_w_sensitivity: 0.5
+best_ckpt_w_dice: 0.3
+best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
+
+# Early stopping
+early_stopping_patience: 0
+early_stopping_min_delta: 0.001
+
+# ntfy
+ntfy_url: ""
+ntfy_topic: ""
+ntfy_notify_best_model: true
+

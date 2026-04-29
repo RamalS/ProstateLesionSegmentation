@@ -83,5 +83,5 @@ early_stopping_min_delta: 0.001
 
 # ntfy
 ntfy_url: "https://ntfy.sh"
-ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"
+ntfy_topic: "17686c6e-56ee-4901-968a-031c27f5c1ba"
 ntfy_notify_best_model: true

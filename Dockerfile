@@ -42,6 +42,7 @@ RUN set -eux; \
         libxext6 \
         libxrender1 \
         nano \
+        neovim \
         htop; \
     ARCH="$(dpkg --print-architecture)"; \
     if [ "$ARCH" = "amd64" ]; then \

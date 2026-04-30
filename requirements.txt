@@ -21,4 +21,5 @@ monai
 SimpleITK
 nibabel
 scipy
+scikit-image
 connected-components-3d

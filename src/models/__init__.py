@@ -88,6 +88,10 @@ def build_model(cfg: dict) -> nn.Module:
                                        [3,3] for 2D).
         ``deconver_groups``         — NDC groups; -1 = one group per channel (default -1).
         ``deconver_ndc_ratio``      — NDC channel expansion ratio (default 4).
+        ``deconver_fp32_islands``   — run numerically sensitive NDC update math in FP32
+                                       while keeping outer AMP policy (default False).
+        ``deconver_fp32_scope``     — FP32 island scope: ``update_only`` or
+                                       ``iterative_block`` (default ``update_only``).
 
     Returns
     -------
@@ -164,6 +168,8 @@ def build_model(cfg: dict) -> nn.Module:
             kernel_size=tuple(cfg.get("deconver_kernel_size", default_kernel_size)),
             groups=cfg.get("deconver_groups", -1),
             ratio=cfg.get("deconver_ndc_ratio", 4),
+            fp32_islands=cfg.get("deconver_fp32_islands", False),
+            fp32_scope=cfg.get("deconver_fp32_scope", "update_only"),
             num_deep_supr=num_deep_supr,
         )
 

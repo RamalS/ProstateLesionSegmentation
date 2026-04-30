@@ -52,6 +52,29 @@ def ensure_cuda_binary_compatibility(device: torch.device) -> None:
     if (cc_major, cc_minor) in supported_sms:
         return
 
+    # NVIDIA cubins are forward-compatible within the same major SM version:
+    # code built for sm_Xy can run on sm_Xz where z >= y.
+    same_major_supported = sorted(
+        minor for major, minor in supported_sms if major == cc_major
+    )
+    if same_major_supported and any(minor <= cc_minor for minor in same_major_supported):
+        closest_floor_minor = max(
+            minor for minor in same_major_supported if minor <= cc_minor
+        )
+        gpu_name = torch.cuda.get_device_name(device_index)
+        detected_sm = f"sm_{cc_major}{cc_minor}"
+        floor_sm = f"sm_{cc_major}{closest_floor_minor}"
+        supported_sm_str = ", ".join(f"sm_{m}{n}" for m, n in supported_sms)
+        logger.warning(
+            "GPU %s (%s) is not explicitly listed in torch CUDA arch list [%s], "
+            "but binary compatibility is expected via %s. Proceeding.",
+            gpu_name,
+            detected_sm,
+            supported_sm_str,
+            floor_sm,
+        )
+        return
+
     gpu_name = torch.cuda.get_device_name(device_index)
     detected_sm = f"sm_{cc_major}{cc_minor}"
     supported_sm_str = ", ".join(f"sm_{m}{n}" for m, n in supported_sms)

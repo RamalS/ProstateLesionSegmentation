@@ -31,16 +31,18 @@ src/                        # All importable source code (PYTHONPATH=.)
   notify.py                 # ntfy push notification helper
   pretrain.py               # SSL masked-reconstruction encoder pretraining (unlabeled data)
   train.py                  # Training + validation loop (entry point)
-  train_deconver_2d.py      # Deconver-only 2D training loop (JPG/PNG)
+  train_deconver_2d.py      # Deconver-only 2D training loop (Gleason consensus, 4-class)
+  gleason_consensus_dataset.py # Consensus dataset loader (soft probs + hard mask + ignore + tissue)
+  consensus_training_examples.py # Plain PyTorch + MONAI-compatible 2D consensus training-step examples
   transforms.py             # MONAI augmentation pipelines
-  transforms_2d.py          # MONAI augmentation pipelines for 2D JPG/PNG
-  dataset_2d.py             # 2D JPG/PNG dataset + pair discovery
+  transforms_2d.py          # MONAI augmentation pipelines for legacy 2D JPG/PNG workflow
+  dataset_2d.py             # Legacy 2D JPG/PNG dataset + pair discovery
   utils.py                  # Shared helpers (checkpointing, run directories, composite score, encoder transfer)
 scripts/
   smoke_test.py             # Manual integration smoke test
   start.sh                  # Docker entrypoint dispatcher (train|train-2d|pretrain|tensorboard|smoke-test|evaluate|evaluate-2d|visualize-3d|visualize-3d-app|report-runs|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
-  evaluate_checkpoint_2d.py # Evaluate 2D Deconver runs on JPG/PNG pairs
+  evaluate_checkpoint_2d.py # Legacy evaluator for 2D JPG/PNG runs
   report_pipeline.py        # Orchestrate evaluate + GIF export + run report regeneration
   visualize_3d.py           # Interactive 3-D HTML visualizer (GT only or GT vs model prediction)
   visualize_3d_app.py       # Streamlit localhost app wrapper for visualize_3d.py
@@ -54,8 +56,8 @@ scripts/
 configs/
   default.yaml              # Production / Docker paths (300 epochs)
   local_default.yaml        # Local dev paths (5 epochs, relative paths)
-  deconver_2d.yaml          # Docker config for 2D Deconver JPG/PNG training
-  deconver_2d_local.yaml    # Local config for 2D Deconver JPG/PNG training
+  deconver_2d.yaml          # Docker config for 2D Deconver consensus training (4-class)
+  deconver_2d_local.yaml    # Local config for 2D Deconver consensus training (4-class)
   pretrain_default.yaml     # Docker SSL pretraining config (unlabeled Prostate158)
   pretrain_local.yaml       # Local SSL pretraining config
 ```
@@ -233,7 +235,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Build image (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml build` |
 | Download data | `docker compose run --rm trainer download` |
 | Train | `docker compose run --rm trainer train` |
-| Train 2D (Deconver JPG/PNG) | `docker compose run --rm trainer train-2d` |
+| Train 2D (Deconver consensus, 4-class) | `docker compose run --rm trainer train-2d` |
 | Train (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train` |
 | Pretrain encoder (SSL) | `docker compose run --rm trainer pretrain` |
 | Pretrain encoder (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain` |
@@ -243,7 +245,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | 3-D visualizer (GT vs model) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>` |
 | 3-D visualizer app (localhost) | `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501` |
 | Evaluate checkpoint | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name>` |
-| Evaluate 2D checkpoint | `docker compose run --rm trainer evaluate-2d --run /outputs/runs/<run_name>` |
+| Evaluate 2D checkpoint (legacy JPG/PNG evaluator) | `docker compose run --rm trainer evaluate-2d --run /outputs/runs/<run_name>` |
 | Generate run report | `docker compose run --rm trainer report-runs --visualizations-dir /workspace/visualizations --output /workspace/report.md` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
@@ -252,9 +254,9 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Task | Command |
 |---|---|
 | Train | `PYTHONPATH=. python -m src.train --config configs/local_default.yaml` |
-| Train 2D (Deconver JPG/PNG) | `PYTHONPATH=. python -m src.train_deconver_2d --config configs/deconver_2d_local.yaml` |
+| Train 2D (Deconver consensus, 4-class) | `PYTHONPATH=. python -m src.train_deconver_2d --config configs/deconver_2d_local.yaml` |
 | Pretrain encoder (SSL) | `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml` |
-| Evaluate 2D checkpoint | `PYTHONPATH=. python scripts/evaluate_checkpoint_2d.py --run outputs/runs/<run_name>` |
+| Evaluate 2D checkpoint (legacy JPG/PNG evaluator) | `PYTHONPATH=. python scripts/evaluate_checkpoint_2d.py --run outputs/runs/<run_name>` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
 | 3-D visualizer (GT vs model) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --run outputs/runs/<run_name>` |

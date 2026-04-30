@@ -56,6 +56,9 @@ class Deconv(nn.Module):
         eps: float = 1e-16,
         num_iters: int = 1,
         num_grad_iters: Optional[int] = None,
+        fp32_islands: bool = False,
+        fp32_scope: str = "update_only",
+        fp32_denominator_min: float = 1e-6,
         verbose: bool = False,
         **kwargs,
     ) -> None:
@@ -76,6 +79,14 @@ class Deconv(nn.Module):
         self.num_iters = num_iters
         self.num_grad_iters = num_iters if num_grad_iters is None else num_grad_iters
         self.eps = eps
+        self.fp32_islands = bool(fp32_islands)
+        scope = str(fp32_scope).strip().lower()
+        if scope not in {"update_only", "iterative_block"}:
+            raise ValueError(
+                f"fp32_scope must be 'update_only' or 'iterative_block', got {fp32_scope!r}"
+            )
+        self.fp32_scope = scope
+        self.fp32_denominator_min = float(fp32_denominator_min)
         self.verbose = verbose
 
         self.split_channels = Rearrange("b (g c) ... -> (b g) c ...", g=self.groups)
@@ -110,6 +121,30 @@ class Deconv(nn.Module):
 
         return s, h
 
+    def _update_fp32(self, x: Tensor, s: Tensor, h: Tensor) -> tuple[Tensor, Tensor]:
+        # Keep sensitive multiplicative deconvolution updates in FP32 while
+        # preserving external dtype for the rest of mixed-precision training.
+        s_dtype = s.dtype
+        h_dtype = h.dtype
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x32 = x.float()
+            s32 = s.float()
+            h32 = h.float()
+
+            if self.update_source:
+                numerator = self.conv(x32, t(flip(h32))) + self.eps
+                denominator = self.conv(self.conv(s32, h32), t(flip(h32))) + self.eps
+                denominator = denominator.clamp_min(self.fp32_denominator_min)
+                s32 = s32 * numerator / denominator
+
+            if self.update_filter:
+                numerator = self.sconv(s32, x32) + self.eps
+                denominator = self.sconv(s32, self.conv(s32, h32)) + self.eps
+                denominator = denominator.clamp_min(self.fp32_denominator_min)
+                h32 = h32 * t(numerator / denominator)
+
+        return s32.to(dtype=s_dtype), h32.to(dtype=h_dtype)
+
     def context(self, it: int) -> Any:
         if it < self.num_iters - self.num_grad_iters + 1:
             context = torch.no_grad()
@@ -119,13 +154,30 @@ class Deconv(nn.Module):
         return context
 
     def iterative_update(self, x: Tensor, s: Tensor, h: Tensor) -> tuple[Tensor, Tensor]:
+        if self.fp32_islands and self.fp32_scope == "iterative_block":
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                x_inner = x.float()
+                s_inner = s.float()
+                h_inner = h.float()
+                for it in range(1, self.num_iters + 1):
+                    with self.context(it):
+                        if self.verbose:
+                            loss = self.loss(x_inner, s_inner, h_inner)
+                            print(f"iter {it}: loss = {loss}")
+
+                        s_inner, h_inner = self.update(x_inner, s_inner, h_inner)
+            return s_inner.to(dtype=s.dtype), h_inner.to(dtype=h.dtype)
+
         for it in range(1, self.num_iters + 1):
             with self.context(it):
                 if self.verbose:
                     loss = self.loss(x, s, h)
                     print(f"iter {it}: loss = {loss}")
 
-                s, h = self.update(x, s, h)
+                if self.fp32_islands and self.fp32_scope == "update_only":
+                    s, h = self._update_fp32(x, s, h)
+                else:
+                    s, h = self.update(x, s, h)
 
         return s, h
 

@@ -1,6 +1,6 @@
 experiment_name: deconver_2d_consensus_local
 epochs: 5
-batch_size: 1
+batch_size: 8
 val_batch_size: 1
 learning_rate: 2.0e-4
 weight_decay: 1.0e-5

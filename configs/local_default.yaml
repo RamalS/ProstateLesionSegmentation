@@ -62,8 +62,9 @@ postprocess_connectivity: 26               # 6, 18, or 26
 use_amp: true                     # automatic mixed precision (see amp_dtype below)
 amp_dtype: bf16                   # RTX 5070 (Blackwell) has native BF16 tensor cores
 use_compile: false                # torch.compile — disable for dev; enable for longer runs
-cache_dataset: true               # cache preprocessed volumes in worker RAM after first epoch
+cache_mode: ram                   # one of: none | ram | storage
 cache_rate: 1.0                   # fraction of dataset to cache (1.0 = all cases)
+# dataset_cache_dir: cache/dataset_cache    # optional override for cache_mode=storage
 
 # Checkpointing
 keep_last_checkpoints: 3          # number of recent epoch_NNNN.pt files to keep (0 = keep all)

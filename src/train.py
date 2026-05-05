@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.config import load_config
+from src.config import load_config, resolve_dataset_cache_config
 from src.dataset import (
     PiCaiDataset,
     active_modality_pairs,
@@ -360,6 +360,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    cache_mode, cache_rate, cache_dir = resolve_dataset_cache_config(cfg, logger=logger)
 
     # ---- Reproducibility ----
     seed = cfg.get("random_seed", 42)
@@ -401,6 +402,12 @@ def main() -> None:
     # ---- Data ----
     patch_size: tuple[int, ...] = tuple(cfg.get("patch_size", [20, 128, 128]))
     target_spacing: tuple[float, ...] = tuple(cfg["target_spacing"])
+    logger.info(
+        "Dataset cache: mode=%s, rate=%.2f, dir=%s",
+        cache_mode,
+        cache_rate,
+        cache_dir if cache_dir is not None else "-",
+    )
 
     # Resolve active modalities once; used for case discovery and dataset init.
     _active_keys = [k for k, _ in active_modality_pairs(cfg)]
@@ -476,8 +483,9 @@ def main() -> None:
             num_samples=cfg.get("num_samples", 1),
         ),
         cases=train_cases,
-        use_cache=cfg.get("cache_dataset", False),
-        cache_rate=cfg.get("cache_rate", 1.0),
+        cache_mode=cache_mode,
+        cache_rate=cache_rate,
+        cache_dir=cache_dir,
         active_modalities=_active_keys,
     )
 
@@ -487,8 +495,9 @@ def main() -> None:
         target_spacing=target_spacing,
         transform=get_val_transforms(),
         cases=val_cases,
-        use_cache=cfg.get("cache_dataset", False),
-        cache_rate=cfg.get("cache_rate", 1.0),
+        cache_mode=cache_mode,
+        cache_rate=cache_rate,
+        cache_dir=cache_dir,
         active_modalities=_active_keys,
     )
 
@@ -503,8 +512,12 @@ def main() -> None:
     # This gives each batch a roughly balanced mix without duplicating data.
     n_pos = sum(1 for c in train_cases if c.get("has_lesion", False))
     n_neg = len(train_cases) - n_pos
-    # persistent_workers=True is required when cache_dataset=True: workers must
-    # survive across epochs so their in-process caches are not discarded.
+    if cache_mode == "ram" and cfg["num_workers"] == 0:
+        logger.warning(
+            "cache_mode='ram' with num_workers=0 keeps cache in the main process only; "
+            "this is valid but may reduce throughput."
+        )
+
     num_workers: int = cfg["num_workers"]
     use_persistent: bool = num_workers > 0
     if n_pos == 0 or n_neg == 0:

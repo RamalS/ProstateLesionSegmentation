@@ -1,6 +1,6 @@
 experiment_name: deconver
 epochs: 300
-batch_size: 12
+batch_size: 1
 learning_rate: 4.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
@@ -52,71 +52,3 @@ bce_weight: 1.0
 # lesions ≈ 1–2 % → background/foreground ratio ≈ 50–100:1.
 # Rule of thumb: (background voxels) / (lesion voxels). Start at 50 and
 # tune upward toward 100 if the model still predicts all-background.
-bce_pos_weight: 10.0               # was: 50.0
-
-# LR schedule
-# warmup_epochs > 0 inserts a linear warm-up phase before cosine annealing.
-# Helps BatchNorm layers stabilise before the full learning rate is applied,
-# reducing the risk of early collapse into the all-background local minimum.
-warmup_epochs: 10                  # linear warm-up from 10 % → 100 % of learning_rate
-
-# Validation (sliding window)
-sw_overlap: 0.50                   # overlap fraction for sliding window inference
-sw_batch_size: 20                  # number of patches processed per SW step
-val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
-val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
-val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
-val_start_epoch: 100               # skip validation entirely before this epoch (saves time during early training)
-
-# Prediction / post-processing
-pred_threshold: 0.5                        # sigmoid threshold before binarization
-postprocess_enabled: false                 # remove tiny 3-D connected-component outliers
-postprocess_min_component_volume_mm3: 30.0
-postprocess_connectivity: 26               # 6, 18, or 26
-
-# Training speed optimizations
-use_amp: true                      # automatic mixed precision (see amp_dtype below)
-amp_dtype: bf16                    # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
-                                   # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
-use_compile: false                 # torch.compile requires sm_75+ (Triton); TITAN V is sm_70
-cache_dataset: true                # cache preprocessed volumes in worker RAM after first epoch
-cache_rate: 1.0                    # fraction of dataset to cache (1.0 = all cases)
-
-# Checkpointing
-keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to keep (0 = keep all)
-# resume_checkpoint:               # uncomment and set path to resume from a checkpoint
-                                   # e.g. resume_checkpoint: /outputs/runs/my_run/checkpoints/epoch_0050.pt
-
-# Best checkpoint selection (composite score)
-# best.pt is saved when the composite score improves:
-#   score = w_sensitivity * sensitivity + w_dice * dice
-#           + w_hd95 * (1 / (1 + hd95 / hd95_scale))
-# Weights are normalised internally so they do not need to sum to 1.0.
-# hd95_scale (mm) sets the midpoint of the HD95 term: an HD95 equal to
-# hd95_scale produces a term of 0.5.  Use a value near the boundary between
-# "acceptable" and "poor" HD95 for your dataset (default: 10 mm).
-# HD95 is cached across epochs so the formula is consistent even when
-# val_compute_hd95_every > 1.
-best_ckpt_w_sensitivity: 0.4
-best_ckpt_w_dice: 0.6
-best_ckpt_w_hd95: 0.0
-best_ckpt_hd95_scale: 10.0
-
-# Early stopping
-# Training halts when the composite score does not improve by more than
-# early_stopping_min_delta for early_stopping_patience consecutive val epochs.
-# With val_every=2, patience=30 → no improvement for 60 training epochs.
-# Set early_stopping_patience to 0 to disable early stopping.
-early_stopping_patience: 50        # was: 30
-early_stopping_min_delta: 0.001
-
-# ntfy push notifications
-# Leave ntfy_url or ntfy_topic empty (or omit them entirely) to disable all
-# notifications.  ntfy_notify_best_model can be set to false to suppress the
-# per-checkpoint notification while keeping the others.
-# Example:
-#   ntfy_url: https://ntfy.sh
-#   ntfy_topic: my-training-alerts
-ntfy_url: "https://ntfy.sh"
-ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"
-ntfy_notify_best_model: true

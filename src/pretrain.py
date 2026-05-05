@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.config import load_config
+from src.config import load_config, resolve_dataset_cache_config
 from src.dataset import (
     PiCaiDataset,
     active_modality_pairs,
@@ -252,6 +252,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    cache_mode, cache_rate, cache_dir = resolve_dataset_cache_config(cfg, logger=logger)
 
     # Reproducibility
     seed = int(cfg.get("random_seed", 42))
@@ -291,6 +292,12 @@ def main() -> None:
 
     # Data
     unlabeled_images_dir = Path(cfg["unlabeled_images_dir"])
+    logger.info(
+        "Dataset cache: mode=%s, rate=%.2f, dir=%s",
+        cache_mode,
+        cache_rate,
+        cache_dir if cache_dir is not None else "-",
+    )
     if not unlabeled_images_dir.exists():
         raise FileNotFoundError(f"unlabeled_images_dir not found: {unlabeled_images_dir}")
 
@@ -451,8 +458,9 @@ def main() -> None:
         target_spacing=target_spacing,
         transform=None,
         cases=unlabeled_cases,
-        use_cache=bool(cfg.get("cache_dataset", False)),
-        cache_rate=float(cfg.get("cache_rate", 1.0)),
+        cache_mode=cache_mode,
+        cache_rate=cache_rate,
+        cache_dir=cache_dir,
         active_modalities=active_keys,
         dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
     )

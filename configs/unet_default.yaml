@@ -79,8 +79,9 @@ use_amp: true                      # automatic mixed precision (see amp_dtype be
 amp_dtype: fp16                    # fp16: Volta/Turing (TITAN V, V100, T4, RTX 20xx)
                                    # bf16: Ampere+ / Blackwell (A100, RTX 30xx/40xx/50xx)
 use_compile: false                 # torch.compile requires sm_75+ (Triton); TITAN V is sm_70
-cache_dataset: true                # cache preprocessed volumes in worker RAM after first epoch
+cache_mode: ram                    # one of: none | ram | storage
 cache_rate: 1.0                    # fraction of dataset to cache (1.0 = all cases)
+# dataset_cache_dir: /cache/dataset_cache   # optional override for cache_mode=storage
 
 # Checkpointing
 keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to keep (0 = keep all)

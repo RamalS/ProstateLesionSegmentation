@@ -35,7 +35,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from src.config import load_config
+from src.config import load_config, resolve_dataset_cache_config
 from src.models import build_model
 
 # ---------------------------------------------------------------------------
@@ -441,6 +441,7 @@ def _count_cases(images_dir: Path) -> Optional[int]:
 def estimate(config_path: str, gpu_vram_gb: float = 12.0) -> None:
     """Run the full resource estimation and print a report."""
     cfg = load_config(config_path)
+    cache_mode, cache_rate, cache_dir = resolve_dataset_cache_config(cfg)
 
     # ── Config values ──────────────────────────────────────────────────
     model_name:       str       = cfg.get("model", "unet3d").lower()
@@ -452,8 +453,6 @@ def estimate(config_path: str, gpu_vram_gb: float = 12.0) -> None:
     amp_dtype_str:    str       = cfg.get("amp_dtype", "fp32").lower()
     use_amp:          bool      = cfg.get("use_amp", False)
     num_samples:      int       = cfg.get("num_samples", 1)
-    cache_dataset:    bool      = cfg.get("cache_dataset", False)
-    cache_rate:       float     = cfg.get("cache_rate", 1.0)
     images_dir:       Path      = Path(cfg.get("images_dir", "data/images"))
     deep_supervision: bool      = cfg.get("deep_supervision", False)
     val_fraction:     float     = cfg.get("val_fraction", 0.2)
@@ -640,17 +639,21 @@ def estimate(config_path: str, gpu_vram_gb: float = 12.0) -> None:
     worker_ram   = num_workers * batch_size * in_channels * pD * pH * pW * 4
     n_cases      = _count_cases(images_dir)
     per_case_ram = in_channels * vD * vH * vW * 4
-    cached_frac  = cache_rate if cache_dataset else 0.0
+    cache_uses_ram = cache_mode == "ram"
+    cached_frac = cache_rate if cache_uses_ram else 0.0
 
     cache_ram: Optional[int]
     cache_note: str
-    if n_cases is not None:
+    if cache_uses_ram and n_cases is not None:
         cached_cases = int(n_cases * cached_frac)
         cache_ram    = cached_cases * per_case_ram
         cache_note   = f"{cached_cases}/{n_cases} cases × {_fmt_bytes(per_case_ram).strip()}/case"
-    else:
+    elif cache_uses_ram:
         cache_ram  = None
         cache_note = f"data dir not found — N_cases × {_fmt_bytes(per_case_ram).strip()}/case"
+    else:
+        cache_ram = 0
+        cache_note = "n/a"
 
     total_ram = worker_ram + (cache_ram if cache_ram is not None else 0)
 
@@ -714,6 +717,9 @@ def estimate(config_path: str, gpu_vram_gb: float = 12.0) -> None:
     print(f"  {'AMP dtype':<26}: {amp_label}  ({param_bytes} bytes/elem)")
     print(f"  {'Deep supervision':<26}: {deep_supervision}")
     print(f"  {'num_workers':<26}: {num_workers}")
+    print(f"  {'cache_mode':<26}: {cache_mode} (rate={cache_rate})")
+    if cache_mode == "storage":
+        print(f"  {'dataset_cache_dir':<26}: {cache_dir}")
     print(f"  {'sw_batch_size':<26}: {sw_batch_size}  "
           f"({total_windows} windows → {sw_batches} batch(es) per volume)")
     print(f"  {'sw_overlap':<26}: {sw_overlap}")
@@ -802,14 +808,20 @@ def estimate(config_path: str, gpu_vram_gb: float = 12.0) -> None:
     # ── RAM ───────────────────────────────────────────────────────────
     _hdr("RAM")
     _row("DataLoader worker buffers", _fmt_bytes(worker_ram))
-    if cache_dataset:
+    if cache_mode == "ram":
         _row(f"Dataset cache  (rate={cache_rate})",
              _fmt_bytes(cache_ram) if cache_ram is not None else "  see below")
         print(f"    {'':>{LW}}  {cache_note}")
+    elif cache_mode == "storage":
+        _row("Dataset cache", "persistent storage")
+        _row("Storage cache directory", str(cache_dir))
+        _row("Dataset cache RAM impact", "none (beyond worker buffers)")
     else:
         _row("Dataset cache", "disabled")
     _sep()
-    if cache_ram is not None:
+    if cache_mode != "ram":
+        _row("RAM total estimate", _fmt_bytes(total_ram))
+    elif cache_ram is not None:
         _row("RAM total estimate", _fmt_bytes(total_ram))
     else:
         print(f"    {'RAM total':<{LW}}worker_ram + (N_cases × {_fmt_bytes(per_case_ram).strip()})")

@@ -39,6 +39,8 @@ import math
 import os
 import random
 import sys
+import threading
+import hashlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -893,6 +895,8 @@ class PiCaiDataset(Dataset):
         cache_rate: float = 1.0,
         active_modalities: Optional[Sequence[str]] = None,
         dwi_hbv_preprocess: Optional[dict[str, Any]] = None,
+        cache_mode: str | None = None,
+        cache_dir: str | Path | None = None,
     ) -> None:
         """
         Parameters
@@ -907,15 +911,13 @@ class PiCaiDataset(Dataset):
                           Intended for MONAI-style random augmentations.
         cases             Pre-computed case list (skips discovery if provided).
                           Useful for passing pre-split train/val subsets.
-        use_cache         If True, cache preprocessed (image, label) tensor pairs
-                          in worker memory after the first access.  Subsequent
-                          epochs skip all SimpleITK I/O and resampling for cached
-                          cases.  Requires ``persistent_workers=True`` in
-                          DataLoader so the worker processes (and their caches)
-                          survive across epochs.
+        use_cache         Legacy compatibility flag.  When ``cache_mode`` is
+                          not provided, ``True`` maps to ``cache_mode="ram"``
+                          and ``False`` maps to ``cache_mode="none"``.
         cache_rate        Fraction of cases to cache, in [0.0, 1.0].  Cases are
                           selected deterministically (first ``ceil(N * rate)``
-                          cases by index).  Default 1.0 caches the full dataset.
+                          cases by index).  Default 1.0 caches the full dataset
+                          in ``ram``/``storage`` modes.
         active_modalities Ordered sequence of modality keys to include in the
                            output image tensor.  Must be a subset of
                            ``("t2w", "adc", "hbv")``.  Defaults to all three
@@ -926,13 +928,47 @@ class PiCaiDataset(Dataset):
                            when a case sets ``hbv_source="dwi"``.
                            Supported keys: ``enabled`` (bool),
                            ``clip_percentiles`` ([low, high]), ``log1p`` (bool).
+        cache_mode        Dataset cache backend: ``"none"``, ``"ram"``, or
+                          ``"storage"``.  ``ram`` keeps preprocessed tensors in
+                          process memory; ``storage`` persists tensors on disk.
+        cache_dir         Root directory for ``cache_mode="storage"``.  Ignored
+                          for ``ram``/``none``.
         """
         self.images_dir = Path(images_dir)
         self.labels_dir = Path(labels_dir)
         self.target_spacing = target_spacing
         self.transform = transform
-        self.use_cache = use_cache
         self.cache_rate = float(cache_rate)
+        if not 0.0 <= self.cache_rate <= 1.0:
+            raise ValueError(
+                f"cache_rate must be in [0.0, 1.0], got {self.cache_rate}."
+            )
+
+        if cache_mode is None:
+            resolved_cache_mode = "ram" if use_cache else "none"
+        else:
+            resolved_cache_mode = str(cache_mode).strip().lower()
+            if resolved_cache_mode not in {"none", "ram", "storage"}:
+                raise ValueError(
+                    f"Unsupported cache_mode='{cache_mode}'. "
+                    "Expected one of: none, ram, storage."
+                )
+            if use_cache and resolved_cache_mode != "ram":
+                logger.warning(
+                    "use_cache=%s ignored because cache_mode='%s' takes precedence.",
+                    use_cache,
+                    resolved_cache_mode,
+                )
+
+        self.cache_mode = resolved_cache_mode
+        self.use_cache = self.cache_mode == "ram"  # legacy compatibility alias
+        self.cache_enabled = self.cache_mode in {"ram", "storage"}
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        if self.cache_mode == "storage":
+            if self.cache_dir is None:
+                self.cache_dir = Path("cache") / "dataset_cache"
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         # Resolve active modalities: preserve canonical order, default to all.
         self.active_modalities: tuple[str, ...] = (
             tuple(k for k in MODALITY_KEYS if k in active_modalities)
@@ -961,23 +997,27 @@ class PiCaiDataset(Dataset):
             )
 
         # Determine which indices are eligible for caching.
-        n_cache = math.ceil(len(self.cases) * self.cache_rate) if use_cache else 0
+        n_cache = math.ceil(len(self.cases) * self.cache_rate) if self.cache_enabled else 0
         self._cache_indices: set[int] = set(range(n_cache))
         # Mapping from case index → (image_tensor, label_tensor).
-        # Pre-populated eagerly in the main process so all DataLoader workers
-        # inherit a fully-warmed cache via fork() — 100% hit rate from epoch 1.
+        # Used only for cache_mode="ram".  Pre-populated eagerly in the main
+        # process so all DataLoader workers inherit a fully-warmed cache via
+        # fork() — 100% hit rate from epoch 1.
         self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
+        cache_dir_msg = str(self.cache_dir) if self.cache_mode == "storage" else "-"
         logger.info(
             "PiCaiDataset ready: %d cases, modalities=%s, spacing=%s, "
-            "transform=%s, cache=%s (%.0f%% = %d cases), dwi_hbv_preprocess=%s",
+            "transform=%s, cache_mode=%s (%.0f%% = %d cases), cache_dir=%s, "
+            "dwi_hbv_preprocess=%s",
             len(self.cases),
             list(self.active_modalities),
             target_spacing,
             type(transform).__name__ if transform is not None else "None",
-            use_cache,
+            self.cache_mode,
             self.cache_rate * 100,
             n_cache,
+            cache_dir_msg,
             "on" if self.dwi_hbv_preprocess_enabled else "off",
         )
 
@@ -987,7 +1027,7 @@ class PiCaiDataset(Dataset):
         # duplication of I/O.
         # ThreadPoolExecutor overlaps I/O and resampling across cases — SimpleITK
         # and numpy both release the GIL during their compute-heavy operations.
-        if use_cache and n_cache > 0:
+        if self.cache_mode == "ram" and n_cache > 0:
             warmup_workers = min(n_cache, os.cpu_count() or 4)
             logger.info(
                 "Warming cache (%d threads): loading %d/%d cases into RAM …",
@@ -1017,11 +1057,12 @@ class PiCaiDataset(Dataset):
     def __getitem__(self, idx: int) -> dict | list[dict]:
         case = self.cases[idx]
         case_id: str = case["case_id"]
+        cache_candidate = idx in self._cache_indices
 
         # ---------------------------------------------------------------------------
-        # In-memory cache lookup
+        # Dataset cache lookup
         # ---------------------------------------------------------------------------
-        if self.use_cache and idx in self._cache_indices:
+        if self.cache_mode == "ram" and cache_candidate:
             if idx in self._cache:
                 # Cache hit: return cloned tensors to prevent in-place transform
                 # mutations from corrupting the stored originals.
@@ -1035,6 +1076,14 @@ class PiCaiDataset(Dataset):
                 )
                 image, label = self._load_and_preprocess(case)
                 self._cache[idx] = (image.clone(), label.clone())
+        elif self.cache_mode == "storage" and cache_candidate:
+            cache_path = self._storage_cache_path(case)
+            cached = self._load_from_storage_cache(cache_path)
+            if cached is None:
+                image, label = self._load_and_preprocess(case)
+                self._save_to_storage_cache(cache_path, image, label)
+            else:
+                image, label = cached
         else:
             image, label = self._load_and_preprocess(case)
 
@@ -1057,6 +1106,86 @@ class PiCaiDataset(Dataset):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _storage_cache_path(self, case: dict) -> Path:
+        """
+        Build a deterministic path for one storage-cache entry.
+        """
+        if self.cache_dir is None:
+            raise RuntimeError("cache_dir is not configured for storage cache mode.")
+
+        cache_meta: dict[str, Any] = {
+            "case_id": str(case["case_id"]),
+            "target_spacing": [float(v) for v in self.target_spacing],
+            "active_modalities": list(self.active_modalities),
+            "dwi_hbv_preprocess": {
+                "enabled": self.dwi_hbv_preprocess_enabled,
+                "clip_percentiles": list(self.dwi_hbv_clip_percentiles),
+                "log1p": self.dwi_hbv_log1p,
+            },
+            "hbv_source": str(case.get("hbv_source", "hbv")),
+            "paths": {
+                key: str(Path(case[key]).resolve())
+                for key in ("t2w", "adc", "hbv")
+                if key in case and case[key] is not None
+            },
+            "label_path": (
+                str(Path(case["label"]).resolve())
+                if case.get("label") is not None
+                else None
+            ),
+        }
+        digest = hashlib.sha1(
+            json.dumps(cache_meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        safe_case_id = "".join(
+            ch if ch.isalnum() or ch in {"_", "-", "."} else "_"
+            for ch in str(case["case_id"])
+        )
+        return self.cache_dir / f"{safe_case_id}_{digest}.pt"
+
+    def _load_from_storage_cache(
+        self,
+        cache_path: Path,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not cache_path.exists():
+            return None
+        try:
+            payload = torch.load(cache_path, map_location="cpu")
+            image = payload.get("image")
+            label = payload.get("label")
+            if not isinstance(image, torch.Tensor) or not isinstance(label, torch.Tensor):
+                raise TypeError("cache payload is missing tensor keys 'image'/'label'")
+            return image, label
+        except Exception as exc:
+            logger.warning(
+                "Could not read storage cache entry %s (%s); recomputing.",
+                cache_path,
+                exc,
+            )
+            return None
+
+    def _save_to_storage_cache(
+        self,
+        cache_path: Path,
+        image: torch.Tensor,
+        label: torch.Tensor,
+    ) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(
+            f"{cache_path.suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
+        )
+        try:
+            torch.save({"image": image, "label": label}, tmp_path)
+            os.replace(tmp_path, cache_path)
+        except Exception as exc:
+            logger.warning("Could not write storage cache entry %s: %s", cache_path, exc)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     def _load_and_preprocess(
         self, case: dict

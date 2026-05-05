@@ -25,7 +25,7 @@ What this tests (no real data required):
   10. compute_composite_score: normal case, hd95_scale parameter, HD95=NaN
       redistribution, sensitivity=NaN guard, cached-HD95 consistency,
       early stopping counter simulation
- 11. PiCaiDataset in-memory cache (use_cache=True)
+ 11. PiCaiDataset cache modes (ram/storage/none)
  12. compute_all_metrics(compute_hd95=False)
  13. AMP forward+backward: FP16+GradScaler (Volta/Turing) and BF16 (Ampere+/Blackwell)
  14. ntfy notifications: send_ntfy no-op, URL/header/body correctness, error handling
@@ -1832,9 +1832,9 @@ except Exception as exc:
     fail("compute_composite_score test failed", exc)
 
 # ---------------------------------------------------------------------------
-# 11. In-memory dataset cache (PiCaiDataset use_cache=True)
+# 11. Dataset cache modes (ram/storage/none)
 # ---------------------------------------------------------------------------
-section("11. PiCaiDataset in-memory cache (use_cache=True)")
+section("11. PiCaiDataset cache modes (ram/storage/none)")
 
 if _sitk is None:
     skip("SimpleITK not installed — skipping cache test")
@@ -1865,14 +1865,13 @@ else:
                 # nibabel absent: write a 0-byte file (treated as no-lesion)
                 path.touch()
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            img_dir = tmp_path / "images"
-            lbl_dir = tmp_path / "labels"
-            img_dir.mkdir()
-            lbl_dir.mkdir()
+        def _make_fixture(root: Path, tag: str) -> tuple[Path, Path, list[dict]]:
+            img_dir = root / f"images_{tag}"
+            lbl_dir = root / f"labels_{tag}"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            lbl_dir.mkdir(parents=True, exist_ok=True)
 
-            case_id = "test_0000_0000"
+            case_id = f"test_{tag}_0000"
             for suffix in ("_t2w.mha", "_adc.mha", "_hbv.mha"):
                 _write_tiny_mha(img_dir / f"{case_id}{suffix}")
             _write_tiny_nii(lbl_dir / f"{case_id}.nii.gz")
@@ -1884,35 +1883,78 @@ else:
                 "hbv": img_dir / f"{case_id}_hbv.mha",
                 "label": lbl_dir / f"{case_id}.nii.gz",
             }]
+            return img_dir, lbl_dir, synth_cases
 
-            ds = PiCaiDataset(
-                images_dir=img_dir,
-                labels_dir=lbl_dir,
-                cases=synth_cases,
-                use_cache=True,
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            # --- RAM mode -------------------------------------------------
+            import shutil
+            img_dir_ram, lbl_dir_ram, cases_ram = _make_fixture(tmp_path, "ram")
+            ds_ram = PiCaiDataset(
+                images_dir=img_dir_ram,
+                labels_dir=lbl_dir_ram,
+                cases=cases_ram,
+                cache_mode="ram",
                 cache_rate=1.0,
             )
-
-            # First access: populates cache.
-            _ = ds[0]
-            if 0 in ds._cache:
-                ok("cache populated on first __getitem__ access")
+            _ = ds_ram[0]
+            if 0 in ds_ram._cache:
+                ok("ram mode: cache populated on first __getitem__ access")
             else:
-                fail("cache was not populated after first access")
-
-            # Second access: must be a cache hit (no disk I/O).
-            # We verify this by temporarily removing the source files and
-            # confirming the second call still succeeds.
-            import shutil
-            shutil.rmtree(str(img_dir))
+                fail("ram mode: cache was not populated after first access")
+            shutil.rmtree(str(img_dir_ram))
             try:
-                _ = ds[0]
-                ok("second access succeeds from cache (source files removed)")
+                _ = ds_ram[0]
+                ok("ram mode: second access succeeds after source removal")
             except Exception as e:
-                fail("second access failed despite cache being populated", e)
+                fail("ram mode: second access failed despite cache", e)
+
+            # --- Storage mode ---------------------------------------------
+            img_dir_storage, lbl_dir_storage, cases_storage = _make_fixture(tmp_path, "storage")
+            storage_cache_dir = tmp_path / "storage_cache"
+            ds_storage = PiCaiDataset(
+                images_dir=img_dir_storage,
+                labels_dir=lbl_dir_storage,
+                cases=cases_storage,
+                cache_mode="storage",
+                cache_rate=1.0,
+                cache_dir=storage_cache_dir,
+            )
+            _ = ds_storage[0]
+            storage_entries = list(storage_cache_dir.glob("*.pt"))
+            if storage_entries:
+                ok("storage mode: cache file created on first access")
+            else:
+                fail("storage mode: cache file was not created")
+            shutil.rmtree(str(img_dir_storage))
+            shutil.rmtree(str(lbl_dir_storage))
+            try:
+                _ = ds_storage[0]
+                ok("storage mode: second access succeeds from persistent cache")
+            except Exception as e:
+                fail("storage mode: second access failed after source removal", e)
+
+            # --- None mode ------------------------------------------------
+            img_dir_none, lbl_dir_none, cases_none = _make_fixture(tmp_path, "none")
+            ds_none = PiCaiDataset(
+                images_dir=img_dir_none,
+                labels_dir=lbl_dir_none,
+                cases=cases_none,
+                cache_mode="none",
+                cache_rate=1.0,
+            )
+            _ = ds_none[0]
+            shutil.rmtree(str(img_dir_none))
+            shutil.rmtree(str(lbl_dir_none))
+            try:
+                _ = ds_none[0]
+                fail("none mode: second access unexpectedly succeeded after source removal")
+            except Exception:
+                ok("none mode: second access fails after source removal (expected)")
 
     except Exception as exc:
-        fail("PiCaiDataset cache test failed", exc)
+        fail("PiCaiDataset cache-mode test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 12. compute_all_metrics with compute_hd95=False

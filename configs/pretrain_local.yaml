@@ -42,8 +42,9 @@ dwi_hbv_preprocess:
 use_amp: true
 amp_dtype: bf16
 use_compile: false
-cache_dataset: true
+cache_mode: ram
 cache_rate: 1.0
+# dataset_cache_dir: cache/dataset_cache
 
 # Checkpointing
 keep_last_checkpoints: 3

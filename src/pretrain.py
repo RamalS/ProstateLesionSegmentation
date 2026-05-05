@@ -41,6 +41,7 @@ from src.utils import (
     ensure_cuda_binary_compatibility,
     ensure_dir,
     get_encoder_state_dict,
+    load_checkpoint,
     rotate_checkpoints,
     save_config_copy,
     save_latest_pointer,
@@ -244,6 +245,16 @@ def main() -> None:
         description="Self-supervised encoder pretraining on unlabeled MRI"
     )
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="CHECKPOINT",
+        help=(
+            "Path to a .pt checkpoint to resume SSL pretraining from "
+            "(overrides resume_checkpoint in config)"
+        ),
+    )
     parser.add_argument(
         "--new-split-manifest",
         action="store_true",
@@ -550,6 +561,27 @@ def main() -> None:
     )
     logger.info("Run directory: %s", run_dir)
 
+    start_epoch = 1
+    best_loss = float("inf")
+    resume_path: str | None = args.resume or cfg.get("resume_checkpoint")
+    if resume_path:
+        ckpt = load_checkpoint(
+            path=resume_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            device=device,
+        )
+        start_epoch = int(ckpt["epoch"]) + 1
+        best_loss = float(ckpt.get("best_loss", float("inf")))
+        logger.info(
+            "Resuming SSL pretraining from epoch %d (best_loss=%.4f) -> starting at epoch %d",
+            int(ckpt["epoch"]),
+            best_loss,
+            start_epoch,
+        )
+
     send_ntfy(
         cfg,
         title=f"SSL pretraining started: {cfg.get('experiment_name', 'ssl_pretrain')}",
@@ -563,9 +595,7 @@ def main() -> None:
         priority="default",
     )
 
-    best_loss = float("inf")
-
-    for epoch in tqdm(range(1, epochs + 1), desc="Epochs", unit="epoch"):
+    for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs", unit="epoch"):
         model.train()
         epoch_loss = 0.0
         epoch_masked_l1 = 0.0

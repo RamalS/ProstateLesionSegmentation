@@ -55,6 +55,7 @@ cache_rate: 1.0
 
 # Checkpointing
 keep_last_checkpoints: 3
+# resume_checkpoint: /outputs/pretrain_runs/<run_name>/checkpoints/epoch_0050.pt
 
 ntfy_url: "https://ntfy.sh"
 ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"

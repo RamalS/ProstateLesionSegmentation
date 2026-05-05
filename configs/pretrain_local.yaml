@@ -48,3 +48,4 @@ cache_rate: 1.0
 
 # Checkpointing
 keep_last_checkpoints: 3
+# resume_checkpoint: outputs/pretrain_runs/<run_name>/checkpoints/epoch_0005.pt

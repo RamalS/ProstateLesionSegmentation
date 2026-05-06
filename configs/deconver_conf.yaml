@@ -1,6 +1,6 @@
 experiment_name: deconver
-epochs: 300
-batch_size: 1
+epochs: 30
+batch_size: 2
 learning_rate: 4.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
@@ -45,10 +45,54 @@ deconver_ndc_ratio: 4                        # NDC channel expansion ratio (R = 
 loss_fn: tversky_bce
 tversky_alpha: 0.3                 # FP penalty weight (lower → more FP-tolerant)
 tversky_beta: 0.7                  # FN penalty weight (higher → fewer missed lesions)
-dice_weight: 1.0                   # weight on Tversky/Dice term  (was 3.0)
+dice_weight: 1.0                   # weight on Tversky/Dice term
 bce_weight: 1.0
-# Positive-voxel weight for the BCE term. Compensates for class imbalance.
-# At target_spacing [3.0, 0.5, 0.5] a typical prostate is ~80 k voxels;
-# lesions ≈ 1–2 % → background/foreground ratio ≈ 50–100:1.
-# Rule of thumb: (background voxels) / (lesion voxels). Start at 50 and
-# tune upward toward 100 if the model still predicts all-background.
+bce_pos_weight: 10.0               # positive-voxel weight for BCE term
+
+# LR schedule
+warmup_epochs: 2                   # linear warm-up from 10 % → 100 % of learning_rate
+
+# Validation (sliding window)
+sw_overlap: 0.50                   # overlap fraction for sliding window inference
+sw_batch_size: 8                   # number of patches processed per SW step
+val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
+val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
+val_every: 2                       # run validation every N epochs (also always runs on the final epoch)
+val_start_epoch: 1                 # skip validation entirely before this epoch
+
+# Prediction / post-processing
+pred_threshold: 0.5                        # sigmoid threshold before binarization
+postprocess_enabled: false                 # remove tiny 3-D connected-component outliers
+postprocess_min_component_volume_mm3: 30.0
+postprocess_connectivity: 26               # 6, 18, or 26
+
+# Training speed optimizations
+use_amp: true
+amp_dtype: fp16
+use_compile: false
+cache_mode: ram                    # one of: none | ram | storage
+cache_rate: 1.0                    # fraction of dataset to cache (1.0 = all cases)
+# dataset_cache_dir: /cache/dataset_cache   # optional override for cache_mode=storage
+
+# Checkpointing
+keep_last_checkpoints: 3
+# resume_checkpoint: /outputs/runs/<run_name>/checkpoints/epoch_0050.pt
+
+# SSL encoder initialization
+pretrained_encoder_checkpoint: "/outputs/pretrain_runs/20260505_215426_ssl_pretrain_deconver_mae/checkpoints/best.pt"
+freeze_encoder_epochs: 0            # >0 freezes encoder for first N epochs
+
+# Best checkpoint selection (composite score)
+best_ckpt_w_sensitivity: 0.4
+best_ckpt_w_dice: 0.6
+best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
+
+# Early stopping
+early_stopping_patience: 50
+early_stopping_min_delta: 0.001
+
+# ntfy push notifications
+ntfy_url: "https://ntfy.sh"
+ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"
+ntfy_notify_best_model: true

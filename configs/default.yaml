@@ -1,7 +1,7 @@
 experiment_name: v3_multimodal
 epochs: 300
 batch_size: 16
-learning_rate: 4.0e-4
+learning_rate: 1.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
 device: cuda
@@ -58,7 +58,7 @@ bce_pos_weight: 10.0               # was: 50.0
 # warmup_epochs > 0 inserts a linear warm-up phase before cosine annealing.
 # Helps BatchNorm layers stabilise before the full learning rate is applied,
 # reducing the risk of early collapse into the all-background local minimum.
-warmup_epochs: 10                  # linear warm-up from 10 % → 100 % of learning_rate
+warmup_epochs: 2                   # linear warm-up from 10 % → 100 % of learning_rate
 
 # Validation (sliding window)
 sw_overlap: 0.50                   # overlap fraction for sliding window inference
@@ -90,7 +90,7 @@ keep_last_checkpoints: 3           # number of recent epoch_NNNN.pt files to kee
 
 # SSL encoder initialization (optional)
 pretrained_encoder_checkpoint: ""   # e.g. /outputs/pretrain_runs/<run>/checkpoints/best.pt
-freeze_encoder_epochs: 0            # >0 freezes encoder for first N epochs
+freeze_encoder_epochs: 2            # for SSL warm-starts; set 0 for scratch training
 
 # Best checkpoint selection (composite score)
 # best.pt is saved when the composite score improves:

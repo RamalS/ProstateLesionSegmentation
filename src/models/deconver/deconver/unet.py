@@ -50,7 +50,7 @@ class UNetEncoderBlock(nn.Module):
         block = partialize(block)
         downsample = nn.Identity if math.prod(as_tuple(stride)) == 1 else downsample
         downsample = partialize(downsample)
-        self.downsample = downsample(in_channels, out_channels, stride=2)
+        self.downsample = downsample(in_channels, out_channels, stride=stride)
         self.block = block(out_channels, out_channels, depth=depth, **kwargs)
 
     def forward(self, x):

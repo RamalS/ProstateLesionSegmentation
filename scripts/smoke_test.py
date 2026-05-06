@@ -8,7 +8,8 @@ What this tests (no real data required):
    3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
    3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
    3d. Deep supervision: list output, auxiliary shapes, build_model DS, DeepSupervisionWrapper
-   3e. Deconver: instantiation, forward pass, build_model factory, deep supervision (num_deep_supr)
+   3e. Deconver: instantiation, forward pass, build_model factory, deep supervision (num_deep_supr),
+       and stride wiring regression guard
   4. DiceBCELoss: forward pass with random logits/targets
   4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
   4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
@@ -559,6 +560,27 @@ try:
         fail("build_model should raise ValueError for unknown model name")
     except ValueError:
         ok("build_model raises ValueError for unknown model name (regression guard)")
+
+    # --- 3e-v. Per-stage encoder stride wiring regression guard --------------
+    # Ensure non-uniform stride tuples are passed through as configured
+    # (and not hardcoded to stride=2).
+    _dconv_cfg_stride = dict(_dconv_cfg_base)
+    _dconv_cfg_stride["deconver_strides"] = [1, (2, 1, 1), 2]
+    _dconv_stride_model = _bm_dconv(_dconv_cfg_stride).to(DEVICE)
+    _stage1_downsample = _dconv_stride_model.encoder.blocks[1].downsample
+    _actual_stride = getattr(_stage1_downsample, "stride", None)
+    _expected_stride = (2, 1, 1)
+
+    if _actual_stride == _expected_stride:
+        ok(
+            "Deconver stage stride wiring OK — "
+            f"stage[1] downsample stride={_actual_stride}"
+        )
+    else:
+        fail(
+            "Deconver stage stride wiring mismatch: "
+            f"got {_actual_stride}, expected {_expected_stride}"
+        )
 
 except Exception as exc:
     fail("Deconver test failed", exc)

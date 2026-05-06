@@ -28,6 +28,7 @@ src/                        # All importable source code (PYTHONPATH=.)
     __init__.py             # build_model factory (unet3d, attention_unet3d, deconver)
     unet3d.py               # UNet3D (3D encoder-decoder with skip connections)
     attention_unet3d.py     # AttentionUNet3D (UNet3D + attention gates on skip connections)
+    deconver/               # Vendored Deconver package (upstream: github.com/pashtari/deconver)
   notify.py                 # ntfy push notification helper
   pretrain.py               # SSL masked-reconstruction encoder pretraining (unlabeled data)
   train.py                  # Training + validation loop (entry point)
@@ -50,7 +51,9 @@ scripts/
 configs/
   default.yaml              # Production / Docker paths (300 epochs)
   local_default.yaml        # Local dev paths (5 epochs, relative paths)
+  deconver_conf.yaml        # Docker supervised config tuned for model: deconver
   pretrain_default.yaml     # Docker SSL pretraining config (unlabeled Prostate158)
+  pretrain_deconver.yaml    # Docker SSL pretraining config for model: deconver
   pretrain_local.yaml       # Local SSL pretraining config
 ```
 
@@ -69,9 +72,32 @@ configs/
 
 - Each gate reweights the encoder feature map by a spatially learned alpha mask before concatenation in the decoder
 - Supports **deep supervision**: when `deep_supervision: true`, auxiliary output heads are attached at each decoder level (nnU-Net style); `forward` returns a `list[Tensor]` ordered finest → coarsest
-- Selected at runtime via the `model` config key (`unet3d` or `attention_unet3d`)
 
-Default configuration: feature sizes `[32, 64, 128, 256]` with a 512-channel bottleneck, up to 3 input channels (T2w + ADC + HBV, controlled by `use_t2w/use_adc/use_hbv` flags), 1 output channel (binary segmentation).
+**Deconver** — a U-shaped segmentation architecture with a deconvolution-based mixer (NDC) in place of attention-heavy blocks.
+
+- In this repo, `deconver` is vendored under `src/models/deconver/` and wired into `build_model(cfg)` via `src/models/__init__.py`
+- Deconver stages use residual updates around a deconvolutional mixer (`DeconvMixer`) plus MLP blocks
+- Creator attribution: **Pooya Ashtari et al.**, *Deconver: A Deconvolutional Network for Medical Image Segmentation* ([arXiv:2504.00302](https://arxiv.org/abs/2504.00302)); upstream project: [pashtari/deconver](https://github.com/pashtari/deconver)
+- Selected at runtime via the `model` config key (`unet3d`, `attention_unet3d`, or `deconver`)
+
+UNet3D/AttentionUNet3D default configuration uses feature sizes `[32, 64, 128, 256]` with a 512-channel bottleneck, up to 3 input channels (T2w + ADC + HBV, controlled by `use_t2w/use_adc/use_hbv` flags), and 1 output channel (binary segmentation).
+
+To run with Deconver, set `model: deconver` and define Deconver-specific keys:
+
+```yaml
+model: deconver
+deconver_encoder_depth: [1, 1, 1, 1]
+deconver_encoder_width: [64, 128, 256, 512]
+deconver_strides: [1, 2, 2, 2]
+deconver_kernel_size: [3, 3, 3]
+deconver_groups: -1
+deconver_ndc_ratio: 4
+```
+
+Reference configs:
+
+- Supervised training: `configs/deconver_conf.yaml`
+- SSL pretraining: `configs/pretrain_deconver.yaml`
 
 ---
 

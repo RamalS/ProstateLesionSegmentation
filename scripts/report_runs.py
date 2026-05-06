@@ -942,7 +942,6 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
     lines.append("### Visualization")
     if report.orbit_gif_path is not None and report.orbit_gif_path.exists():
         orbit_rel = _md_relpath(report.orbit_gif_path, report_dir)
-        lines.append("Loading orbit GIF (large file, may take a moment)...")
         lines.append(
             f'<img src="{orbit_rel}" alt="{report.run_name} orbit" '
             'loading="lazy" decoding="async">'
@@ -952,7 +951,6 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
     lines.append("")
     if report.eval_visualization_path is not None and report.eval_visualization_path.exists():
         eval_rel = _md_relpath(report.eval_visualization_path, report_dir)
-        lines.append("Loading evaluation image...")
         lines.append(
             f'<img src="{eval_rel}" alt="{report.run_name} evaluation" '
             'loading="lazy" decoding="async">'

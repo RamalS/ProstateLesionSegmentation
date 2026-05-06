@@ -1,5 +1,5 @@
 experiment_name: ssl_pretrain_deconver_mae
-epochs: 250
+epochs: 150
 learning_rate: 2.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
@@ -14,12 +14,13 @@ labeled_images_dir: /data/images
 labeled_labels_dir: /data/labels
 target_spacing: [3.0, 0.5, 0.5]
 val_fraction: 0.2
+val_every: 2
 pretrain_labeled_fraction: 0.5
 # split_manifest_path: /outputs/splits/picai_train_val_split.json
 
 # SSL patch/mask setup
 patch_size: [16, 128, 128]
-num_patches_per_volume: 4
+num_patches_per_volume: 2
 mask_ratio: 0.60
 mask_block_size: [4, 16, 16]
 full_l1_weight: 0.1
@@ -47,9 +48,9 @@ dwi_hbv_preprocess:
 
 # Runtime
 use_amp: true
-amp_dtype: fp16
+amp_dtype: bf16
 use_compile: false
-cache_mode: ram
+cache_mode: storage
 cache_rate: 1.0
 # dataset_cache_dir: /cache/dataset_cache
 

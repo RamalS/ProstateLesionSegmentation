@@ -31,9 +31,11 @@
 - early_stopped: `True`
 
 ### Visualization
-![20260415_210631_v3_multimodal orbit](visualizations/20260415_210631_v3_multimodal_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260415_210631_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260415_210631_v3_multimodal orbit" loading="lazy" decoding="async">
 
-![20260415_210631_v3_multimodal evaluation](visualizations/20260415_210631_v3_multimodal_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260415_210631_v3_multimodal_eval_visualization.png" alt="20260415_210631_v3_multimodal evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -89,9 +91,11 @@
 - early_stopped: `True`
 
 ### Visualization
-![20260415_173357_v3_multimodal orbit](visualizations/20260415_173357_v3_multimodal_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260415_173357_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260415_173357_v3_multimodal orbit" loading="lazy" decoding="async">
 
-![20260415_173357_v3_multimodal evaluation](visualizations/20260415_173357_v3_multimodal_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260415_173357_v3_multimodal_eval_visualization.png" alt="20260415_173357_v3_multimodal evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -147,9 +151,11 @@
 - early_stopped: `True`
 
 ### Visualization
-![20260418_224246_deconver orbit](visualizations/20260418_224246_deconver_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260418_224246_deconver_10726_1000742_t2w_orbit.gif" alt="20260418_224246_deconver orbit" loading="lazy" decoding="async">
 
-![20260418_224246_deconver evaluation](visualizations/20260418_224246_deconver_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260418_224246_deconver_eval_visualization.png" alt="20260418_224246_deconver evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -205,9 +211,11 @@
 - early_stopped: `False`
 
 ### Visualization
-![20260427_221309_unet3d orbit](visualizations/20260427_221309_unet3d_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260427_221309_unet3d_10726_1000742_t2w_orbit.gif" alt="20260427_221309_unet3d orbit" loading="lazy" decoding="async">
 
-![20260427_221309_unet3d evaluation](visualizations/20260427_221309_unet3d_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260427_221309_unet3d_eval_visualization.png" alt="20260427_221309_unet3d evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -263,9 +271,11 @@
 - early_stopped: `True`
 
 ### Visualization
-![20260416_112700_v3_multimodal orbit](visualizations/20260416_112700_v3_multimodal_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260416_112700_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260416_112700_v3_multimodal orbit" loading="lazy" decoding="async">
 
-![20260416_112700_v3_multimodal evaluation](visualizations/20260416_112700_v3_multimodal_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260416_112700_v3_multimodal_eval_visualization.png" alt="20260416_112700_v3_multimodal evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -321,9 +331,11 @@
 - early_stopped: `False`
 
 ### Visualization
-![20260416_193800_v3_multimodal orbit](visualizations/20260416_193800_v3_multimodal_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260416_193800_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260416_193800_v3_multimodal orbit" loading="lazy" decoding="async">
 
-![20260416_193800_v3_multimodal evaluation](visualizations/20260416_193800_v3_multimodal_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260416_193800_v3_multimodal_eval_visualization.png" alt="20260416_193800_v3_multimodal evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -379,9 +391,11 @@
 - early_stopped: `True`
 
 ### Visualization
-![20260420_212454_deconver orbit](visualizations/20260420_212454_deconver_10726_1000742_t2w_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260420_212454_deconver_10726_1000742_t2w_orbit.gif" alt="20260420_212454_deconver orbit" loading="lazy" decoding="async">
 
-![20260420_212454_deconver evaluation](visualizations/20260420_212454_deconver_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260420_212454_deconver_eval_visualization.png" alt="20260420_212454_deconver evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -437,9 +451,11 @@
 - early_stopped: `True`
 
 ### Visualization
-![20260426_104802_v3_multimodal orbit](visualizations/20260426_104802_v3_multimodal_10726_1000742_orbit.gif)
+Loading orbit GIF (large file, may take a moment)...
+<img src="visualizations/20260426_104802_v3_multimodal_10726_1000742_orbit.gif" alt="20260426_104802_v3_multimodal orbit" loading="lazy" decoding="async">
 
-![20260426_104802_v3_multimodal evaluation](visualizations/20260426_104802_v3_multimodal_eval_visualization.png)
+Loading evaluation image...
+<img src="visualizations/20260426_104802_v3_multimodal_eval_visualization.png" alt="20260426_104802_v3_multimodal evaluation" loading="lazy" decoding="async">
 
 ### Evaluation
 - checkpoint: `best.pt`

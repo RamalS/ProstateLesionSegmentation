@@ -68,9 +68,9 @@ postprocess_connectivity: 26               # 6, 18, or 26
 
 # Training speed optimizations
 use_amp: true
-amp_dtype: fp16
+amp_dtype: bf16
 use_compile: false
-cache_mode: ram                    # one of: none | ram | storage
+cache_mode: storage                # one of: none | ram | storage
 cache_rate: 1.0                    # fraction of dataset to cache (1.0 = all cases)
 # dataset_cache_dir: /cache/dataset_cache   # optional override for cache_mode=storage
 

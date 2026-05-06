@@ -61,6 +61,8 @@ EVAL_METRIC_KEYS: tuple[tuple[str, str], ...] = (
     ("hd95_non_empty_pairs_voxels", "hd95"),
 )
 
+LOADER_SPINNER_PATH = Path("visualizations") / "loader_spinner.gif"
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -167,6 +169,15 @@ def _md_relpath(path: Path, report_dir: Path) -> str:
     """Return a POSIX relative path suitable for Markdown links."""
     rel = os.path.relpath(str(path), start=str(report_dir))
     return rel.replace(os.sep, "/")
+
+
+def _loading_line(message: str, spinner_rel: str | None) -> str:
+    if spinner_rel is None:
+        return message
+    return (
+        f'{message} '
+        f'<img src="{spinner_rel}" alt="Loading spinner" width="14" height="14">'
+    )
 
 
 def _resolve_artifact_path(path_value: str, run_dir: Path) -> Path:
@@ -919,6 +930,9 @@ def _config_highlights(cfg: dict[str, Any], report: RunReport) -> list[str]:
 
 def _run_section(report: RunReport, report_dir: Path) -> str:
     lines: list[str] = []
+    spinner_abs = (Path.cwd() / LOADER_SPINNER_PATH).resolve()
+    spinner_rel = _md_relpath(spinner_abs, report_dir) if spinner_abs.exists() else None
+
     lines.append(f"## {report.run_name}")
     lines.append("")
     lines.append(f"- run_dir: `{report.run_dir}`")
@@ -941,7 +955,12 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
     lines.append("### Visualization")
     if report.orbit_gif_path is not None and report.orbit_gif_path.exists():
         orbit_rel = _md_relpath(report.orbit_gif_path, report_dir)
-        lines.append("Loading orbit GIF (large file, may take a moment)...")
+        lines.append(
+            _loading_line(
+                "Loading orbit GIF (large file, may take a moment)...",
+                spinner_rel=spinner_rel,
+            )
+        )
         lines.append(
             f'<img src="{orbit_rel}" alt="{report.run_name} orbit" '
             'loading="lazy" decoding="async">'
@@ -951,7 +970,12 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
     lines.append("")
     if report.eval_visualization_path is not None and report.eval_visualization_path.exists():
         eval_rel = _md_relpath(report.eval_visualization_path, report_dir)
-        lines.append("Loading evaluation image...")
+        lines.append(
+            _loading_line(
+                "Loading evaluation image...",
+                spinner_rel=spinner_rel,
+            )
+        )
         lines.append(
             f'<img src="{eval_rel}" alt="{report.run_name} evaluation" '
             'loading="lazy" decoding="async">'

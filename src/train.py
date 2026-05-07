@@ -55,7 +55,9 @@ from src.utils import (
     ensure_cuda_binary_compatibility,
     ensure_dir,
     load_checkpoint,
+    load_model_weights_for_current_config,
     load_pretrained_encoder,
+    resolve_checkpoint_init_paths,
     rotate_checkpoints,
     save_checkpoint,
     save_config_copy,
@@ -347,6 +349,12 @@ def main() -> None:
              "(overrides resume_checkpoint in config)",
     )
     parser.add_argument(
+        "--current-config", type=str, default=None, metavar="CHECKPOINT",
+        help="Path to a .pt checkpoint used to initialize model weights only "
+             "while keeping optimizer/scheduler/scaler state from the current config. "
+             "Mutually exclusive with --resume and resume_checkpoint.",
+    )
+    parser.add_argument(
         "--learnability", type=int, nargs="?", const=10, default=None, metavar="N",
         help="Learnability test: randomly sample N cases (default 10) and use them "
              "for both training and validation (no split). "
@@ -360,6 +368,14 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    resume_path, current_config_path = resolve_checkpoint_init_paths(
+        resume_cli=args.resume,
+        resume_cfg=cfg.get("resume_checkpoint"),
+        current_config_cli=args.current_config,
+    )
+    if current_config_path is not None:
+        cfg["current_config_checkpoint"] = current_config_path
+
     cache_mode, cache_rate, cache_dir = resolve_dataset_cache_config(cfg, logger=logger)
 
     # ---- Reproducibility ----
@@ -587,7 +603,13 @@ def main() -> None:
     pretrained_encoder_checkpoint: str = str(
         cfg.get("pretrained_encoder_checkpoint", "")
     ).strip()
-    if pretrained_encoder_checkpoint:
+    if current_config_path and pretrained_encoder_checkpoint:
+        logger.info(
+            "Skipping pretrained_encoder_checkpoint (%s) because --current-config "
+            "was provided.",
+            pretrained_encoder_checkpoint,
+        )
+    elif pretrained_encoder_checkpoint:
         enc_stats = load_pretrained_encoder(
             model=model,
             path=pretrained_encoder_checkpoint,
@@ -599,6 +621,21 @@ def main() -> None:
             enc_stats["loaded"],
             len(enc_stats["missing"]),
             len(enc_stats["shape_mismatch"]),
+        )
+    if current_config_path:
+        init_stats = load_model_weights_for_current_config(
+            model=model,
+            path=current_config_path,
+            device=device,
+            strict_shape=True,
+        )
+        logger.info(
+            "Initialized model from current-config checkpoint %s | tensors=%d "
+            "| missing=%d | unexpected=%d",
+            current_config_path,
+            init_stats["loaded"],
+            len(init_stats["missing"]),
+            len(init_stats["unexpected"]),
         )
 
     model_name = cfg.get("model", "unet3d")
@@ -781,8 +818,7 @@ def main() -> None:
     es_counter: int = 0
     es_enabled: bool = es_patience > 0
 
-    # ---- Resume from checkpoint (CLI flag takes precedence over config) ----
-    resume_path: str | None = args.resume or cfg.get("resume_checkpoint")
+    # ---- Resume from checkpoint (full state restore) ----
     if resume_path:
         ckpt = load_checkpoint(
             path=resume_path,
@@ -803,6 +839,12 @@ def main() -> None:
             ckpt["epoch"], best_composite_score, best_val_dice,
             "nan" if math.isnan(last_hd95) else f"{last_hd95:.2f}mm",
             start_epoch,
+        )
+    elif current_config_path:
+        logger.info(
+            "Current-config init active from %s: starting at epoch 1 with "
+            "fresh optimizer/scheduler/scaler state from current config.",
+            current_config_path,
         )
 
     logger.info("Device: %s", device)

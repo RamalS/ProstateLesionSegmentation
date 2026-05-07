@@ -22,6 +22,8 @@ What this tests (no real data required):
       including best_composite_score, last_hd95 persistence, and GradScaler state
    8b. SSL transfer helpers: get_encoder_state_dict, load_pretrained_encoder,
        set_encoder_trainable
+   8c. current-config init helpers: model-weight-only load + resume/current-config
+       conflict guard
    9b. visualize_3d helpers: seg auto-detection, downsampling, Plotly HTML output
   10. compute_composite_score: normal case, hd95_scale parameter, HD95=NaN
       redistribution, sensitivity=NaN guard, cached-HD95 consistency,
@@ -1479,6 +1481,130 @@ try:
 
 except Exception as exc:
     fail("SSL transfer helper test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 8c. Current-config init helpers
+# ---------------------------------------------------------------------------
+section("8c. current-config init helpers (model-weight-only load + conflict guard)")
+
+try:
+    import tempfile
+
+    from utils import (
+        load_model_weights_for_current_config,
+        resolve_checkpoint_init_paths,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+
+        # --- 8c-i. Successful model-weight-only load from checkpoint ----------
+        src_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16))
+        src_model_state = src_model.state_dict()
+        ckpt_ok = tmp_path / "model_ok.pt"
+        torch.save({"model_state_dict": src_model_state, "epoch": 123}, ckpt_ok)
+
+        tgt_model = UNet3D(in_channels=3, out_channels=1, features=(8, 16))
+        load_stats = load_model_weights_for_current_config(
+            tgt_model, ckpt_ok, device=torch.device("cpu"), strict_shape=True
+        )
+
+        if int(load_stats["loaded"]) > 0:
+            ok(
+                "load_model_weights_for_current_config loaded tensors "
+                f"(loaded={load_stats['loaded']}, missing={len(load_stats['missing'])}, "
+                f"unexpected={len(load_stats['unexpected'])})"
+            )
+        else:
+            fail("load_model_weights_for_current_config loaded zero tensors")
+
+        rep_key = next(iter(src_model_state.keys()))
+        if torch.allclose(tgt_model.state_dict()[rep_key], src_model_state[rep_key]):
+            ok(f"current-config load updated representative tensor '{rep_key}'")
+        else:
+            fail(f"current-config load did not update tensor '{rep_key}'")
+
+        # --- 8c-ii. Shape mismatch must raise (strict default) ----------------
+        bad_shape_sd = dict(src_model_state)
+        _shape_key = next(iter(bad_shape_sd.keys()))
+        _bad_tensor = bad_shape_sd[_shape_key]
+        if _bad_tensor.ndim == 0:
+            _bad_tensor = _bad_tensor.view(1)
+        bad_shape_sd[_shape_key] = (
+            _bad_tensor[:-1] if _bad_tensor.numel() > 1 else _bad_tensor.repeat(2)
+        )
+        ckpt_bad_shape = tmp_path / "model_bad_shape.pt"
+        torch.save({"model_state_dict": bad_shape_sd}, ckpt_bad_shape)
+
+        try:
+            load_model_weights_for_current_config(
+                UNet3D(in_channels=3, out_channels=1, features=(8, 16)),
+                ckpt_bad_shape,
+                device=torch.device("cpu"),
+                strict_shape=True,
+            )
+            fail("current-config loader should fail on shape mismatch")
+        except ValueError:
+            ok("current-config loader fails on shape mismatch (strict_shape=True)")
+
+        # --- 8c-iii. No compatible keys must raise ----------------------------
+        ckpt_no_match = tmp_path / "model_no_match.pt"
+        torch.save({"model_state_dict": {"not_a_real_key.weight": torch.randn(1)}}, ckpt_no_match)
+
+        try:
+            load_model_weights_for_current_config(
+                UNet3D(in_channels=3, out_channels=1, features=(8, 16)),
+                ckpt_no_match,
+                device=torch.device("cpu"),
+                strict_shape=True,
+            )
+            fail("current-config loader should fail when no keys match")
+        except ValueError:
+            ok("current-config loader fails when no compatible keys match")
+
+    # --- 8c-iv. Resume/current-config conflict guard ---------------------------
+    _resume_only, _current_none = resolve_checkpoint_init_paths(
+        resume_cli="/tmp/epoch_0010.pt",
+        resume_cfg=None,
+        current_config_cli=None,
+    )
+    if _resume_only == "/tmp/epoch_0010.pt" and _current_none is None:
+        ok("checkpoint init resolver returns resume path when only --resume is set")
+    else:
+        fail("checkpoint init resolver returned unexpected result for --resume-only")
+
+    _resume_none, _current_only = resolve_checkpoint_init_paths(
+        resume_cli=None,
+        resume_cfg=None,
+        current_config_cli="/tmp/best.pt",
+    )
+    if _resume_none is None and _current_only == "/tmp/best.pt":
+        ok("checkpoint init resolver returns current-config path when only set")
+    else:
+        fail("checkpoint init resolver returned unexpected result for --current-config-only")
+
+    try:
+        resolve_checkpoint_init_paths(
+            resume_cli="/tmp/epoch_0010.pt",
+            resume_cfg=None,
+            current_config_cli="/tmp/best.pt",
+        )
+        fail("resolver should fail when --resume and --current-config are both set")
+    except ValueError:
+        ok("resolver rejects simultaneous --resume and --current-config")
+
+    try:
+        resolve_checkpoint_init_paths(
+            resume_cli=None,
+            resume_cfg="/tmp/from_config.pt",
+            current_config_cli="/tmp/best.pt",
+        )
+        fail("resolver should fail when resume_checkpoint and --current-config are both set")
+    except ValueError:
+        ok("resolver rejects resume_checkpoint + --current-config combination")
+
+except Exception as exc:
+    fail("current-config helper test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 9. evaluate_checkpoint helpers

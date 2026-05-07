@@ -311,6 +311,41 @@ def save_latest_pointer(base_output_dir: str, run_dir: Path) -> None:
     latest_path.symlink_to(run_dir, target_is_directory=True)
 
 
+def resolve_checkpoint_init_paths(
+    resume_cli: str | None,
+    resume_cfg: str | None,
+    current_config_cli: str | None,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve mutually-exclusive checkpoint initialization modes.
+
+    Returns
+    -------
+    (resume_path, current_config_path)
+    """
+    resume_cli_clean = str(resume_cli).strip() if resume_cli else ""
+    resume_cfg_clean = str(resume_cfg).strip() if resume_cfg else ""
+    current_cfg_clean = str(current_config_cli).strip() if current_config_cli else ""
+
+    resume_path = resume_cli_clean or resume_cfg_clean or None
+    current_config_path = current_cfg_clean or None
+
+    if current_config_path is not None and resume_cli_clean:
+        raise ValueError(
+            "Cannot use --current-config together with --resume. "
+            "Use --resume to continue full training state, or --current-config "
+            "to load model weights only under the current config."
+        )
+
+    if current_config_path is not None and resume_cfg_clean:
+        raise ValueError(
+            "Cannot use --current-config together with resume_checkpoint in config. "
+            "Remove resume_checkpoint (or omit --current-config)."
+        )
+
+    return resume_path, current_config_path
+
+
 # ---------------------------------------------------------------------------
 # Encoder transfer utilities (SSL pretraining -> supervised fine-tuning)
 # ---------------------------------------------------------------------------
@@ -418,6 +453,103 @@ def load_pretrained_encoder(
         "loaded": len(matched),
         "missing": missing,
         "shape_mismatch": shape_mismatch,
+    }
+
+
+def load_model_weights_for_current_config(
+    model: torch.nn.Module,
+    path: str | Path,
+    device: torch.device | None = None,
+    strict_shape: bool = True,
+) -> dict[str, object]:
+    """
+    Load model weights from checkpoint into *model* for current-config training.
+
+    This helper is intended for the ``--current-config`` flow in ``src/train.py``:
+    it initializes model parameters from a checkpoint while leaving optimizer,
+    scheduler, and scaler state fresh from the current run config.
+
+    Accepted checkpoint layouts:
+      1) ``{"model_state_dict": ...}``
+      2) ``{"state_dict": ...}``
+      3) raw state-dict mapping
+
+    Parameters
+    ----------
+    model        : model to initialize
+    path         : checkpoint path
+    device       : optional map_location for ``torch.load``
+    strict_shape : when True (default), raise on any matching-key shape mismatch
+
+    Returns
+    -------
+    dict with keys:
+      ``loaded``         : number of tensors loaded
+      ``missing``        : target model keys not found in source checkpoint
+      ``shape_mismatch`` : mismatched keys (name + source/target shape)
+      ``unexpected``     : source keys that do not exist in target model
+    """
+    base_model = _unwrap_model(model)
+    map_location: torch.device | str = device if device is not None else "cpu"
+    ckpt = torch.load(path, map_location=map_location, weights_only=False)
+
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        source_sd = ckpt["model_state_dict"]
+    elif isinstance(ckpt, dict) and "state_dict" in ckpt:
+        source_sd = ckpt["state_dict"]
+    else:
+        source_sd = ckpt
+
+    if not isinstance(source_sd, dict):
+        raise ValueError(
+            f"Checkpoint at {path} does not contain a valid model state_dict mapping."
+        )
+
+    model_sd = base_model.state_dict()
+    matched: dict[str, torch.Tensor] = {}
+    shape_mismatch: list[str] = []
+    unexpected: list[str] = []
+
+    for k, v in source_sd.items():
+        if not torch.is_tensor(v):
+            continue
+        if k not in model_sd:
+            unexpected.append(k)
+            continue
+
+        if model_sd[k].shape != v.shape:
+            shape_mismatch.append(
+                f"{k}: source{tuple(v.shape)} -> target{tuple(model_sd[k].shape)}"
+            )
+            continue
+
+        matched[k] = v
+
+    if strict_shape and shape_mismatch:
+        sample = "; ".join(shape_mismatch[:5])
+        raise ValueError(
+            "Shape mismatch while loading current-config model weights from "
+            f"{path}: {len(shape_mismatch)} mismatched tensors. "
+            f"Examples: {sample}"
+        )
+
+    if not matched:
+        raise ValueError(
+            "No compatible model tensors were found while loading current-config "
+            f"weights from {path}."
+        )
+
+    updated_sd = model_sd.copy()
+    updated_sd.update(matched)
+    base_model.load_state_dict(updated_sd, strict=False)
+
+    missing = [k for k in model_sd.keys() if k not in matched]
+
+    return {
+        "loaded": len(matched),
+        "missing": missing,
+        "shape_mismatch": shape_mismatch,
+        "unexpected": unexpected,
     }
 
 

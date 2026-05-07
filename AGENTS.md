@@ -5,6 +5,10 @@
 - Build image (modern default, cu128): `docker compose build` (uses `compose.yml`, service `trainer`).
 - Build image (Volta/TITAN V, cu126): `docker compose -f compose.yml -f compose.volta.yml build`
 - Train in Docker: `docker compose run --rm trainer train`
+- Train Deconver tuned A: `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml`
+- Train Deconver tuned B (num_samples=2): `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_b.yaml`
+- Train Deconver tuned C (bce_pos_weight=20): `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_c.yaml`
+- Train with current config from checkpoint weights only: `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --current-config /outputs/runs/<run_name>/checkpoints/best.pt`
 - Pretrain encoder (SSL) in Docker: `docker compose run --rm trainer pretrain`
 - Smoke test (primary regression check): `docker compose run --rm trainer smoke-test`
 - Train in Docker (Volta/TITAN V): `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train`
@@ -20,6 +24,10 @@
 - Learnability sanity run: `docker compose run --rm trainer learnability [N]`
 - Shell in container: `docker compose run --rm trainer shell`
 - Local train: `PYTHONPATH=. python -m src.train --config configs/local_default.yaml`
+- Local train Deconver tuned A: `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml`
+- Local train Deconver tuned B (num_samples=2): `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_b.yaml`
+- Local train Deconver tuned C (bce_pos_weight=20): `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_c.yaml`
+- Local train with current config from checkpoint weights only: `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml --current-config outputs/runs/<run_name>/checkpoints/best.pt`
 - Local pretrain: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
 - Local smoke test: `PYTHONPATH=. python scripts/smoke_test.py`
 - Local 3-D visualizer: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha [--run outputs/runs/<run_name>]`
@@ -68,6 +76,7 @@
 - `best.pt` is selected by composite score (`sensitivity`, `dice`, optional `hd95`), not dice alone.
 - `keep_last_checkpoints` rotates only `epoch_*.pt`; `best.pt` is not removed.
 - Supervised training can warm-start from SSL weights via `pretrained_encoder_checkpoint`; optional staged unfreezing is controlled by `freeze_encoder_epochs`.
+- `--resume` restores full state (model + optimizer + scheduler + scaler + epoch); `--current-config` loads model weights only and is mutually exclusive with `--resume`/`resume_checkpoint`.
 
 ## Dependency and CI gotchas
 

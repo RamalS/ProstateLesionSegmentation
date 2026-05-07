@@ -51,7 +51,9 @@ scripts/
 configs/
   default.yaml              # Production / Docker paths (300 epochs)
   local_default.yaml        # Local dev paths (5 epochs, relative paths)
-  deconver_conf.yaml        # Docker supervised config tuned for model: deconver
+  deconver_conf.yaml        # Deconver tuned baseline (A): lower LR + longer schedule
+  deconver_tuned_b.yaml     # Deconver ablation (B): A + num_samples=2
+  deconver_tuned_c.yaml     # Deconver ablation (C): A + bce_pos_weight=20
   pretrain_default.yaml     # Docker SSL pretraining config (unlabeled Prostate158)
   pretrain_deconver.yaml    # Docker SSL pretraining config for model: deconver
   pretrain_local.yaml       # Local SSL pretraining config
@@ -96,7 +98,9 @@ deconver_ndc_ratio: 4
 
 Reference configs:
 
-- Supervised training: `configs/deconver_conf.yaml`
+- Supervised training baseline (A): `configs/deconver_conf.yaml`
+- Supervised ablation (B): `configs/deconver_tuned_b.yaml`
+- Supervised ablation (C): `configs/deconver_tuned_c.yaml`
 - SSL pretraining: `configs/pretrain_deconver.yaml`
 
 ---
@@ -254,6 +258,10 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Download data | `docker compose run --rm trainer download` |
 | Train | `docker compose run --rm trainer train` |
 | Train (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train` |
+| Train Deconver tuned A | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml` |
+| Train Deconver tuned B (`num_samples=2`) | `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_b.yaml` |
+| Train Deconver tuned C (`bce_pos_weight=20`) | `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_c.yaml` |
+| Train with current config from checkpoint weights only | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --current-config /outputs/runs/<run_name>/checkpoints/best.pt` |
 | Pretrain encoder (SSL) | `docker compose run --rm trainer pretrain` |
 | Pretrain encoder (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
@@ -270,6 +278,10 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Task | Command |
 |---|---|
 | Train | `PYTHONPATH=. python -m src.train --config configs/local_default.yaml` |
+| Train Deconver tuned A | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml` |
+| Train Deconver tuned B (`num_samples=2`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_b.yaml` |
+| Train Deconver tuned C (`bce_pos_weight=20`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_c.yaml` |
+| Train with current config from checkpoint weights only | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml --current-config outputs/runs/<run_name>/checkpoints/best.pt` |
 | Pretrain encoder (SSL) | `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
@@ -338,6 +350,12 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 3. Set `pretrained_encoder_checkpoint` in `configs/default.yaml` or `configs/local_default.yaml`.
 4. Optionally set `freeze_encoder_epochs > 0` for a short supervised warm-up.
 5. Run normal supervised training (`train`) on PI-CAI labeled data.
+
+Resume vs current-config checkpoint init:
+
+- `--resume <ckpt>` restores full training state (model + optimizer + scheduler + scaler + epoch).
+- `--current-config <ckpt>` loads model weights only and starts a fresh run at epoch 1 with the current config schedule.
+- `--current-config` is mutually exclusive with `--resume` and `resume_checkpoint` in YAML.
 
 Split-manifest workflow:
 

@@ -1,5 +1,5 @@
-# Deconver tuning baseline A: lower LR, longer schedule, less aggressive positive sampling.
-experiment_name: deconver_tuned_a
+# Deconver tuning ablation B: tuned baseline + num_samples=2.
+experiment_name: deconver_tuned_b_num_samples2
 epochs: 140
 batch_size: 2
 learning_rate: 1.0e-4
@@ -19,7 +19,7 @@ val_fraction: 0.2
 # Patch sampling
 patch_size: [16, 128, 128]         # (D, H, W) in voxels
 pos_fraction: 0.70                 # fraction of patches containing a lesion
-num_samples: 1                     # patches extracted per volume per __getitem__ call
+num_samples: 2                     # patches extracted per volume per __getitem__ call
                                    # effective batch size = batch_size × num_samples
 
 # Model

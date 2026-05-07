@@ -10,6 +10,7 @@ What this tests (no real data required):
    3d. Deep supervision: list output, auxiliary shapes, build_model DS, DeepSupervisionWrapper
    3e. Deconver: instantiation, forward pass, build_model factory, deep supervision (num_deep_supr),
        and stride wiring regression guard
+   3f. FCT: instantiation, forward pass, build_model factory, deep supervision outputs
   4. DiceBCELoss: forward pass with random logits/targets
   4b. TverskyBCELoss: forward pass, FN-penalty bias, tversky_loss function
   4c. LR warmup: LinearLR warm-up + CosineAnnealingLR via SequentialLR
@@ -586,6 +587,72 @@ try:
 
 except Exception as exc:
     fail("Deconver test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 3f. FCT: instantiation, forward pass, build_model factory, deep supervision
+# ---------------------------------------------------------------------------
+section("3f. FCT (slice-wise fully convolutional transformer) + build_model factory")
+
+try:
+    from models import build_model as _bm_fct
+
+    _all_flags_fct = {"use_t2w": True, "use_adc": True, "use_hbv": True}
+
+    _fct_cfg_base: dict = {
+        "model": "fct",
+        **_all_flags_fct,
+        "out_channels": 1,
+        # Keep this lightweight for CI/smoke runs.
+        "features": [16, 32],
+        "fct_heads": [1, 2],
+        "fct_patch_kernel_size": 5,
+        "fct_patch_strides": [2, 2],
+        "fct_bottleneck_channels": 64,
+        "fct_wide_focus_dilations": [1, 2, 3],
+        "fct_dropout": 0.0,
+        "deep_supervision": False,
+    }
+
+    fct_model = _bm_fct(_fct_cfg_base).to(DEVICE)
+    n_fct = sum(p.numel() for p in fct_model.parameters())
+    ok(f"build_model('fct') → {type(fct_model).__name__} — {n_fct:,} parameters")
+
+    B, C, D, H, W = 1, 3, 8, 32, 32
+    _fct_inp = torch.randn(B, C, D, H, W, device=DEVICE)
+    with torch.no_grad():
+        _fct_out = fct_model(_fct_inp)
+
+    _fct_expected = (B, 1, D, H, W)
+    if isinstance(_fct_out, torch.Tensor) and _fct_out.shape == _fct_expected:
+        ok(f"FCT forward pass OK — output shape {tuple(_fct_out.shape)}")
+    else:
+        _got = tuple(_fct_out.shape) if isinstance(_fct_out, torch.Tensor) else type(_fct_out).__name__
+        fail(f"FCT forward: got {_got}, expected {_fct_expected}")
+
+    _fct_cfg_ds = dict(_fct_cfg_base)
+    _fct_cfg_ds["deep_supervision"] = True
+    fct_ds_model = _bm_fct(_fct_cfg_ds).to(DEVICE)
+    with torch.no_grad():
+        _fct_ds_out = fct_ds_model(_fct_inp)
+
+    if isinstance(_fct_ds_out, list) and len(_fct_ds_out) == len(_fct_cfg_base["features"]):
+        ok(f"FCT DS=True → list of {len(_fct_ds_out)} tensors")
+        if _fct_ds_out[0].shape == _fct_expected:
+            ok(f"FCT DS output[0] full-res shape {tuple(_fct_ds_out[0].shape)}")
+        else:
+            fail(
+                f"FCT DS output[0] shape {tuple(_fct_ds_out[0].shape)} "
+                f"!= expected {_fct_expected}"
+            )
+    else:
+        _len = len(_fct_ds_out) if isinstance(_fct_ds_out, list) else "N/A"
+        fail(
+            "FCT DS=True should return list with len(features); "
+            f"got {type(_fct_ds_out).__name__}(len={_len})"
+        )
+
+except Exception as exc:
+    fail("FCT test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 4. DiceBCELoss

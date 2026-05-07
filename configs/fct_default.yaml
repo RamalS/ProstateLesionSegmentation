@@ -1,4 +1,4 @@
-experiment_name: unet3d
+experiment_name: fct_default
 epochs: 300
 batch_size: 8
 learning_rate: 4.0e-4
@@ -22,13 +22,21 @@ num_samples: 1                     # patches extracted per volume per __getitem_
                                    # effective batch size = batch_size × num_samples
 
 # Model
-model: attention_unet3d            # options: unet3d, attention_unet3d, fct, deconver
+model: fct                         # options: unet3d, attention_unet3d, fct, deconver
 use_t2w: true                      # include T2w channel
 use_adc: true                      # include ADC channel — most discriminative for csPCa
 use_hbv: true                      # include HBV channel — complementary DWI information
 out_channels: 1                    # binary segmentation
-features: [64, 128, 256, 512]       # encoder feature map sizes (unet3d / attention_unet3d / fct only)
+features: [32, 64, 128, 256]       # encoder feature map sizes (unet3d / attention_unet3d / fct only)
 deep_supervision: true             # auxiliary losses at each decoder level (nnU-Net style)
+
+# FCT-specific hyperparameters (used only when model: fct)
+fct_heads: [2, 4, 8, 16]                  # per-stage MHSA heads (len must match features)
+fct_bottleneck_channels: 512              # bottleneck width (paper used 384 with features up to 128)
+fct_patch_kernel_size: 7                  # depthwise patch projection kernel size
+fct_patch_strides: [4, 4, 4, 4]           # per-stage patch token stride (len must match features)
+fct_wide_focus_dilations: [1, 2, 3]       # dilated conv branches in Wide-Focus
+fct_dropout: 0.0                          # dropout in attention/wide-focus
 
 # Deconver-specific hyperparameters (used only when model: deconver)
 # Defaults match the 3-D ISLES'22 configuration from the paper (arXiv:2504.00302).

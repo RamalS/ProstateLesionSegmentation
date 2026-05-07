@@ -6,6 +6,7 @@ from pathlib import Path
 import torch.nn as nn
 
 from src.models.attention_unet3d import AttentionUNet3D
+from src.models.fct import FCT
 from src.models.unet3d import UNet3D
 
 # ---------------------------------------------------------------------------
@@ -34,6 +35,7 @@ except ImportError:
 _MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "unet3d": UNet3D,
     "attention_unet3d": AttentionUNet3D,
+    "fct": FCT,
 }
 
 if _DECONVER_AVAILABLE:
@@ -68,13 +70,26 @@ def build_model(cfg: dict) -> nn.Module:
         ``use_hbv``          — include HBV channel (default ``True``).
         ``out_channels``     — number of segmentation output channels (default 1).
         ``features``         — encoder feature sizes as a list (default [32,64,128,256]).
-                               Used only for ``unet3d`` and ``attention_unet3d``.
+                               Used by ``unet3d``, ``attention_unet3d``, and ``fct``.
         ``deep_supervision`` — enable auxiliary decoder heads (default ``False``).
                                For ``unet3d``/``attention_unet3d``: model returns
                                ``list[Tensor]`` (finest → coarsest); wrap the
                                criterion with ``DeepSupervisionWrapper``.
+                               For ``fct``: same list contract (finest → coarsest).
                                For ``deconver``: passed as ``num_deep_supr`` to
                                the built-in deep supervision mechanism.
+
+        Additional keys for ``model: fct``:
+
+        ``fct_heads``             — optional attention heads per stage
+                                    (len must match ``features``).
+        ``fct_bottleneck_channels`` — optional bottleneck channels.
+        ``fct_patch_kernel_size`` — depthwise patch-kernel size (default 7).
+        ``fct_patch_strides``     — per-stage patch stride for attention tokens
+                                    (len must match ``features``; default all 4).
+        ``fct_wide_focus_dilations`` — dilations for wide-focus branches
+                                       (default [1, 2, 3]).
+        ``fct_dropout``           — dropout in attention/wide-focus (default 0.0).
 
         Additional keys for ``model: deconver``:
 
@@ -150,6 +165,20 @@ def build_model(cfg: dict) -> nn.Module:
             num_deep_supr=num_deep_supr,
         )
 
+    if name == "fct":
+        return FCT(
+            in_channels=in_channels,
+            out_channels=cfg.get("out_channels", 1),
+            features=tuple(cfg.get("features", [32, 64, 128, 256])),
+            deep_supervision=cfg.get("deep_supervision", False),
+            heads=tuple(cfg["fct_heads"]) if "fct_heads" in cfg else None,
+            bottleneck_channels=cfg.get("fct_bottleneck_channels"),
+            patch_kernel_size=int(cfg.get("fct_patch_kernel_size", 7)),
+            patch_strides=tuple(cfg["fct_patch_strides"]) if "fct_patch_strides" in cfg else None,
+            wide_focus_dilations=tuple(cfg.get("fct_wide_focus_dilations", [1, 2, 3])),
+            dropout=float(cfg.get("fct_dropout", 0.0)),
+        )
+
     # -----------------------------------------------------------------------
     # UNet3D / AttentionUNet3D share the same constructor signature.
     # -----------------------------------------------------------------------
@@ -165,6 +194,7 @@ def build_model(cfg: dict) -> nn.Module:
 __all__ = [
     "UNet3D",
     "AttentionUNet3D",
+    "FCT",
     "build_model",
 ]
 

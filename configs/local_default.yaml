@@ -22,12 +22,12 @@ num_samples: 1                     # patches extracted per volume per __getitem_
                                    # effective batch size = batch_size × num_samples
 
 # Model
-model: unet3d                      # options: unet3d, attention_unet3d, deconver
+model: unet3d                      # options: unet3d, attention_unet3d, fct, deconver
 use_t2w: true                      # include T2w channel
 use_adc: true                      # include ADC channel
 use_hbv: true                      # include HBV channel
 out_channels: 1
-features: [32, 64, 128, 256]       # used by unet3d / attention_unet3d only
+features: [32, 64, 128, 256]       # used by unet3d / attention_unet3d / fct only
 deep_supervision: false            # auxiliary losses at each decoder level (nnU-Net style)
 
 # Deconver-specific hyperparameters (used only when model: deconver)

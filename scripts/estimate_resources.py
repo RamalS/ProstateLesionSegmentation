@@ -11,6 +11,7 @@ back to a torchinfo-based analytical estimate with a per-model backprop
 overhead factor derived from empirical measurements:
 
     unet3d / attention_unet3d : measured ratio ≈ 3.9× forward peak
+    fct                       : measured ratio ≈ 4.1× forward peak
     deconver                  : measured ratio ≈ 3.8× forward peak
 
 A 15% CUDA fragmentation overhead is applied to all VRAM totals.
@@ -61,6 +62,7 @@ _TYPICAL_VOLUME_SHAPE: tuple[int, int, int] = (20, 400, 400)
 _BACKPROP_FACTOR: dict[str, float] = {
     "unet3d":           3.9,
     "attention_unet3d": 3.9,
+    "fct":              4.1,
     "deconver":         3.8,
 }
 _BACKPROP_FACTOR_DEFAULT = 3.9  # used for unknown models

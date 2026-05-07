@@ -25,9 +25,10 @@ src/                        # All importable source code (PYTHONPATH=.)
   losses.py                 # DiceBCELoss, TverskyBCELoss, DeepSupervisionWrapper
   metrics.py                # dice, iou, sensitivity, specificity, hd95, compute_all_metrics
   models/
-    __init__.py             # build_model factory (unet3d, attention_unet3d, deconver)
+    __init__.py             # build_model factory (unet3d, attention_unet3d, fct, deconver)
     unet3d.py               # UNet3D (3D encoder-decoder with skip connections)
     attention_unet3d.py     # AttentionUNet3D (UNet3D + attention gates on skip connections)
+    fct.py                  # FCT (slice-wise 2D fully convolutional transformer adapted to 3D volumes)
     deconver/               # Vendored Deconver package (upstream: github.com/pashtari/deconver)
   notify.py                 # ntfy push notification helper
   pretrain.py               # SSL masked-reconstruction encoder pretraining (unlabeled data)
@@ -54,6 +55,7 @@ configs/
   deconver_conf.yaml        # Deconver tuned baseline (A): lower LR + longer schedule
   deconver_tuned_b.yaml     # Deconver ablation (B): A + num_samples=2
   deconver_tuned_c.yaml     # Deconver ablation (C): A + bce_pos_weight=20
+  fct_default.yaml          # FCT baseline config (slice-wise transformer)
   pretrain_default.yaml     # Docker SSL pretraining config (unlabeled Prostate158)
   pretrain_deconver.yaml    # Docker SSL pretraining config for model: deconver
   pretrain_local.yaml       # Local SSL pretraining config
@@ -75,14 +77,20 @@ configs/
 - Each gate reweights the encoder feature map by a spatially learned alpha mask before concatenation in the decoder
 - Supports **deep supervision**: when `deep_supervision: true`, auxiliary output heads are attached at each decoder level (nnU-Net style); `forward` returns a `list[Tensor]` ordered finest → coarsest
 
+**FCT** — a slice-wise adaptation of the Fully Convolutional Transformer (Tragakis et al., WACV 2023) for volumetric inputs:
+
+- Keeps the repo’s 3D interface (`B, C, D, H, W`) but applies a 2D FCT encoder-decoder to axial slices
+- Uses depthwise-convolutional Q/K/V projections plus a multi-branch dilated **Wide-Focus** module
+- Supports **deep supervision** with the same output contract as UNet variants (`list[Tensor]`, finest → coarsest)
+
 **Deconver** — a U-shaped segmentation architecture with a deconvolution-based mixer (NDC) in place of attention-heavy blocks.
 
 - In this repo, `deconver` is vendored under `src/models/deconver/` and wired into `build_model(cfg)` via `src/models/__init__.py`
 - Deconver stages use residual updates around a deconvolutional mixer (`DeconvMixer`) plus MLP blocks
 - Creator attribution: **Pooya Ashtari et al.**, *Deconver: A Deconvolutional Network for Medical Image Segmentation* ([arXiv:2504.00302](https://arxiv.org/abs/2504.00302)); upstream project: [pashtari/deconver](https://github.com/pashtari/deconver)
-- Selected at runtime via the `model` config key (`unet3d`, `attention_unet3d`, or `deconver`)
+- Selected at runtime via the `model` config key (`unet3d`, `attention_unet3d`, `fct`, or `deconver`)
 
-UNet3D/AttentionUNet3D default configuration uses feature sizes `[32, 64, 128, 256]` with a 512-channel bottleneck, up to 3 input channels (T2w + ADC + HBV, controlled by `use_t2w/use_adc/use_hbv` flags), and 1 output channel (binary segmentation).
+UNet3D/AttentionUNet3D/FCT default configuration uses feature sizes `[32, 64, 128, 256]`, up to 3 input channels (T2w + ADC + HBV, controlled by `use_t2w/use_adc/use_hbv` flags), and 1 output channel (binary segmentation).
 
 To run with Deconver, set `model: deconver` and define Deconver-specific keys:
 
@@ -96,8 +104,22 @@ deconver_groups: -1
 deconver_ndc_ratio: 4
 ```
 
+To run with FCT, set `model: fct` (optional keys shown):
+
+```yaml
+model: fct
+features: [32, 64, 128, 256]
+fct_heads: [2, 4, 8, 16]
+fct_bottleneck_channels: 512
+fct_patch_kernel_size: 7
+fct_patch_strides: [4, 4, 4, 4]
+fct_wide_focus_dilations: [1, 2, 3]
+fct_dropout: 0.0
+```
+
 Reference configs:
 
+- FCT baseline: `configs/fct_default.yaml`
 - Supervised training baseline (A): `configs/deconver_conf.yaml`
 - Supervised ablation (B): `configs/deconver_tuned_b.yaml`
 - Supervised ablation (C): `configs/deconver_tuned_c.yaml`
@@ -308,7 +330,7 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 | `pos_fraction` | 0.85 | 0.75 | Fraction of patches containing a lesion |
 | `target_spacing` | `[3.0, 0.5, 0.5]` | `[3.0, 0.5, 0.5]` | Voxel spacing (z, y, x) in mm after resampling |
 | `val_fraction` | 0.2 | 0.2 | Fraction of data held out for validation |
-| `model` | `attention_unet3d` | `unet3d` | Model architecture (`unet3d`, `attention_unet3d`, or `deconver`) |
+| `model` | `attention_unet3d` | `unet3d` | Model architecture (`unet3d`, `attention_unet3d`, `fct`, or `deconver`) |
 | `use_t2w / use_adc / use_hbv` | `true` | `true` | Modality flags (control number of input channels) |
 | `features` | `[32, 64, 128, 256]` | `[32, 64, 128, 256]` | Encoder feature map sizes |
 | `deep_supervision` | `false` | `false` | Auxiliary losses at each decoder level |
@@ -334,7 +356,7 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 1. Load YAML config and set up output directories + TensorBoard.
 2. Discover PI-CAI cases and split into train/validation sets (`stratified_train_val_split` preserves positive/negative ratio).
 3. Build `PiCaiDataset` with MONAI augmentation transforms; optionally cache preprocessed volumes in RAM.
-4. Instantiate model via `build_model(cfg)` (`UNet3D`, `AttentionUNet3D`, or `Deconver`), loss (`DiceBCELoss` or `TverskyBCELoss`), AdamW + linear warm-up + CosineAnnealingLR.
+4. Instantiate model via `build_model(cfg)` (`UNet3D`, `AttentionUNet3D`, `FCT`, or `Deconver`), loss (`DiceBCELoss` or `TverskyBCELoss`), AdamW + linear warm-up + CosineAnnealingLR.
 5. **Train**: random-patch forward pass → loss → backward; `WeightedRandomSampler` equalises positive/negative case frequency per epoch.
 6. **Validate** (every `val_every` epochs): sliding-window inference over full volumes → Dice, IoU, Sensitivity, Specificity, HD95.
 7. Save per-epoch checkpoints (rotating, keep last N) and a `best.pt` checkpoint by composite score (weighted sensitivity + Dice + HD95).

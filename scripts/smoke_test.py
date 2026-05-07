@@ -1563,45 +1563,45 @@ try:
             ok("current-config loader fails when no compatible keys match")
 
     # --- 8c-iv. Resume/current-config conflict guard ---------------------------
-    _resume_only, _current_none = resolve_checkpoint_init_paths(
+    _resume_only, _use_current_false = resolve_checkpoint_init_paths(
         resume_cli="/tmp/epoch_0010.pt",
         resume_cfg=None,
-        current_config_cli=None,
+        use_current_config=False,
     )
-    if _resume_only == "/tmp/epoch_0010.pt" and _current_none is None:
+    if _resume_only == "/tmp/epoch_0010.pt" and _use_current_false is False:
         ok("checkpoint init resolver returns resume path when only --resume is set")
     else:
         fail("checkpoint init resolver returned unexpected result for --resume-only")
 
-    _resume_none, _current_only = resolve_checkpoint_init_paths(
-        resume_cli=None,
+    _resume_with_cfg, _use_current_true = resolve_checkpoint_init_paths(
+        resume_cli="/tmp/best.pt",
         resume_cfg=None,
-        current_config_cli="/tmp/best.pt",
+        use_current_config=True,
     )
-    if _resume_none is None and _current_only == "/tmp/best.pt":
-        ok("checkpoint init resolver returns current-config path when only set")
+    if _resume_with_cfg == "/tmp/best.pt" and _use_current_true is True:
+        ok("checkpoint init resolver enables current-config mode with --resume path")
     else:
-        fail("checkpoint init resolver returned unexpected result for --current-config-only")
+        fail("checkpoint init resolver returned unexpected result for --resume + --current-config")
 
-    try:
-        resolve_checkpoint_init_paths(
-            resume_cli="/tmp/epoch_0010.pt",
-            resume_cfg=None,
-            current_config_cli="/tmp/best.pt",
-        )
-        fail("resolver should fail when --resume and --current-config are both set")
-    except ValueError:
-        ok("resolver rejects simultaneous --resume and --current-config")
+    _resume_from_yaml, _use_current_yaml = resolve_checkpoint_init_paths(
+        resume_cli=None,
+        resume_cfg="/tmp/from_config.pt",
+        use_current_config=True,
+    )
+    if _resume_from_yaml == "/tmp/from_config.pt" and _use_current_yaml is True:
+        ok("checkpoint init resolver supports current-config mode with resume_checkpoint in YAML")
+    else:
+        fail("checkpoint init resolver returned unexpected result for YAML resume_checkpoint + --current-config")
 
     try:
         resolve_checkpoint_init_paths(
             resume_cli=None,
-            resume_cfg="/tmp/from_config.pt",
-            current_config_cli="/tmp/best.pt",
+            resume_cfg=None,
+            use_current_config=True,
         )
-        fail("resolver should fail when resume_checkpoint and --current-config are both set")
+        fail("resolver should fail when --current-config is set without checkpoint source")
     except ValueError:
-        ok("resolver rejects resume_checkpoint + --current-config combination")
+        ok("resolver rejects --current-config without --resume/resume_checkpoint source")
 
 except Exception as exc:
     fail("current-config helper test failed", exc)

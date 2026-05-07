@@ -314,36 +314,27 @@ def save_latest_pointer(base_output_dir: str, run_dir: Path) -> None:
 def resolve_checkpoint_init_paths(
     resume_cli: str | None,
     resume_cfg: str | None,
-    current_config_cli: str | None,
-) -> tuple[str | None, str | None]:
+    use_current_config: bool,
+) -> tuple[str | None, bool]:
     """
-    Resolve mutually-exclusive checkpoint initialization modes.
+    Resolve checkpoint initialization mode.
 
     Returns
     -------
-    (resume_path, current_config_path)
+    (resume_path, use_current_config_mode)
     """
     resume_cli_clean = str(resume_cli).strip() if resume_cli else ""
     resume_cfg_clean = str(resume_cfg).strip() if resume_cfg else ""
-    current_cfg_clean = str(current_config_cli).strip() if current_config_cli else ""
 
     resume_path = resume_cli_clean or resume_cfg_clean or None
-    current_config_path = current_cfg_clean or None
 
-    if current_config_path is not None and resume_cli_clean:
+    if use_current_config and resume_path is None:
         raise ValueError(
-            "Cannot use --current-config together with --resume. "
-            "Use --resume to continue full training state, or --current-config "
-            "to load model weights only under the current config."
+            "--current-config requires a checkpoint source. Provide --resume "
+            "<checkpoint> or set resume_checkpoint in the YAML config."
         )
 
-    if current_config_path is not None and resume_cfg_clean:
-        raise ValueError(
-            "Cannot use --current-config together with resume_checkpoint in config. "
-            "Remove resume_checkpoint (or omit --current-config)."
-        )
-
-    return resume_path, current_config_path
+    return resume_path, use_current_config
 
 
 # ---------------------------------------------------------------------------

@@ -349,10 +349,10 @@ def main() -> None:
              "(overrides resume_checkpoint in config)",
     )
     parser.add_argument(
-        "--current-config", type=str, default=None, metavar="CHECKPOINT",
-        help="Path to a .pt checkpoint used to initialize model weights only "
-             "while keeping optimizer/scheduler/scaler state from the current config. "
-             "Mutually exclusive with --resume and resume_checkpoint.",
+        "--current-config", action="store_true",
+        help="When used with --resume (or resume_checkpoint in config), "
+             "initialize model weights from that checkpoint but keep optimizer/"
+             "scheduler/scaler state from the current config (fresh run at epoch 1).",
     )
     parser.add_argument(
         "--learnability", type=int, nargs="?", const=10, default=None, metavar="N",
@@ -368,13 +368,13 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    resume_path, current_config_path = resolve_checkpoint_init_paths(
+    resume_path, use_current_config = resolve_checkpoint_init_paths(
         resume_cli=args.resume,
         resume_cfg=cfg.get("resume_checkpoint"),
-        current_config_cli=args.current_config,
+        use_current_config=bool(args.current_config),
     )
-    if current_config_path is not None:
-        cfg["current_config_checkpoint"] = current_config_path
+    if use_current_config and resume_path is not None:
+        cfg["current_config_checkpoint"] = resume_path
 
     cache_mode, cache_rate, cache_dir = resolve_dataset_cache_config(cfg, logger=logger)
 
@@ -603,7 +603,7 @@ def main() -> None:
     pretrained_encoder_checkpoint: str = str(
         cfg.get("pretrained_encoder_checkpoint", "")
     ).strip()
-    if current_config_path and pretrained_encoder_checkpoint:
+    if use_current_config and pretrained_encoder_checkpoint:
         logger.info(
             "Skipping pretrained_encoder_checkpoint (%s) because --current-config "
             "was provided.",
@@ -622,17 +622,17 @@ def main() -> None:
             len(enc_stats["missing"]),
             len(enc_stats["shape_mismatch"]),
         )
-    if current_config_path:
+    if use_current_config and resume_path is not None:
         init_stats = load_model_weights_for_current_config(
             model=model,
-            path=current_config_path,
+            path=resume_path,
             device=device,
             strict_shape=True,
         )
         logger.info(
             "Initialized model from current-config checkpoint %s | tensors=%d "
             "| missing=%d | unexpected=%d",
-            current_config_path,
+            resume_path,
             init_stats["loaded"],
             len(init_stats["missing"]),
             len(init_stats["unexpected"]),
@@ -819,7 +819,7 @@ def main() -> None:
     es_enabled: bool = es_patience > 0
 
     # ---- Resume from checkpoint (full state restore) ----
-    if resume_path:
+    if resume_path and not use_current_config:
         ckpt = load_checkpoint(
             path=resume_path,
             model=model,
@@ -840,11 +840,11 @@ def main() -> None:
             "nan" if math.isnan(last_hd95) else f"{last_hd95:.2f}mm",
             start_epoch,
         )
-    elif current_config_path:
+    elif resume_path and use_current_config:
         logger.info(
             "Current-config init active from %s: starting at epoch 1 with "
             "fresh optimizer/scheduler/scaler state from current config.",
-            current_config_path,
+            resume_path,
         )
 
     logger.info("Device: %s", device)

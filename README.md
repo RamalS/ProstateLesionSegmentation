@@ -261,7 +261,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Train Deconver tuned A | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml` |
 | Train Deconver tuned B (`num_samples=2`) | `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_b.yaml` |
 | Train Deconver tuned C (`bce_pos_weight=20`) | `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_c.yaml` |
-| Train with current config from checkpoint weights only | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --current-config /outputs/runs/<run_name>/checkpoints/best.pt` |
+| Train with current config from resumed checkpoint weights only | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --resume /outputs/runs/<run_name>/checkpoints/best.pt --current-config` |
 | Pretrain encoder (SSL) | `docker compose run --rm trainer pretrain` |
 | Pretrain encoder (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain` |
 | Smoke test | `docker compose run --rm trainer smoke-test` |
@@ -281,7 +281,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Train Deconver tuned A | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml` |
 | Train Deconver tuned B (`num_samples=2`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_b.yaml` |
 | Train Deconver tuned C (`bce_pos_weight=20`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_c.yaml` |
-| Train with current config from checkpoint weights only | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml --current-config outputs/runs/<run_name>/checkpoints/best.pt` |
+| Train with current config from resumed checkpoint weights only | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml --resume outputs/runs/<run_name>/checkpoints/best.pt --current-config` |
 | Pretrain encoder (SSL) | `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
@@ -354,8 +354,8 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 Resume vs current-config checkpoint init:
 
 - `--resume <ckpt>` restores full training state (model + optimizer + scheduler + scaler + epoch).
-- `--current-config <ckpt>` loads model weights only and starts a fresh run at epoch 1 with the current config schedule.
-- `--current-config` is mutually exclusive with `--resume` and `resume_checkpoint` in YAML.
+- `--resume <ckpt> --current-config` loads model weights only from that same checkpoint and starts a fresh run at epoch 1 with the current config schedule.
+- `--current-config` requires a checkpoint source (`--resume` or `resume_checkpoint` in YAML).
 
 Split-manifest workflow:
 

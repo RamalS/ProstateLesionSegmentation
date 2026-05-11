@@ -1,8 +1,8 @@
 # Training Run Report
 
-- generated_at: `2026-04-28 21:33:28`
-- base_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs`
-- runs: `8`
+- generated_at: `2026-05-11 21:09:52`
+- base_dir: `/outputs/runs`
+- runs: `10`
 - sort_by: `best_composite_score`
 
 ## Comparison
@@ -11,21 +11,23 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 20260415_210631_v3_multimodal | 2:41:19 | 74 | 14 | 0.5285 | 0.3182 | 0.2155 | 0.7893 | n/a | n/a | attention_unet3d | tversky_bce | (20, 128, 128) |
 | 20260415_173357_v3_multimodal | 3:16:35 | 91 | 38 | 0.5278 | 0.3472 | 0.2423 | 0.7603 | n/a | n/a | attention_unet3d | tversky_bce | (20, 128, 128) |
+| 20260507_193114_deconver_tuned_a | 55:23:54 | 140 | 96 | 0.4772 | 0.4373 | 0.3203 | 0.6095 | 0.4974 | 43.5947 | deconver | tversky_bce | (16, 128, 128) |
 | 20260418_224246_deconver | 7:19:20 | 139 | 122 | 0.4709 | 0.4067 | 0.2859 | 0.6567 | 0.4451 | 58.3092 | deconver | tversky_bce | (16, 128, 128) |
 | 20260427_221309_unet3d | 13:25:46 | 300 | 276 | 0.4409 | 0.4152 | 0.3042 | 0.5181 | 0.5335 | 39.3815 | attention_unet3d | tversky_bce | (16, 128, 128) |
 | 20260416_112700_v3_multimodal | 7:26:21 | 170 | 146 | 0.4323 | 0.3620 | 0.2547 | 0.6184 | 0.4602 | 55.2121 | attention_unet3d | tversky_bce | (20, 128, 128) |
+| 20260507_205845_fct_default | 44:06:05 | 300 | 268 | 0.4311 | 0.4149 | 0.2979 | 0.5023 | 0.7547 | 51.4333 | fct | tversky_bce | (16, 128, 128) |
 | 20260416_193800_v3_multimodal | 12:08:57 | 300 | 206 | 0.4166 | 0.3732 | 0.2650 | 0.5171 | 0.4833 | 79.1391 | attention_unet3d | tversky_bce | (20, 128, 128) |
 | 20260420_212454_deconver | 9:31:29 | 210 | 145 | 0.3970 | 0.3458 | 0.2420 | 0.5495 | 0.4670 | 54.6309 | deconver | tversky_bce | (16, 128, 128) |
 | 20260426_104802_v3_multimodal | 2:10:08 | 150 | 118 | 0.3718 | 0.3108 | 0.2137 | 0.4736 | 0.4607 | 105.9377 | attention_unet3d | tversky_bce | (16, 128, 128) |
 
 ## 20260415_210631_v3_multimodal
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260415_210631_v3_multimodal`
+- run_dir: `/outputs/runs/20260415_210631_v3_multimodal`
 - experiment_name: `v3_multimodal`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-15 23:11:03`
-- end_time: `2026-04-16 01:52:22`
+- start_time: `2026-04-15 21:11:03`
+- end_time: `2026-04-15 23:52:22`
 - duration: `2:41:19`
 - epochs: stopped=74, configured=300, best=14
 - early_stopped: `True`
@@ -48,6 +50,7 @@
 | hd95 | 181.4493 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.5285 | 0.5285 | 0.4397 |
@@ -78,12 +81,12 @@
 
 ## 20260415_173357_v3_multimodal
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260415_173357_v3_multimodal`
+- run_dir: `/outputs/runs/20260415_173357_v3_multimodal`
 - experiment_name: `v3_multimodal`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-15 19:38:30`
-- end_time: `2026-04-15 22:55:05`
+- start_time: `2026-04-15 17:38:30`
+- end_time: `2026-04-15 20:55:05`
 - duration: `3:16:35`
 - epochs: stopped=91, configured=300, best=38
 - early_stopped: `True`
@@ -106,6 +109,7 @@
 | hd95 | 174.3303 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.5278 | 0.5278 | 0.4357 |
@@ -134,14 +138,72 @@
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
 - Using centralized eval PNG from visualizations directory: 20260415_173357_v3_multimodal_eval_visualization.png
 
+## 20260507_193114_deconver_tuned_a
+
+- run_dir: `/outputs/runs/20260507_193114_deconver_tuned_a`
+- experiment_name: `deconver_tuned_a`
+- git_commit: `unknown`
+- config_source: `metadata.json`
+- start_time: `2026-05-07 19:36:15`
+- end_time: `2026-05-10 03:00:09`
+- duration: `55:23:54`
+- epochs: stopped=140, configured=140, best=96
+- early_stopped: `False`
+
+### Visualization
+<img src="visualizations/20260507_193114_deconver_tuned_a_10726_1000742_t2w_orbit.gif" alt="20260507_193114_deconver_tuned_a orbit" loading="lazy" decoding="async">
+
+<img src="visualizations/20260507_193114_deconver_tuned_a_eval_visualization.png" alt="20260507_193114_deconver_tuned_a evaluation" loading="lazy" decoding="async">
+
+### Evaluation
+- checkpoint: `best.pt`
+- test_cases: `10` (`5` positive, `5` negative)
+
+| Metric | Value |
+| --- | --- |
+| dice | 0.6452 |
+| iou | 0.4901 |
+| sensitivity | 0.7320 |
+| precision | 0.6810 |
+| hd95 | 4.1868 |
+
+### Training Validation Metrics
+
+| Metric | Best | At Best Epoch | Last Val |
+| --- | --- | --- | --- |
+| composite_score | 0.4772 | 0.4772 | 0.4640 |
+| dice | 0.4373 | 0.4304 | 0.4340 |
+| iou | 0.3203 | 0.3107 | 0.3164 |
+| sensitivity | 0.6095 | 0.5473 | 0.5090 |
+| precision | 0.4974 | 0.4287 | 0.4637 |
+| hd95 | 43.5947 | 63.1426 | 55.1105 |
+
+### Config Highlights
+- model: `deconver`
+- features: `[32, 64, 128, 256]`
+- loss: `tversky_bce` (alpha=0.3, beta=0.7, dice_weight=1.0, bce_weight=1.0, bce_pos_weight=10.0)
+- patch_size: `[16, 128, 128]`
+- target_spacing: `[3.0, 0.5, 0.5]`
+- modalities: use_t2w=True, use_adc=True, use_hbv=True
+- optimizer/schedule: lr=0.0001, weight_decay=1e-05, warmup_epochs=8
+- train/val cadence: batch_size=2, epochs=140, val_every=2, val_start_epoch=1, val_compute_hd95_every=1
+- best-checkpoint score weights: w_sensitivity=0.4, w_dice=0.6, w_hd95=0.0, hd95_scale=10.0
+- early stopping: patience=50, min_delta=0.001
+- runtime: use_amp=True, amp_dtype=bf16, use_compile=False
+- encoder init: pretrained_encoder_checkpoint=, freeze_encoder_epochs=0
+- parameters: total=10,478,659, trainable=10,478,659
+
+### Warnings
+- metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
+
 ## 20260418_224246_deconver
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260418_224246_deconver`
+- run_dir: `/outputs/runs/20260418_224246_deconver`
 - experiment_name: `v3_multimodal`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-19 00:45:55`
-- end_time: `2026-04-19 08:05:15`
+- start_time: `2026-04-18 22:45:55`
+- end_time: `2026-04-19 06:05:15`
 - duration: `7:19:20`
 - epochs: stopped=139, configured=300, best=122
 - early_stopped: `True`
@@ -164,6 +226,7 @@
 | hd95 | 3.8062 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.4709 | 0.4709 | 0.4465 |
@@ -194,12 +257,12 @@
 
 ## 20260427_221309_unet3d
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260427_221309_unet3d`
+- run_dir: `/outputs/runs/20260427_221309_unet3d`
 - experiment_name: `unet3d`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-28 00:18:00`
-- end_time: `2026-04-28 13:43:46`
+- start_time: `2026-04-27 22:18:00`
+- end_time: `2026-04-28 11:43:46`
 - duration: `13:25:46`
 - epochs: stopped=300, configured=300, best=276
 - early_stopped: `False`
@@ -222,6 +285,7 @@
 | hd95 | 4.4875 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.4409 | 0.4409 | 0.4317 |
@@ -252,12 +316,12 @@
 
 ## 20260416_112700_v3_multimodal
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260416_112700_v3_multimodal`
+- run_dir: `/outputs/runs/20260416_112700_v3_multimodal`
 - experiment_name: `v3_multimodal`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-16 13:31:35`
-- end_time: `2026-04-16 20:57:56`
+- start_time: `2026-04-16 11:31:35`
+- end_time: `2026-04-16 18:57:56`
 - duration: `7:26:21`
 - epochs: stopped=170, configured=300, best=146
 - early_stopped: `True`
@@ -280,6 +344,7 @@
 | hd95 | 70.5337 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.4323 | 0.4323 | 0.3969 |
@@ -308,14 +373,72 @@
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
 - Using centralized eval PNG from visualizations directory: 20260416_112700_v3_multimodal_eval_visualization.png
 
+## 20260507_205845_fct_default
+
+- run_dir: `/outputs/runs/20260507_205845_fct_default`
+- experiment_name: `fct_default`
+- git_commit: `unknown`
+- config_source: `metadata.json`
+- start_time: `2026-05-07 21:04:20`
+- end_time: `2026-05-09 17:10:25`
+- duration: `44:06:05`
+- epochs: stopped=300, configured=300, best=268
+- early_stopped: `False`
+
+### Visualization
+<img src="visualizations/20260507_205845_fct_default_10726_1000742_t2w_orbit.gif" alt="20260507_205845_fct_default orbit" loading="lazy" decoding="async">
+
+<img src="visualizations/20260507_205845_fct_default_eval_visualization.png" alt="20260507_205845_fct_default evaluation" loading="lazy" decoding="async">
+
+### Evaluation
+- checkpoint: `best.pt`
+- test_cases: `10` (`5` positive, `5` negative)
+
+| Metric | Value |
+| --- | --- |
+| dice | 0.5780 |
+| iou | 0.4217 |
+| sensitivity | 0.5308 |
+| precision | 0.6968 |
+| hd95 | 4.4900 |
+
+### Training Validation Metrics
+
+| Metric | Best | At Best Epoch | Last Val |
+| --- | --- | --- | --- |
+| composite_score | 0.4311 | 0.4311 | 0.4128 |
+| dice | 0.4149 | 0.4149 | 0.4047 |
+| iou | 0.2979 | 0.2979 | 0.2915 |
+| sensitivity | 0.5023 | 0.4688 | 0.4316 |
+| precision | 0.7547 | 0.4972 | 0.5147 |
+| hd95 | 51.4333 | 74.2021 | 67.5139 |
+
+### Config Highlights
+- model: `fct`
+- features: `[32, 64, 128, 256]`
+- loss: `tversky_bce` (alpha=0.3, beta=0.7, dice_weight=1.0, bce_weight=1.0, bce_pos_weight=10.0)
+- patch_size: `[16, 128, 128]`
+- target_spacing: `[3.0, 0.5, 0.5]`
+- modalities: use_t2w=True, use_adc=True, use_hbv=True
+- optimizer/schedule: lr=0.0004, weight_decay=1e-05, warmup_epochs=10
+- train/val cadence: batch_size=6, epochs=300, val_every=2, val_start_epoch=0, val_compute_hd95_every=1
+- best-checkpoint score weights: w_sensitivity=0.3, w_dice=0.7, w_hd95=0.0, hd95_scale=10.0
+- early stopping: patience=50, min_delta=0.001
+- runtime: use_amp=True, amp_dtype=fp16, use_compile=False
+- encoder init: pretrained_encoder_checkpoint=, freeze_encoder_epochs=0
+- parameters: total=21,245,796, trainable=21,245,796
+
+### Warnings
+- metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size, val_min_sw_batch_siz, val_min_sw_batch_size).
+
 ## 20260416_193800_v3_multimodal
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260416_193800_v3_multimodal`
+- run_dir: `/outputs/runs/20260416_193800_v3_multimodal`
 - experiment_name: `v3_multimodal`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-16 21:42:57`
-- end_time: `2026-04-17 09:51:54`
+- start_time: `2026-04-16 19:42:57`
+- end_time: `2026-04-17 07:51:54`
 - duration: `12:08:57`
 - epochs: stopped=300, configured=300, best=206
 - early_stopped: `False`
@@ -338,6 +461,7 @@
 | hd95 | 146.2931 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.4166 | 0.4166 | 0.4017 |
@@ -364,16 +488,16 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260416_193800_v3_multimodal_eval_visualization.png
+- evaluation_summary.json references missing eval PNG: /home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260416_193800_v3_multimodal/eval_visualization.png
 
 ## 20260420_212454_deconver
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260420_212454_deconver`
+- run_dir: `/outputs/runs/20260420_212454_deconver`
 - experiment_name: `deconver`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-20 23:29:37`
-- end_time: `2026-04-21 09:01:06`
+- start_time: `2026-04-20 21:29:37`
+- end_time: `2026-04-21 07:01:06`
 - duration: `9:31:29`
 - epochs: stopped=210, configured=300, best=145
 - early_stopped: `True`
@@ -396,6 +520,7 @@
 | hd95 | 12.8735 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.3970 | 0.3970 | 0.3775 |
@@ -426,12 +551,12 @@
 
 ## 20260426_104802_v3_multimodal
 
-- run_dir: `/home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260426_104802_v3_multimodal`
+- run_dir: `/outputs/runs/20260426_104802_v3_multimodal`
 - experiment_name: `v3_multimodal`
 - git_commit: `unknown`
 - config_source: `metadata.json`
-- start_time: `2026-04-26 12:52:44`
-- end_time: `2026-04-26 15:02:52`
+- start_time: `2026-04-26 10:52:44`
+- end_time: `2026-04-26 13:02:52`
 - duration: `2:10:08`
 - epochs: stopped=150, configured=300, best=118
 - early_stopped: `True`
@@ -454,6 +579,7 @@
 | hd95 | 130.5286 |
 
 ### Training Validation Metrics
+
 | Metric | Best | At Best Epoch | Last Val |
 | --- | --- | --- | --- |
 | composite_score | 0.3718 | 0.3718 | 0.3024 |

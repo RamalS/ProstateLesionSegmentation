@@ -435,3 +435,4 @@ Checks include: PyTorch + CUDA availability, optional imports, `UNet3D`/`Attenti
 - The `train` branch triggers a GitHub Actions self-hosted runner that syncs code to the remote training machine. Do **not** push directly to `train` unless you intend to start a training run.
 - Main development happens on `main` (or feature branches merged to `main`).
 - Docker volumes: `./` → `/workspace` (full project), `./data` → `/data`, `./outputs` → `/outputs`, `./cache` → `/cache`.
+- For Docker GIF export stability, this repo pins `plotly==6.7.0` and `kaleido==0.2.1` in `requirements.txt`.

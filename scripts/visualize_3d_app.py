@@ -509,13 +509,34 @@ def _chrome_setup_message(*, attempted_auto_install: bool, install_detail: str |
     return "\n".join(lines)
 
 
+def _configure_plotly_export_defaults() -> None:
+    """
+    Force offline-safe static export settings.
+
+    Some Docker environments cannot reach public CDNs; when MathJax is left on
+    the default CDN URL, Kaleido can block indefinitely while rendering PNG
+    frames for GIF export.
+    """
+    try:
+        import plotly.io as pio
+    except Exception:  # noqa: BLE001
+        return
+
+    # Preferred modern API.
+    try:
+        pio.defaults.mathjax = None
+    except Exception:  # noqa: BLE001
+        pass
+
 def _render_plotly_png_bytes(fig: Any) -> bytes:
+    _configure_plotly_export_defaults()
     try:
         return fig.to_image(format="png")
     except Exception as exc:  # noqa: BLE001
         if _is_missing_kaleido_error(exc):
             raise RuntimeError(
-                "GIF export requires kaleido. Install with: pip install --upgrade kaleido"
+                "GIF export requires kaleido. Install project-pinned deps with: pip install -r requirements.txt "
+                "(expected: kaleido==0.2.1)"
             ) from exc
         if not _is_missing_chrome_error(exc):
             raise

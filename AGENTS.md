@@ -83,6 +83,7 @@
 - Docker pins `torch==2.7.0`, `torchvision==0.22.0`, `torchaudio==2.7.0` in `compose.yml` build args (passed into `Dockerfile`).
 - Default Docker stack is `cu128` (modern GPUs); Volta/TITAN V uses `compose.volta.yml` override (`cu126`).
 - Docker filters torch packages out of `requirements.txt`; update `Dockerfile` too when changing torch versions.
+- Docker GIF export path relies on `plotly==6.7.0` + `kaleido==0.2.1` (pinned in `requirements.txt`) to avoid known hangs with newer Kaleido + headless Chrome combos.
 - `setuptools<80` is intentional (TensorBoard still depends on `pkg_resources`).
 - Pushing to branch `train` triggers `.github/workflows/train-sync.yml` on a self-hosted runner.
 - `scripts/train-sync.sh` hard-resets and cleans the remote clone before checkout; treat pushes to `train` as destructive sync/deploy triggers. It defaults to the Volta stack (`TORCH_STACK=volta`).

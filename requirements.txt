@@ -7,8 +7,8 @@ setuptools<80
 numpy
 pandas
 matplotlib
-plotly
-kaleido
+plotly==6.7.0
+kaleido==0.2.1
 streamlit
 scikit-learn
 tqdm

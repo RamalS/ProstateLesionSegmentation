@@ -107,6 +107,14 @@ class RunReport:
     eval_total_cases: int | None = None
     eval_positive_cases: int | None = None
     eval_negative_cases: int | None = None
+    xai_summary_path: Path | None = None
+    xai_generated_at: str | None = None
+    xai_case_id: str | None = None
+    xai_target_layer: str | None = None
+    xai_artifacts: dict[str, Path] = field(default_factory=dict)
+    xai_saliency_channels: dict[str, Path] = field(default_factory=dict)
+    xai_modality_ablation: list[dict[str, Any]] = field(default_factory=list)
+    xai_method_errors: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +243,113 @@ def _load_evaluation_summary(run_dir: Path, warnings: list[str]) -> dict[str, An
         return None
     return data
 
+
+def _find_xai_summary(
+    run_name: str,
+    xai_dir: Path | None,
+    warnings: list[str],
+) -> Path | None:
+    if xai_dir is None or not xai_dir.exists():
+        return None
+
+    try:
+        matches = list(xai_dir.glob(f"{run_name}_*_summary.json"))
+    except Exception as exc:
+        warnings.append(
+            f"Failed scanning XAI directory {xai_dir}: {type(exc).__name__}: {exc}"
+        )
+        return None
+
+    if not matches:
+        return None
+
+    matches = sorted(
+        matches,
+        key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+        reverse=True,
+    )
+    if len(matches) > 1:
+        warnings.append(
+            f"Multiple XAI summaries found under {xai_dir}; using newest {matches[0].name}."
+        )
+    return matches[0]
+
+
+def _load_xai_summary(report: RunReport, xai_dir: Path | None) -> None:
+    summary_path = _find_xai_summary(report.run_name, xai_dir, report.warnings)
+    if summary_path is None:
+        return
+
+    try:
+        payload = _load_json(summary_path)
+    except Exception as exc:
+        report.warnings.append(
+            f"Failed to parse XAI summary {summary_path.name}: {type(exc).__name__}: {exc}"
+        )
+        return
+
+    if payload is None:
+        report.warnings.append(f"XAI summary is not a JSON object: {summary_path.name}")
+        return
+
+    report.xai_summary_path = summary_path
+    generated_at = payload.get("generated_at")
+    if isinstance(generated_at, str) and generated_at:
+        report.xai_generated_at = generated_at
+
+    case_obj = payload.get("case")
+    if isinstance(case_obj, dict):
+        case_id = case_obj.get("case_id")
+        if isinstance(case_id, str) and case_id:
+            report.xai_case_id = case_id
+
+    model_obj = payload.get("model")
+    if isinstance(model_obj, dict):
+        target_layer = model_obj.get("target_layer")
+        if isinstance(target_layer, str) and target_layer:
+            report.xai_target_layer = target_layer
+
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, dict):
+        for key in ("gradcam_png", "saliency_png", "modality_ablation_png", "modality_ablation_json"):
+            raw = artifacts.get(key)
+            if not isinstance(raw, str) or not raw:
+                continue
+            resolved = _resolve_artifact_path(raw, report.run_dir)
+            if resolved.exists():
+                report.xai_artifacts[key] = resolved
+            else:
+                report.warnings.append(
+                    f"XAI summary references missing artifact {key}: {resolved}"
+                )
+
+        raw_channels = artifacts.get("saliency_channel_pngs")
+        if isinstance(raw_channels, dict):
+            for modality, raw_path in raw_channels.items():
+                if not isinstance(modality, str) or not isinstance(raw_path, str) or not raw_path:
+                    continue
+                resolved = _resolve_artifact_path(raw_path, report.run_dir)
+                if resolved.exists():
+                    report.xai_saliency_channels[modality] = resolved
+                else:
+                    report.warnings.append(
+                        "XAI summary references missing saliency channel artifact "
+                        f"for {modality}: {resolved}"
+                    )
+
+    raw_ablation = payload.get("modality_ablation")
+    if isinstance(raw_ablation, list):
+        rows: list[dict[str, Any]] = []
+        for row in raw_ablation:
+            if isinstance(row, dict):
+                rows.append(row)
+        report.xai_modality_ablation = rows
+
+    raw_method_errors = payload.get("method_errors")
+    if isinstance(raw_method_errors, dict):
+        for method_name, message in raw_method_errors.items():
+            if isinstance(method_name, str) and isinstance(message, str) and message.strip():
+                report.xai_method_errors[method_name] = message
 
 # ---------------------------------------------------------------------------
 # Config / metadata loading
@@ -632,6 +747,7 @@ def _artifact_end_fallback(run_dir: Path) -> float | None:
 def _build_report_for_run(
     run_dir: Path,
     visualizations_dir: Path | None,
+    xai_dir: Path | None,
 ) -> RunReport:
     report = RunReport(run_dir=run_dir, run_name=run_dir.name)
     cfg, cfg_source, exp, git_commit = _load_run_config(run_dir, report.warnings)
@@ -749,6 +865,8 @@ def _build_report_for_run(
     fallback_eval_png = run_dir / "eval_visualization.png"
     if report.eval_visualization_path is None and fallback_eval_png.exists():
         report.eval_visualization_path = fallback_eval_png
+
+    _load_xai_summary(report, xai_dir=xai_dir)
 
     return report
 
@@ -959,6 +1077,91 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
         lines.append("- eval_visualization_png: `n/a`")
     lines.append("")
 
+    lines.append("### Explainability (XAI)")
+    if report.xai_summary_path is None:
+        lines.append("- xai_summary: `n/a`")
+    else:
+        summary_rel = _md_relpath(report.xai_summary_path, report_dir)
+        lines.append(f"- xai_summary: [`{report.xai_summary_path.name}`]({summary_rel})")
+        if report.xai_generated_at:
+            lines.append(f"- generated_at: `{report.xai_generated_at}`")
+        if report.xai_case_id:
+            lines.append(f"- case_id: `{report.xai_case_id}`")
+        if report.xai_target_layer:
+            lines.append(f"- gradcam_target_layer: `{report.xai_target_layer}`")
+        if report.xai_method_errors:
+            lines.append("")
+            lines.append("#### Method Errors")
+            method_error_rows = [
+                [method_name, message]
+                for method_name, message in sorted(report.xai_method_errors.items())
+            ]
+            lines.append("")
+            lines.append(_markdown_table(["method", "error"], method_error_rows))
+
+        gradcam_png = report.xai_artifacts.get("gradcam_png")
+        if gradcam_png is not None and gradcam_png.exists():
+            gradcam_rel = _md_relpath(gradcam_png, report_dir)
+            lines.append("")
+            lines.append(
+                f'<img src="{gradcam_rel}" alt="{report.run_name} gradcam" '
+                'loading="lazy" decoding="async">'
+            )
+
+        saliency_png = report.xai_artifacts.get("saliency_png")
+        if saliency_png is not None and saliency_png.exists():
+            saliency_rel = _md_relpath(saliency_png, report_dir)
+            lines.append("")
+            lines.append(
+                f'<img src="{saliency_rel}" alt="{report.run_name} saliency" '
+                'loading="lazy" decoding="async">'
+            )
+
+        modality_ablation_png = report.xai_artifacts.get("modality_ablation_png")
+        if modality_ablation_png is not None and modality_ablation_png.exists():
+            ablation_rel = _md_relpath(modality_ablation_png, report_dir)
+            lines.append("")
+            lines.append(
+                f'<img src="{ablation_rel}" alt="{report.run_name} modality ablation" '
+                'loading="lazy" decoding="async">'
+            )
+
+        if report.xai_saliency_channels:
+            channels = ", ".join(sorted(report.xai_saliency_channels))
+            lines.append("")
+            lines.append(f"- saliency_channels: `{channels}`")
+
+        if report.xai_modality_ablation:
+            lines.append("")
+            lines.append("#### Modality Ablation")
+            ablation_headers = [
+                "modality_zeroed",
+                "prob_drop",
+                "voxel_delta",
+                "dice",
+                "iou",
+                "sensitivity",
+                "precision",
+            ]
+            ablation_rows: list[list[str]] = []
+            for row in report.xai_modality_ablation:
+                metrics = row.get("metrics")
+                metrics_dict = metrics if isinstance(metrics, dict) else {}
+                ablation_rows.append(
+                    [
+                        str(row.get("modality_zeroed", "n/a")),
+                        _fmt_float(_to_float(row.get("probability_drop_in_baseline_prediction"))),
+                        _fmt_int(_to_int(row.get("predicted_voxel_delta"))),
+                        _fmt_float(_to_float(metrics_dict.get("dice"))),
+                        _fmt_float(_to_float(metrics_dict.get("iou"))),
+                        _fmt_float(_to_float(metrics_dict.get("sensitivity"))),
+                        _fmt_float(_to_float(metrics_dict.get("precision"))),
+                    ]
+                )
+            lines.append("")
+            lines.append(_markdown_table(ablation_headers, ablation_rows))
+    lines.append("")
+
     lines.append("### Evaluation")
     if report.eval_metrics:
         if report.eval_checkpoint_name:
@@ -1030,6 +1233,7 @@ def _run_section(report: RunReport, report_dir: Path) -> str:
 def _build_markdown_report(
     reports: list[RunReport],
     base_dir: Path,
+    xai_dir: Path | None,
     sort_by: str,
     report_dir: Path,
 ) -> str:
@@ -1040,6 +1244,7 @@ def _build_markdown_report(
     lines.append("")
     lines.append(f"- generated_at: `{now}`")
     lines.append(f"- base_dir: `{base_dir}`")
+    lines.append(f"- xai_dir: `{xai_dir}`")
     lines.append(f"- runs: `{len(reports)}`")
     lines.append(f"- sort_by: `{sort_by}`")
     lines.append("")
@@ -1107,6 +1312,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--xai-dir",
+        type=str,
+        default="visualizations/xai",
+        help="Directory containing explain_case summaries and artifacts.",
+    )
+    parser.add_argument(
         "--sort-by",
         type=str,
         default=DEFAULT_SORT_BY,
@@ -1130,6 +1341,9 @@ def main() -> None:
     visualizations_dir = Path(args.visualizations_dir).expanduser()
     if not visualizations_dir.is_absolute():
         visualizations_dir = (Path.cwd() / visualizations_dir).resolve()
+    xai_dir = Path(args.xai_dir).expanduser()
+    if not xai_dir.is_absolute():
+        xai_dir = (Path.cwd() / xai_dir).resolve()
 
     run_dirs = _find_runs(base_dir=base_dir, run_args=args.run)
     if not run_dirs:
@@ -1138,7 +1352,7 @@ def main() -> None:
         )
 
     reports = [
-        _build_report_for_run(run_dir, visualizations_dir=visualizations_dir)
+        _build_report_for_run(run_dir, visualizations_dir=visualizations_dir, xai_dir=xai_dir)
         for run_dir in run_dirs
     ]
     reports = _sort_reports(reports, sort_by=args.sort_by)
@@ -1158,6 +1372,7 @@ def main() -> None:
     report_md = _build_markdown_report(
         reports,
         base_dir=base_dir,
+        xai_dir=xai_dir,
         sort_by=args.sort_by,
         report_dir=report_dir,
     )

@@ -1,7 +1,8 @@
 # Training Run Report
 
-- generated_at: `2026-05-11 21:09:52`
+- generated_at: `2026-05-12 16:17:39`
 - base_dir: `/outputs/runs`
+- xai_dir: `/workspace/visualizations/xai`
 - runs: `10`
 - sort_by: `best_composite_score`
 
@@ -36,6 +37,28 @@
 <img src="visualizations/20260415_210631_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260415_210631_v3_multimodal orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260415_210631_v3_multimodal_eval_visualization.png" alt="20260415_210631_v3_multimodal evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260415_210631_v3_multimodal_10726_1000742_summary.json`](visualizations/xai/20260415_210631_v3_multimodal_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:17:03`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+<img src="visualizations/xai/20260415_210631_v3_multimodal_10726_1000742_gradcam.png" alt="20260415_210631_v3_multimodal gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260415_210631_v3_multimodal_10726_1000742_saliency.png" alt="20260415_210631_v3_multimodal saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260415_210631_v3_multimodal_10726_1000742_modality_ablation_summary.png" alt="20260415_210631_v3_multimodal modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | -0.0497 | 54201 | 0.0460 | 0.0235 | 1.0000 | 0.0235 |
+| adc | 0.0506 | 11453 | 0.0765 | 0.0398 | 1.0000 | 0.0398 |
+| hbv | 0.7528 | -50534 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -77,7 +100,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260415_210631_v3_multimodal_eval_visualization.png
 
 ## 20260415_173357_v3_multimodal
 
@@ -95,6 +117,28 @@
 <img src="visualizations/20260415_173357_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260415_173357_v3_multimodal orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260415_173357_v3_multimodal_eval_visualization.png" alt="20260415_173357_v3_multimodal evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260415_173357_v3_multimodal_10726_1000742_summary.json`](visualizations/xai/20260415_173357_v3_multimodal_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:17:36`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+<img src="visualizations/xai/20260415_173357_v3_multimodal_10726_1000742_gradcam.png" alt="20260415_173357_v3_multimodal gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260415_173357_v3_multimodal_10726_1000742_saliency.png" alt="20260415_173357_v3_multimodal saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260415_173357_v3_multimodal_10726_1000742_modality_ablation_summary.png" alt="20260415_173357_v3_multimodal modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.0203 | 34040 | 0.0777 | 0.0404 | 0.9972 | 0.0404 |
+| adc | 0.5661 | -5882 | 0.2009 | 0.1117 | 0.9509 | 0.1123 |
+| hbv | 0.8081 | -26747 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -136,7 +180,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260415_173357_v3_multimodal_eval_visualization.png
 
 ## 20260507_193114_deconver_tuned_a
 
@@ -154,6 +197,28 @@
 <img src="visualizations/20260507_193114_deconver_tuned_a_10726_1000742_t2w_orbit.gif" alt="20260507_193114_deconver_tuned_a orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260507_193114_deconver_tuned_a_eval_visualization.png" alt="20260507_193114_deconver_tuned_a evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260507_193114_deconver_tuned_a_10726_1000742_summary.json`](visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:03:07`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `encoder.blocks.3`
+
+<img src="visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_gradcam.png" alt="20260507_193114_deconver_tuned_a gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_saliency.png" alt="20260507_193114_deconver_tuned_a saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_modality_ablation_summary.png" alt="20260507_193114_deconver_tuned_a modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.5150 | -1682 | 0.6693 | 0.5030 | 0.5185 | 0.9439 |
+| adc | 0.6962 | -2426 | 0.3857 | 0.2389 | 0.2406 | 0.9721 |
+| hbv | 0.9278 | -3036 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -213,6 +278,28 @@
 
 <img src="visualizations/20260418_224246_deconver_eval_visualization.png" alt="20260418_224246_deconver evaluation" loading="lazy" decoding="async">
 
+### Explainability (XAI)
+- xai_summary: [`20260418_224246_deconver_10726_1000742_summary.json`](visualizations/xai/20260418_224246_deconver_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:15:26`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `encoder.blocks.3`
+
+<img src="visualizations/xai/20260418_224246_deconver_10726_1000742_gradcam.png" alt="20260418_224246_deconver gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260418_224246_deconver_10726_1000742_saliency.png" alt="20260418_224246_deconver saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260418_224246_deconver_10726_1000742_modality_ablation_summary.png" alt="20260418_224246_deconver modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.0092 | 3767 | 0.5303 | 0.3608 | 0.9817 | 0.3633 |
+| adc | 0.9387 | -2895 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+| hbv | 0.9391 | -2895 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
@@ -253,7 +340,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: postprocess_connectivity, postprocess_enabled, postprocess_min_component_volume_mm3, pred_threshold, sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260418_224246_deconver_eval_visualization.png
 
 ## 20260427_221309_unet3d
 
@@ -271,6 +357,28 @@
 <img src="visualizations/20260427_221309_unet3d_10726_1000742_t2w_orbit.gif" alt="20260427_221309_unet3d orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260427_221309_unet3d_eval_visualization.png" alt="20260427_221309_unet3d evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260427_221309_unet3d_10726_1000742_summary.json`](visualizations/xai/20260427_221309_unet3d_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:04:09`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+<img src="visualizations/xai/20260427_221309_unet3d_10726_1000742_gradcam.png" alt="20260427_221309_unet3d gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260427_221309_unet3d_10726_1000742_saliency.png" alt="20260427_221309_unet3d saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260427_221309_unet3d_10726_1000742_modality_ablation_summary.png" alt="20260427_221309_unet3d modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.9332 | -4650 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+| adc | 0.2397 | -316 | 0.6019 | 0.4305 | 0.8300 | 0.4721 |
+| hbv | 0.9337 | -4650 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -312,7 +420,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260427_221309_unet3d_eval_visualization.png
 
 ## 20260416_112700_v3_multimodal
 
@@ -330,6 +437,28 @@
 <img src="visualizations/20260416_112700_v3_multimodal_10726_1000742_t2w_orbit.gif" alt="20260416_112700_v3_multimodal orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260416_112700_v3_multimodal_eval_visualization.png" alt="20260416_112700_v3_multimodal evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260416_112700_v3_multimodal_10726_1000742_summary.json`](visualizations/xai/20260416_112700_v3_multimodal_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:16:31`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+<img src="visualizations/xai/20260416_112700_v3_multimodal_10726_1000742_gradcam.png" alt="20260416_112700_v3_multimodal gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260416_112700_v3_multimodal_10726_1000742_saliency.png" alt="20260416_112700_v3_multimodal saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260416_112700_v3_multimodal_10726_1000742_modality_ablation_summary.png" alt="20260416_112700_v3_multimodal modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.0875 | 27960 | 0.1375 | 0.0738 | 0.9765 | 0.0740 |
+| adc | 0.3527 | -786 | 0.6053 | 0.4340 | 0.7680 | 0.4995 |
+| hbv | 0.9144 | -4576 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -371,7 +500,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260416_112700_v3_multimodal_eval_visualization.png
 
 ## 20260507_205845_fct_default
 
@@ -389,6 +517,32 @@
 <img src="visualizations/20260507_205845_fct_default_10726_1000742_t2w_orbit.gif" alt="20260507_205845_fct_default orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260507_205845_fct_default_eval_visualization.png" alt="20260507_205845_fct_default evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260507_205845_fct_default_10726_1000742_summary.json`](visualizations/xai/20260507_205845_fct_default_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:02:41`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+#### Method Errors
+
+| method | error |
+| --- | --- |
+| gradcam | RuntimeError: Target layer 'bottleneck' did not produce a 5D activation/gradient pair. |
+
+<img src="visualizations/xai/20260507_205845_fct_default_10726_1000742_saliency.png" alt="20260507_205845_fct_default saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260507_205845_fct_default_10726_1000742_modality_ablation_summary.png" alt="20260507_205845_fct_default modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.2510 | 9777 | 0.2413 | 0.1372 | 0.7428 | 0.1441 |
+| adc | 0.9314 | -2932 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+| hbv | 0.9366 | -2932 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -448,6 +602,28 @@
 
 <img src="visualizations/20260416_193800_v3_multimodal_eval_visualization.png" alt="20260416_193800_v3_multimodal evaluation" loading="lazy" decoding="async">
 
+### Explainability (XAI)
+- xai_summary: [`20260416_193800_v3_multimodal_10726_1000742_summary.json`](visualizations/xai/20260416_193800_v3_multimodal_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:15:59`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+<img src="visualizations/xai/20260416_193800_v3_multimodal_10726_1000742_gradcam.png" alt="20260416_193800_v3_multimodal gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260416_193800_v3_multimodal_10726_1000742_saliency.png" alt="20260416_193800_v3_multimodal saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260416_193800_v3_multimodal_10726_1000742_modality_ablation_summary.png" alt="20260416_193800_v3_multimodal modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.8861 | -8043 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| adc | 0.6668 | -4456 | 0.4404 | 0.2824 | 0.5416 | 0.3711 |
+| hbv | 0.8906 | -8053 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+
 ### Evaluation
 - checkpoint: `best.pt`
 - test_cases: `10` (`5` positive, `5` negative)
@@ -458,7 +634,7 @@
 | iou | 0.3210 |
 | sensitivity | 0.8639 |
 | precision | 0.3366 |
-| hd95 | 146.2931 |
+| hd95 | 146.2934 |
 
 ### Training Validation Metrics
 
@@ -488,7 +664,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- evaluation_summary.json references missing eval PNG: /home/ramals/School/ProstateLesionSegmentation/outputs/runs/20260416_193800_v3_multimodal/eval_visualization.png
 
 ## 20260420_212454_deconver
 
@@ -506,6 +681,27 @@
 <img src="visualizations/20260420_212454_deconver_10726_1000742_t2w_orbit.gif" alt="20260420_212454_deconver orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260420_212454_deconver_eval_visualization.png" alt="20260420_212454_deconver evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260420_212454_deconver_10726_1000742_summary.json`](visualizations/xai/20260420_212454_deconver_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:13:15`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `encoder.blocks.3`
+
+<img src="visualizations/xai/20260420_212454_deconver_10726_1000742_gradcam.png" alt="20260420_212454_deconver gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260420_212454_deconver_10726_1000742_saliency.png" alt="20260420_212454_deconver saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260420_212454_deconver_10726_1000742_modality_ablation_summary.png" alt="20260420_212454_deconver modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | -0.0373 | 311378 | 0.0156 | 0.0078 | 1.0000 | 0.0078 |
+| adc | 0.5941 | -795 | 0.3541 | 0.2152 | 0.3363 | 0.3739 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -547,7 +743,6 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: postprocess_connectivity, postprocess_enabled, postprocess_min_component_volume_mm3, pred_threshold, sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260420_212454_deconver_eval_visualization.png
 
 ## 20260426_104802_v3_multimodal
 
@@ -565,6 +760,28 @@
 <img src="visualizations/20260426_104802_v3_multimodal_10726_1000742_orbit.gif" alt="20260426_104802_v3_multimodal orbit" loading="lazy" decoding="async">
 
 <img src="visualizations/20260426_104802_v3_multimodal_eval_visualization.png" alt="20260426_104802_v3_multimodal evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: [`20260426_104802_v3_multimodal_10726_1000742_summary.json`](visualizations/xai/20260426_104802_v3_multimodal_10726_1000742_summary.json)
+- generated_at: `2026-05-12T16:11:11`
+- case_id: `10726_1000742`
+- gradcam_target_layer: `bottleneck`
+
+<img src="visualizations/xai/20260426_104802_v3_multimodal_10726_1000742_gradcam.png" alt="20260426_104802_v3_multimodal gradcam" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260426_104802_v3_multimodal_10726_1000742_saliency.png" alt="20260426_104802_v3_multimodal saliency" loading="lazy" decoding="async">
+
+<img src="visualizations/xai/20260426_104802_v3_multimodal_10726_1000742_modality_ablation_summary.png" alt="20260426_104802_v3_multimodal modality ablation" loading="lazy" decoding="async">
+
+- saliency_channels: `adc, hbv, t2w`
+
+#### Modality Ablation
+
+| modality_zeroed | prob_drop | voxel_delta | dice | iou | sensitivity | precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| t2w | 0.1701 | 126 | 0.5778 | 0.4062 | 0.9448 | 0.4161 |
+| adc | 0.6593 | -4645 | 0.3950 | 0.2461 | 0.2637 | 0.7869 |
+| hbv | 0.8638 | -5471 | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
 
 ### Evaluation
 - checkpoint: `best.pt`
@@ -606,4 +823,4 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
-- Using centralized eval PNG from visualizations directory: 20260426_104802_v3_multimodal_eval_visualization.png
+- Multiple orbit GIFs found under /workspace/visualizations; using 20260426_104802_v3_multimodal_10726_1000742_orbit.gif.

@@ -15,5 +15,4 @@ __pycache__/
 # Visualization artifacts
 visualizations/*.html
 visualizations/**/*.html
-visualizations/xai/
 conversation/

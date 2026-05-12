@@ -1,0 +1,41 @@
+[
+  {
+    "metrics": {
+      "dice": 4.040404122385155e-10,
+      "hd95": 230.81161145234566,
+      "iou": 4.040404122385155e-10,
+      "precision": 9.999998695775503e-08,
+      "sensitivity": 4.0567951775649647e-10
+    },
+    "modality_zeroed": "t2w",
+    "predicted_voxel_delta": -8043,
+    "predicted_voxels": 10,
+    "probability_drop_in_baseline_prediction": 0.8861256241798401
+  },
+  {
+    "metrics": {
+      "dice": 0.44044870138168335,
+      "hd95": 228.90041494631163,
+      "iou": 0.2824201285839081,
+      "precision": 0.3711426258087158,
+      "sensitivity": 0.5415821671485901
+    },
+    "modality_zeroed": "adc",
+    "predicted_voxel_delta": -4456,
+    "predicted_voxels": 3597,
+    "probability_drop_in_baseline_prediction": 0.6667790412902832
+  },
+  {
+    "metrics": {
+      "dice": 4.0567951775649647e-10,
+      "hd95": null,
+      "iou": 4.0567951775649647e-10,
+      "precision": 1.0,
+      "sensitivity": 4.0567951775649647e-10
+    },
+    "modality_zeroed": "hbv",
+    "predicted_voxel_delta": -8053,
+    "predicted_voxels": 0,
+    "probability_drop_in_baseline_prediction": 0.8905968070030212
+  }
+]

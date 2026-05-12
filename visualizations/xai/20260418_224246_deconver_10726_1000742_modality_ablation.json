@@ -1,0 +1,41 @@
+[
+  {
+    "metrics": {
+      "dice": 0.5302947163581848,
+      "hd95": 192.18714837031627,
+      "iou": 0.3608170449733734,
+      "precision": 0.36325427889823914,
+      "sensitivity": 0.9817444086074829
+    },
+    "modality_zeroed": "t2w",
+    "predicted_voxel_delta": 3767,
+    "predicted_voxels": 6662,
+    "probability_drop_in_baseline_prediction": 0.009242964908480644
+  },
+  {
+    "metrics": {
+      "dice": 4.0567951775649647e-10,
+      "hd95": null,
+      "iou": 4.0567951775649647e-10,
+      "precision": 1.0,
+      "sensitivity": 4.0567951775649647e-10
+    },
+    "modality_zeroed": "adc",
+    "predicted_voxel_delta": -2895,
+    "predicted_voxels": 0,
+    "probability_drop_in_baseline_prediction": 0.9386619925498962
+  },
+  {
+    "metrics": {
+      "dice": 4.0567951775649647e-10,
+      "hd95": null,
+      "iou": 4.0567951775649647e-10,
+      "precision": 1.0,
+      "sensitivity": 4.0567951775649647e-10
+    },
+    "modality_zeroed": "hbv",
+    "predicted_voxel_delta": -2895,
+    "predicted_voxels": 0,
+    "probability_drop_in_baseline_prediction": 0.9391332268714905
+  }
+]

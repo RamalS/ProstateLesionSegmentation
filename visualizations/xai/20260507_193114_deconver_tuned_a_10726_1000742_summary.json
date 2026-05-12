@@ -1,0 +1,131 @@
+{
+  "artifacts": {
+    "gradcam_png": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_gradcam.png",
+    "modality_ablation_json": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_modality_ablation.json",
+    "modality_ablation_png": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_modality_ablation_summary.png",
+    "saliency_channel_pngs": {
+      "adc": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_saliency_adc.png",
+      "hbv": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_saliency_hbv.png",
+      "t2w": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_saliency_t2w.png"
+    },
+    "saliency_png": "/workspace/visualizations/xai/20260507_193114_deconver_tuned_a_10726_1000742_saliency.png"
+  },
+  "case": {
+    "case_id": "10726_1000742",
+    "seg": "/data/labels/10726_1000742.nii.gz",
+    "t2w": "/data/test_images/10726_1000742_t2w.mha",
+    "used_modalities": {
+      "adc": "/data/test_images/10726_1000742_adc.mha",
+      "hbv": "/data/test_images/10726_1000742_hbv.mha",
+      "t2w": "/data/test_images/10726_1000742_t2w.mha"
+    }
+  },
+  "checkpoint": {
+    "epoch": 96,
+    "name": "best.pt",
+    "path": "/outputs/runs/20260507_193114_deconver_tuned_a/checkpoints/best.pt"
+  },
+  "generated_at": "2026-05-12T16:03:07",
+  "inference": {
+    "device": "cuda",
+    "patch_size": [
+      16,
+      128,
+      128
+    ],
+    "postprocess_enabled": false,
+    "pred_threshold": 0.5,
+    "sw_batch_size": 2,
+    "sw_overlap": 0.5,
+    "view_mode": "panels"
+  },
+  "method_errors": {},
+  "modality_ablation": [
+    {
+      "metrics": {
+        "dice": 0.6692851781845093,
+        "hd95": 2.449489742783178,
+        "iou": 0.5029516220092773,
+        "precision": 0.9438700079917908,
+        "sensitivity": 0.5184584259986877
+      },
+      "modality_zeroed": "t2w",
+      "predicted_voxel_delta": -1682,
+      "predicted_voxels": 1354,
+      "probability_drop_in_baseline_prediction": 0.5149880051612854
+    },
+    {
+      "metrics": {
+        "dice": 0.3856910467147827,
+        "hd95": 6.4031242374328485,
+        "iou": 0.23892022669315338,
+        "precision": 0.9721311330795288,
+        "sensitivity": 0.24056795239448547
+      },
+      "modality_zeroed": "adc",
+      "predicted_voxel_delta": -2426,
+      "predicted_voxels": 610,
+      "probability_drop_in_baseline_prediction": 0.6961833834648132
+    },
+    {
+      "metrics": {
+        "dice": 4.0567951775649647e-10,
+        "hd95": null,
+        "iou": 4.0567951775649647e-10,
+        "precision": 1.0,
+        "sensitivity": 4.0567951775649647e-10
+      },
+      "modality_zeroed": "hbv",
+      "predicted_voxel_delta": -3036,
+      "predicted_voxels": 0,
+      "probability_drop_in_baseline_prediction": 0.9277504682540894
+    }
+  ],
+  "model": {
+    "active_modalities": [
+      "t2w",
+      "adc",
+      "hbv"
+    ],
+    "name": "deconver",
+    "target_layer": "encoder.blocks.3"
+  },
+  "prediction": {
+    "ground_truth_voxels": 2465,
+    "metrics": {
+      "dice": 0.8274859189987183,
+      "hd95": 1.4142135623730951,
+      "iou": 0.7057364583015442,
+      "precision": 0.7496706247329712,
+      "sensitivity": 0.9233265519142151
+    },
+    "predicted_voxels": 3036
+  },
+  "requested_methods": [
+    "gradcam",
+    "modality-ablation",
+    "saliency"
+  ],
+  "roi": {
+    "center_zyx": [
+      8,
+      215,
+      160
+    ],
+    "slices_zyx": [
+      [
+        0,
+        16
+      ],
+      [
+        151,
+        279
+      ],
+      [
+        96,
+        224
+      ]
+    ]
+  },
+  "run_dir": "/outputs/runs/20260507_193114_deconver_tuned_a"
+}

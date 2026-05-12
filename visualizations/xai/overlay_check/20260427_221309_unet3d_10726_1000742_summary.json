@@ -1,0 +1,77 @@
+{
+  "artifacts": {
+    "gradcam_png": "/workspace/visualizations/xai/overlay_check/20260427_221309_unet3d_10726_1000742_gradcam.png"
+  },
+  "case": {
+    "case_id": "10726_1000742",
+    "seg": "/workspace/data/labels/10726_1000742.nii.gz",
+    "t2w": "/workspace/data/test_images/10726_1000742_t2w.mha",
+    "used_modalities": {
+      "adc": "/workspace/data/test_images/10726_1000742_adc.mha",
+      "hbv": "/workspace/data/test_images/10726_1000742_hbv.mha",
+      "t2w": "/workspace/data/test_images/10726_1000742_t2w.mha"
+    }
+  },
+  "checkpoint": {
+    "epoch": 276,
+    "name": "best.pt",
+    "path": "/workspace/outputs/runs/20260427_221309_unet3d/checkpoints/best.pt"
+  },
+  "generated_at": "2026-05-12T14:18:40",
+  "inference": {
+    "device": "cuda",
+    "patch_size": [
+      16,
+      128,
+      128
+    ],
+    "postprocess_enabled": false,
+    "pred_threshold": 0.5,
+    "sw_batch_size": 1,
+    "sw_overlap": 0.5,
+    "view_mode": "overlay"
+  },
+  "modality_ablation": [],
+  "model": {
+    "active_modalities": [
+      "t2w",
+      "adc",
+      "hbv"
+    ],
+    "name": "attention_unet3d",
+    "target_layer": "bottleneck"
+  },
+  "prediction": {
+    "ground_truth_voxels": 2465,
+    "metrics": {
+      "dice": 0.6521433591842651,
+      "hd95": 4.242640687119285,
+      "iou": 0.4838373363018036,
+      "precision": 0.49892473220825195,
+      "sensitivity": 0.9411764740943909
+    },
+    "predicted_voxels": 4650
+  },
+  "roi": {
+    "center_zyx": [
+      9,
+      212,
+      160
+    ],
+    "slices_zyx": [
+      [
+        1,
+        17
+      ],
+      [
+        148,
+        276
+      ],
+      [
+        96,
+        224
+      ]
+    ]
+  },
+  "run_dir": "/workspace/outputs/runs/20260427_221309_unet3d"
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "metrics": {
+      "dice": 0.015559167601168156,
+      "hd95": 172.5688268488837,
+      "iou": 0.007840580306947231,
+      "precision": 0.007840580306947231,
+      "sensitivity": 1.0
+    },
+    "modality_zeroed": "t2w",
+    "predicted_voxel_delta": 311378,
+    "predicted_voxels": 314390,
+    "probability_drop_in_baseline_prediction": -0.037310853600502014
+  },
+  {
+    "metrics": {
+      "dice": 0.3541221618652344,
+      "hd95": 118.06777714516353,
+      "iou": 0.21515701711177826,
+      "precision": 0.3739287257194519,
+      "sensitivity": 0.3363083302974701
+    },
+    "modality_zeroed": "adc",
+    "predicted_voxel_delta": -795,
+    "predicted_voxels": 2217,
+    "probability_drop_in_baseline_prediction": 0.5940815210342407
+  }
+]

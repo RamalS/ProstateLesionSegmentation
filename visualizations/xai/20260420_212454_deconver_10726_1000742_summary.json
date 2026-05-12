@@ -1,0 +1,115 @@
+{
+  "artifacts": {
+    "gradcam_png": "/workspace/visualizations/xai/20260420_212454_deconver_10726_1000742_gradcam.png",
+    "modality_ablation_json": "/workspace/visualizations/xai/20260420_212454_deconver_10726_1000742_modality_ablation.json",
+    "modality_ablation_png": "/workspace/visualizations/xai/20260420_212454_deconver_10726_1000742_modality_ablation_summary.png",
+    "saliency_channel_pngs": {
+      "adc": "/workspace/visualizations/xai/20260420_212454_deconver_10726_1000742_saliency_adc.png",
+      "t2w": "/workspace/visualizations/xai/20260420_212454_deconver_10726_1000742_saliency_t2w.png"
+    },
+    "saliency_png": "/workspace/visualizations/xai/20260420_212454_deconver_10726_1000742_saliency.png"
+  },
+  "case": {
+    "case_id": "10726_1000742",
+    "seg": "/data/labels/10726_1000742.nii.gz",
+    "t2w": "/data/test_images/10726_1000742_t2w.mha",
+    "used_modalities": {
+      "adc": "/data/test_images/10726_1000742_adc.mha",
+      "t2w": "/data/test_images/10726_1000742_t2w.mha"
+    }
+  },
+  "checkpoint": {
+    "epoch": 145,
+    "name": "best.pt",
+    "path": "/outputs/runs/20260420_212454_deconver/checkpoints/best.pt"
+  },
+  "generated_at": "2026-05-12T16:13:15",
+  "inference": {
+    "device": "cuda",
+    "patch_size": [
+      16,
+      128,
+      128
+    ],
+    "postprocess_enabled": true,
+    "pred_threshold": 0.5,
+    "sw_batch_size": 2,
+    "sw_overlap": 0.5,
+    "view_mode": "panels"
+  },
+  "method_errors": {},
+  "modality_ablation": [
+    {
+      "metrics": {
+        "dice": 0.015559167601168156,
+        "hd95": 172.5688268488837,
+        "iou": 0.007840580306947231,
+        "precision": 0.007840580306947231,
+        "sensitivity": 1.0
+      },
+      "modality_zeroed": "t2w",
+      "predicted_voxel_delta": 311378,
+      "predicted_voxels": 314390,
+      "probability_drop_in_baseline_prediction": -0.037310853600502014
+    },
+    {
+      "metrics": {
+        "dice": 0.3541221618652344,
+        "hd95": 118.06777714516353,
+        "iou": 0.21515701711177826,
+        "precision": 0.3739287257194519,
+        "sensitivity": 0.3363083302974701
+      },
+      "modality_zeroed": "adc",
+      "predicted_voxel_delta": -795,
+      "predicted_voxels": 2217,
+      "probability_drop_in_baseline_prediction": 0.5940815210342407
+    }
+  ],
+  "model": {
+    "active_modalities": [
+      "t2w",
+      "adc"
+    ],
+    "name": "deconver",
+    "target_layer": "encoder.blocks.3"
+  },
+  "prediction": {
+    "ground_truth_voxels": 2465,
+    "metrics": {
+      "dice": 0.7953259348869324,
+      "hd95": 2.23606797749979,
+      "iou": 0.6602000594139099,
+      "precision": 0.7231075763702393,
+      "sensitivity": 0.8835699558258057
+    },
+    "predicted_voxels": 3012
+  },
+  "requested_methods": [
+    "gradcam",
+    "modality-ablation",
+    "saliency"
+  ],
+  "roi": {
+    "center_zyx": [
+      8,
+      215,
+      159
+    ],
+    "slices_zyx": [
+      [
+        0,
+        16
+      ],
+      [
+        151,
+        279
+      ],
+      [
+        95,
+        223
+      ]
+    ]
+  },
+  "run_dir": "/outputs/runs/20260420_212454_deconver"
+}

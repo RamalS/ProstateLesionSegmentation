@@ -87,6 +87,43 @@ def _fmt(v: float) -> str:
     return f"{v:.4f}" if not math.isnan(v) else "n/a"
 
 
+def _seg_output(outputs):
+    """
+    Extract segmentation logits from a model output.
+
+    Single-task models return Tensor/list directly. Multi-task models return
+    {"seg": ..., "cls": ...}; keeping this helper centralized avoids branching
+    throughout training and validation.
+    """
+    if isinstance(outputs, dict):
+        return outputs["seg"]
+    return outputs
+
+
+def _cls_output(outputs) -> torch.Tensor | None:
+    """Return auxiliary classification logits when the model provides them."""
+    if isinstance(outputs, dict):
+        cls = outputs.get("cls")
+        if isinstance(cls, torch.Tensor):
+            return cls
+    return None
+
+
+def _clamp_logits(outputs, min_value: float = -10.0, max_value: float = 10.0):
+    """Clamp raw logits while preserving Tensor/list/dict output structure."""
+    if isinstance(outputs, torch.Tensor):
+        return outputs.clamp(min_value, max_value)
+    if isinstance(outputs, list):
+        return [item.clamp(min_value, max_value) for item in outputs]
+    if isinstance(outputs, dict):
+        clamped = dict(outputs)
+        clamped["seg"] = _clamp_logits(clamped["seg"], min_value, max_value)
+        if isinstance(clamped.get("cls"), torch.Tensor):
+            clamped["cls"] = clamped["cls"].clamp(min_value, max_value)
+        return clamped
+    return outputs
+
+
 # ---------------------------------------------------------------------------
 # Runtime helpers
 # ---------------------------------------------------------------------------
@@ -190,7 +227,7 @@ def validate(
     # so we wrap the model to extract the finest-resolution output (index 0).
     # This is a no-op for standard (non-DS) models that already return a Tensor.
     def _predictor(x):
-        out = model(x)
+        out = _seg_output(model(x))
         return out[0] if isinstance(out, list) else out
 
     with torch.inference_mode():
@@ -729,6 +766,19 @@ def main() -> None:
             [f"{w:.3f}" for w in criterion.weights],
         )
 
+    classification_loss_weight = float(cfg.get("classification_loss_weight", 0.0))
+    classification_pos_weight = float(cfg.get("classification_pos_weight", 1.0))
+    cls_criterion: torch.nn.Module | None = None
+    if classification_loss_weight > 0.0:
+        cls_criterion = torch.nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([classification_pos_weight], device=device)
+        )
+        logger.info(
+            "Auxiliary classification loss enabled: weight=%.3f, pos_weight=%.3f",
+            classification_loss_weight,
+            classification_pos_weight,
+        )
+
     # Optional: freeze encoder for a few warm-up epochs after loading
     # pretrained encoder weights.
     freeze_encoder_epochs: int = max(0, int(cfg.get("freeze_encoder_epochs", 0)))
@@ -926,6 +976,9 @@ def main() -> None:
                     )
                 writer.add_scalar("train/encoder_frozen", 0.0, epoch)
         epoch_loss = 0.0
+        epoch_seg_loss = 0.0
+        epoch_cls_loss = 0.0
+        cls_batches = 0
 
         batch_bar = tqdm(train_loader, desc=f"Train {epoch}/{epochs}", leave=False, unit="batch")
         for step, batch in enumerate(batch_bar, start=1):
@@ -934,15 +987,21 @@ def main() -> None:
 
             optimizer.zero_grad(set_to_none=True)
             with amp_ctx:
-                logits = model(images)
+                outputs = model(images)
                 # Clamp to ±10 to prevent FP16 sigmoid overflow (sigmoid(±10) ≈
                 # 0.99995 / 0.00005 — sufficient confidence range for segmentation).
                 # Under BF16 or FP32 this is a no-op in practice.
-                if isinstance(logits, list):
-                    logits = [l.clamp(-10.0, 10.0) for l in logits]
+                outputs = _clamp_logits(outputs)
+                seg_logits = _seg_output(outputs)
+                seg_loss = criterion(seg_logits, labels)
+                cls_loss = None
+                cls_logits = _cls_output(outputs)
+                if cls_criterion is not None and cls_logits is not None:
+                    cls_targets = (labels.flatten(1).amax(dim=1) > 0).float()
+                    cls_loss = cls_criterion(cls_logits.float(), cls_targets)
+                    loss = seg_loss + classification_loss_weight * cls_loss
                 else:
-                    logits = logits.clamp(-10.0, 10.0)
-                loss = criterion(logits, labels)
+                    loss = seg_loss
 
             if not torch.isfinite(loss):
                 loss_value = float(loss.detach().cpu().item())
@@ -971,23 +1030,43 @@ def main() -> None:
             scaler.step(optimizer)
             scaler.update()
 
-            epoch_loss += loss.item()
-            batch_bar.set_postfix(loss=f"{loss.item():.4f}")
+            loss_item = loss.item()
+            seg_loss_item = seg_loss.item()
+            epoch_loss += loss_item
+            epoch_seg_loss += seg_loss_item
+            postfix = {"loss": f"{loss_item:.4f}"}
+            if cls_loss is not None:
+                cls_loss_item = cls_loss.item()
+                epoch_cls_loss += cls_loss_item
+                cls_batches += 1
+                postfix["cls"] = f"{cls_loss_item:.4f}"
+            batch_bar.set_postfix(**postfix)
 
-            del logits, images, labels, loss
+            del outputs, seg_logits, images, labels, loss, seg_loss, cls_loss, cls_logits
 
         scheduler.step()
 
         avg_loss = epoch_loss / max(len(train_loader), 1)
+        avg_seg_loss = epoch_seg_loss / max(len(train_loader), 1)
+        avg_cls_loss = epoch_cls_loss / max(cls_batches, 1) if cls_batches > 0 else float("nan")
         current_lr = scheduler.get_last_lr()[0]
 
         writer.add_scalar("train/loss", avg_loss, epoch)
+        writer.add_scalar("train/seg_loss", avg_seg_loss, epoch)
+        if not math.isnan(avg_cls_loss):
+            writer.add_scalar("train/cls_loss", avg_cls_loss, epoch)
         writer.add_scalar("train/lr", current_lr, epoch)
 
-        logger.info(
-            "Epoch %d/%d | loss=%.4f | lr=%.2e",
-            epoch, epochs, avg_loss, current_lr,
-        )
+        if not math.isnan(avg_cls_loss):
+            logger.info(
+                "Epoch %d/%d | loss=%.4f | seg_loss=%.4f | cls_loss=%.4f | lr=%.2e",
+                epoch, epochs, avg_loss, avg_seg_loss, avg_cls_loss, current_lr,
+            )
+        else:
+            logger.info(
+                "Epoch %d/%d | loss=%.4f | lr=%.2e",
+                epoch, epochs, avg_loss, current_lr,
+            )
         save_checkpoint(
             model, optimizer, epoch,
             str(checkpoint_dir / f"epoch_{epoch:04d}.pt"),

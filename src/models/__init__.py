@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import torch
 import torch.nn as nn
 
 from src.models.attention_unet3d import AttentionUNet3D
@@ -39,7 +40,53 @@ _MODEL_REGISTRY: dict[str, type[nn.Module]] = {
 }
 
 if _DECONVER_AVAILABLE:
+    Deconver = _Deconver  # type: ignore[misc,assignment]
     _MODEL_REGISTRY["deconver"] = _Deconver  # type: ignore[assignment]
+
+
+if _DECONVER_AVAILABLE:
+    class DeconverMultiTask(_Deconver):  # type: ignore[misc,valid-type]
+        """
+        Deconver segmentation model with an auxiliary lesion-presence head.
+
+        The segmentation path is unchanged.  The classifier reads the deepest
+        encoder feature and predicts whether the current patch/volume contains
+        lesion voxels, so training can add a weak detection objective without
+        making inference depend on a hard classification gate.
+        """
+
+        def __init__(
+            self,
+            *args,
+            classification_dropout: float = 0.1,
+            **kwargs,
+        ) -> None:
+            encoder_width = tuple(kwargs.get("encoder_width", [64, 128, 256, 512]))
+            spatial_dims = int(kwargs.get("spatial_dims", 3))
+            super().__init__(*args, **kwargs)
+
+            pool_cls = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
+            self.classifier = nn.Sequential(
+                pool_cls(1),
+                nn.Flatten(1),
+                nn.Dropout(float(classification_dropout)),
+                nn.Linear(int(encoder_width[-1]), 1),
+            )
+
+        def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor | list[torch.Tensor]]:
+            features = self.forward_features(x)
+
+            if self.num_deep_supr:
+                seg: torch.Tensor | list[torch.Tensor] = [
+                    head(features[j]) for j, head in enumerate(self.heads)
+                ]
+            else:
+                seg = self.head(features[0])
+
+            cls = self.classifier(features[-1]).squeeze(1)
+            return {"seg": seg, "cls": cls}
+
+    _MODEL_REGISTRY["deconver_multitask"] = DeconverMultiTask  # type: ignore[name-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +189,7 @@ def build_model(cfg: dict) -> nn.Module:
     # -----------------------------------------------------------------------
     # Deconver has a different constructor signature; handle it separately.
     # -----------------------------------------------------------------------
-    if name == "deconver":
+    if name in {"deconver", "deconver_multitask"}:
         deep_supervision = cfg.get("deep_supervision", False)
         # num_deep_supr: False disables it; a positive int enables N auxiliary heads.
         num_deep_supr: bool | int = False
@@ -151,7 +198,12 @@ def build_model(cfg: dict) -> nn.Module:
             # Number of auxiliary heads = number of decoder stages = len(encoder_depth) - 1
             num_deep_supr = max(1, len(encoder_depth) - 1)
 
-        return _Deconver(  # type: ignore[misc]
+        cls = _MODEL_REGISTRY[name]
+        kwargs = {}
+        if name == "deconver_multitask":
+            kwargs["classification_dropout"] = cfg.get("classification_dropout", 0.1)
+
+        return cls(  # type: ignore[misc]
             in_channels=in_channels,
             out_channels=cfg.get("out_channels", 1),
             spatial_dims=3,
@@ -163,6 +215,7 @@ def build_model(cfg: dict) -> nn.Module:
             groups=cfg.get("deconver_groups", -1),
             ratio=cfg.get("deconver_ndc_ratio", 4),
             num_deep_supr=num_deep_supr,
+            **kwargs,
         )
 
     if name == "fct":
@@ -200,3 +253,4 @@ __all__ = [
 
 if _DECONVER_AVAILABLE:
     __all__.append("Deconver")
+    __all__.append("DeconverMultiTask")

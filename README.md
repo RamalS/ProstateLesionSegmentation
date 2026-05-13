@@ -59,6 +59,8 @@ configs/
   pretrain_default.yaml     # Docker SSL pretraining config (unlabeled Prostate158)
   pretrain_deconver.yaml    # Docker SSL pretraining config for model: deconver
   pretrain_local.yaml       # Local SSL pretraining config
+  prostate158_default.yaml  # Docker supervised Prostate158 config
+  prostate158_local.yaml    # Local supervised Prostate158 config
 ```
 
 ---
@@ -193,7 +195,9 @@ Place the PI-CAI dataset under `./data/`:
 data/
   images/          # Multi-channel MRI volumes (T2w, ADC, HBV)
   labels/          # Binary lesion segmentation masks
-  unlabeled_images/ # Prostate158 flattened files: <case>_{t2,adc,dwi}.nii.gz (for SSL pretraining)
+  prostate158_train/ # Full Prostate158 training archive (train.csv, valid.csv, train/<case>/...)
+  prostate158_test/  # Full Prostate158 test archive (test.csv, test/<case>/...)
+  unlabeled_images/  # Prostate158 flattened files: <case>_{t2,adc,dwi}.nii.gz (for SSL pretraining)
 ```
 
 The Docker Compose file mounts `./data` → `/data` inside the container.
@@ -244,22 +248,27 @@ The ~1:2.5 case-level and ~1:50+ voxel-level imbalance is addressed at four stac
 ### Downloading the Data
 
 ```bash
-# Full dataset (default): PI-CAI (all 5 folds + labels) + Prostate158 unlabeled MRI
+# Full dataset (default): PI-CAI (all 5 folds + labels) + Prostate158 train/test MRI
 bash scripts/download_dataset.sh
-# Prostate158 files are flattened into data/unlabeled_images as <case>_{t2,adc,dwi}.nii.gz
+# Prostate158 is extracted into data/prostate158_train and data/prostate158_test.
+# The train split is also flattened into data/unlabeled_images for SSL pretraining.
 
 # Docker equivalent
 docker compose run --rm trainer download
 
-# Skip Prostate158 unlabeled download when needed
+# Skip Prostate158 download when needed
 bash scripts/download_dataset.sh --no-unlabeled
 
 # Optional PI-CAI subsets
 bash scripts/download_dataset.sh 5 --no-labels --no-unlabeled
 bash scripts/download_dataset.sh --labels-only
 
-# Prostate158 unlabeled only (no PI-CAI images/labels)
+# Prostate158 train/test only (no PI-CAI images/labels)
 bash scripts/download_dataset.sh --no-images --no-labels
+
+# Supervised Prostate158 training
+docker compose run --rm trainer train --config /workspace/configs/prostate158_default.yaml
+PYTHONPATH=. python -m src.train --config configs/prostate158_local.yaml
 
 # Verify dataset statistics after download
 PYTHONPATH=. python scripts/count_positives.py \
@@ -364,7 +373,7 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 
 ### SSL Pretraining + Transfer (optional)
 
-1. Run SSL pretraining on `data/unlabeled_images` (Prostate158; DWI is mapped to HBV channel):
+1. Run SSL pretraining on `data/unlabeled_images` (derived from Prostate158 train; DWI is mapped to HBV channel):
    - Docker: `docker compose run --rm trainer pretrain`
    - Local: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
    - Regenerate split manifest if needed: add `--new-split-manifest`

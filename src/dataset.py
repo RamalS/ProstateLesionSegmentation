@@ -29,6 +29,10 @@ Labels (same for both image layouts)::
 
 Labels encode PI-RADS grade per voxel (0 = background/benign, >=1 = lesion).
 The dataset binarises labels by default: 0 = background, 1 = any lesion.
+
+Prostate158 cases are discovered from the upstream train/valid/test CSV files
+via ``discover_prostate158_cases`` and then loaded through the same dataset
+class.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ import random
 import sys
 import threading
 import hashlib
+import csv
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -458,6 +463,161 @@ def discover_unlabeled_cases(
             cases.append(paths)
 
     logger.info("Discovered %d unlabeled cases in %s", len(cases), images_dir)
+    return cases
+
+
+def _resolve_prostate158_csv(root_dir: Path, split: str) -> Path:
+    csv_path = root_dir / f"{split}.csv"
+    if csv_path.exists():
+        return csv_path
+
+    nested = root_dir / root_dir.name / f"{split}.csv"
+    if nested.exists():
+        return nested
+
+    raise FileNotFoundError(
+        f"Prostate158 {split}.csv not found under {root_dir}. "
+        "Expected the extracted archive root, e.g. data/prostate158_train."
+    )
+
+
+def _resolve_prostate158_path(root_dir: Path, csv_path: Path, value: str) -> Path:
+    path = Path(str(value).strip())
+    if path.is_absolute():
+        return path
+
+    candidates = [
+        root_dir / path,
+        csv_path.parent / path,
+        root_dir / root_dir.name / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return candidates[0]
+
+
+def _prostate158_label_column(
+    columns: Sequence[str],
+    label_target: str,
+    label_reader: int | str,
+    label_modality: str | None,
+) -> str:
+    target = str(label_target).strip().lower()
+    reader = str(label_reader).strip().lower()
+    if reader.startswith("reader"):
+        reader = reader.removeprefix("reader")
+
+    if label_modality is None:
+        modality = "adc" if target == "tumor" else "t2"
+    else:
+        modality = str(label_modality).strip().lower()
+
+    preferred = f"{modality}_{target}_reader{reader}"
+    if preferred in columns:
+        return preferred
+
+    suffix = f"_{target}_reader{reader}"
+    matches = [col for col in columns if col.endswith(suffix)]
+    if matches:
+        return matches[0]
+
+    raise ValueError(
+        f"Could not find Prostate158 label column '{preferred}' in CSV. "
+        f"Available columns: {', '.join(columns)}"
+    )
+
+
+def discover_prostate158_cases(
+    root_dir: str | Path,
+    split: str = "train",
+    active_keys: Sequence[str] = MODALITY_KEYS,
+    label_target: str = "tumor",
+    label_reader: int | str = 1,
+    label_modality: str | None = None,
+) -> list[dict]:
+    """
+    Discover Prostate158 cases from the upstream CSV files.
+
+    The official Prostate158 loader reads ``train.csv`` / ``valid.csv`` /
+    ``test.csv`` and turns each row into a MONAI-style dict.  This helper
+    adapts the same CSV contract to this repo's case-dict schema:
+
+      - ``t2`` -> ``t2w``
+      - ``adc`` -> ``adc``
+      - ``dwi`` -> ``hbv`` with ``hbv_source="dwi"``
+      - default label -> ``adc_tumor_reader1``
+
+    The returned dicts can be passed directly to :class:`PiCaiDataset`.
+    """
+    root_dir = Path(root_dir)
+    split = str(split).strip().lower()
+    csv_path = _resolve_prostate158_csv(root_dir, split)
+
+    cases: list[dict] = []
+    with csv_path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        columns = reader.fieldnames or []
+        required = {"t2"}
+        if "adc" in active_keys:
+            required.add("adc")
+        if "hbv" in active_keys:
+            required.add("dwi")
+
+        missing = sorted(required - set(columns))
+        if missing:
+            raise ValueError(
+                f"Prostate158 CSV {csv_path} is missing columns: {', '.join(missing)}"
+            )
+
+        label_col = _prostate158_label_column(
+            columns=columns,
+            label_target=label_target,
+            label_reader=label_reader,
+            label_modality=label_modality,
+        )
+
+        for row_idx, row in enumerate(reader, 1):
+            t2_path = _resolve_prostate158_path(root_dir, csv_path, row["t2"])
+            case_id = t2_path.parent.name or f"{split}_{row_idx:03d}"
+            paths: dict = {
+                "case_id": case_id,
+                "t2w": t2_path,
+                "label": _resolve_prostate158_path(root_dir, csv_path, row[label_col]),
+                "source_dataset": "prostate158",
+                "prostate158_split": split,
+                "prostate158_label_col": label_col,
+            }
+
+            if "adc" in active_keys:
+                paths["adc"] = _resolve_prostate158_path(root_dir, csv_path, row["adc"])
+            if "hbv" in active_keys:
+                paths["hbv"] = _resolve_prostate158_path(root_dir, csv_path, row["dwi"])
+                paths["hbv_source"] = "dwi"
+
+            missing_paths = [
+                str(paths[key])
+                for key in ("t2w", "adc", "hbv", "label")
+                if key in paths and paths[key] is not None and not Path(paths[key]).exists()
+            ]
+            if missing_paths:
+                logger.warning(
+                    "Prostate158 case %s skipped; missing file(s): %s",
+                    case_id,
+                    ", ".join(missing_paths),
+                )
+                continue
+
+            cases.append(paths)
+
+    logger.info(
+        "Discovered %d Prostate158 %s cases in %s using label column '%s'",
+        len(cases),
+        split,
+        root_dir,
+        label_col,
+    )
     return cases
 
 

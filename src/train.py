@@ -38,9 +38,11 @@ from tqdm import tqdm
 from src.config import load_config, resolve_dataset_cache_config
 from src.dataset import (
     PiCaiDataset,
+    annotate_cases_with_lesion_flags,
     active_modality_pairs,
     default_split_manifest_path,
     discover_cases,
+    discover_prostate158_cases,
     resolve_train_val_split_from_manifest,
 )
 from src.losses import DiceBCELoss, DeepSupervisionWrapper, TverskyBCELoss
@@ -465,50 +467,105 @@ def main() -> None:
     # Resolve active modalities once; used for case discovery and dataset init.
     _active_keys = [k for k, _ in active_modality_pairs(cfg)]
 
-    all_cases = discover_cases(
-        images_dir=Path(cfg["images_dir"]),
-        labels_dir=Path(cfg["labels_dir"]),
-        active_keys=_active_keys,
-    )
+    dataset_type = str(cfg.get("dataset_type", "picai")).strip().lower()
+    if dataset_type == "prostate158":
+        prostate158_train_dir = Path(
+            cfg.get(
+                "prostate158_train_dir",
+                cfg.get("images_dir", "/data/prostate158_train"),
+            )
+        )
+        label_target = str(cfg.get("prostate158_label_target", "tumor"))
+        label_reader = cfg.get("prostate158_label_reader", 1)
+        label_modality = cfg.get("prostate158_label_modality")
+
+        train_cases = discover_prostate158_cases(
+            root_dir=prostate158_train_dir,
+            split=str(cfg.get("prostate158_train_split", "train")),
+            active_keys=_active_keys,
+            label_target=label_target,
+            label_reader=label_reader,
+            label_modality=label_modality,
+        )
+        val_cases = discover_prostate158_cases(
+            root_dir=prostate158_train_dir,
+            split=str(cfg.get("prostate158_val_split", "valid")),
+            active_keys=_active_keys,
+            label_target=label_target,
+            label_reader=label_reader,
+            label_modality=label_modality,
+        )
+        all_cases = train_cases + val_cases
+        lesion_flag_cache_path = (
+            Path(cfg["base_output_dir"]).parent / "splits" / "prostate158_lesion_flags.json"
+        )
+        annotate_cases_with_lesion_flags(all_cases, cache_path=lesion_flag_cache_path)
+
+        if args.new_split_manifest:
+            logger.warning(
+                "--new-split-manifest is ignored for dataset_type='prostate158'; "
+                "using upstream train.csv and valid.csv."
+            )
+    elif dataset_type == "picai":
+        all_cases = discover_cases(
+            images_dir=Path(cfg["images_dir"]),
+            labels_dir=Path(cfg["labels_dir"]),
+            active_keys=_active_keys,
+        )
+
+        if not all_cases:
+            raise RuntimeError(
+                f"No cases found in {cfg['images_dir']}. "
+                "Check that your data is mounted correctly (./data -> /data)."
+            )
+
+        split_manifest_raw = cfg.get("split_manifest_path", "")
+        split_manifest_cfg = (
+            str(split_manifest_raw).strip()
+            if split_manifest_raw is not None
+            else ""
+        )
+        split_manifest_path = (
+            Path(split_manifest_cfg)
+            if split_manifest_cfg
+            else default_split_manifest_path(cfg["base_output_dir"])
+        )
+        lesion_flag_cache_path = split_manifest_path.parent / "lesion_flags.json"
+
+        manifest_train_cases, manifest_val_cases, _, manifest_created = (
+            resolve_train_val_split_from_manifest(
+                cases=all_cases,
+                val_fraction=float(cfg.get("val_fraction", 0.2)),
+                seed=seed,
+                manifest_path=split_manifest_path,
+                new_split_manifest=args.new_split_manifest,
+                cache_path=lesion_flag_cache_path,
+            )
+        )
+
+        split_manifest_copy_path = run_dir / "train_val_split_manifest.json"
+        shutil.copy2(split_manifest_path, split_manifest_copy_path)
+        logger.info(
+            "Split manifest: %s (%s) | copied to %s",
+            split_manifest_path,
+            "created" if manifest_created else "reused",
+            split_manifest_copy_path,
+        )
+
+        train_cases = manifest_train_cases
+        val_cases = manifest_val_cases
+    else:
+        raise ValueError(
+            f"Unsupported dataset_type='{dataset_type}'. Expected 'picai' or 'prostate158'."
+        )
 
     if not all_cases:
+        raise RuntimeError(f"No cases found for dataset_type='{dataset_type}'.")
+    if not train_cases or not val_cases:
         raise RuntimeError(
-            f"No cases found in {cfg['images_dir']}. "
-            "Check that your data is mounted correctly (./data -> /data)."
+            f"Invalid split for dataset_type='{dataset_type}': "
+            f"{len(train_cases)} train / {len(val_cases)} val cases."
         )
-
-    split_manifest_raw = cfg.get("split_manifest_path", "")
-    split_manifest_cfg = (
-        str(split_manifest_raw).strip()
-        if split_manifest_raw is not None
-        else ""
-    )
-    split_manifest_path = (
-        Path(split_manifest_cfg)
-        if split_manifest_cfg
-        else default_split_manifest_path(cfg["base_output_dir"])
-    )
-    lesion_flag_cache_path = split_manifest_path.parent / "lesion_flags.json"
-
-    manifest_train_cases, manifest_val_cases, _, manifest_created = (
-        resolve_train_val_split_from_manifest(
-            cases=all_cases,
-            val_fraction=float(cfg.get("val_fraction", 0.2)),
-            seed=seed,
-            manifest_path=split_manifest_path,
-            new_split_manifest=args.new_split_manifest,
-            cache_path=lesion_flag_cache_path,
-        )
-    )
-
-    split_manifest_copy_path = run_dir / "train_val_split_manifest.json"
-    shutil.copy2(split_manifest_path, split_manifest_copy_path)
-    logger.info(
-        "Split manifest: %s (%s) | copied to %s",
-        split_manifest_path,
-        "created" if manifest_created else "reused",
-        split_manifest_copy_path,
-    )
 
     if args.learnability is not None:
         n = max(1, args.learnability)
@@ -522,8 +579,6 @@ def main() -> None:
             n,
         )
     else:
-        train_cases = manifest_train_cases
-        val_cases = manifest_val_cases
         logger.info("Split: %d train | %d val", len(train_cases), len(val_cases))
 
     train_ds = PiCaiDataset(
@@ -540,6 +595,7 @@ def main() -> None:
         cache_rate=cache_rate,
         cache_dir=cache_dir,
         active_modalities=_active_keys,
+        dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
     )
 
     val_ds = PiCaiDataset(
@@ -552,6 +608,7 @@ def main() -> None:
         cache_rate=cache_rate,
         cache_dir=cache_dir,
         active_modalities=_active_keys,
+        dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
     )
 
     loader_generator = torch.Generator()

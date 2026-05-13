@@ -10,6 +10,7 @@ random_seed: 42
 deterministic: false
 
 # Data
+dataset_type: picai
 images_dir: data/images
 labels_dir: data/labels
 target_spacing: [3.0, 0.5, 0.5]

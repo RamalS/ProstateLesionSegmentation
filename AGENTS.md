@@ -8,6 +8,7 @@
 - Train Deconver tuned A: `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml`
 - Train Deconver tuned B (num_samples=2): `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_b.yaml`
 - Train Deconver tuned C (bce_pos_weight=20): `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_c.yaml`
+- Train Prostate158 supervised: `docker compose run --rm trainer train --config /workspace/configs/prostate158_default.yaml`
 - Train with current config from resumed checkpoint weights only: `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --resume /outputs/runs/<run_name>/checkpoints/best.pt --current-config`
 - Pretrain encoder (SSL) in Docker: `docker compose run --rm trainer pretrain`
 - Smoke test (primary regression check): `docker compose run --rm trainer smoke-test`
@@ -65,7 +66,10 @@
 - Both PI-CAI layouts are supported: flat files or nested per-patient/per-case folders.
 - T2w (`*_t2w.mha`) is always required for case discovery.
 - ADC/HBV files are required only when `use_adc` / `use_hbv` are enabled.
-- Unlabeled Prostate158 discovery expects flattened files in `data/unlabeled_images/` as `<case>_{t2,adc,dwi}.nii.gz`.
+- Prostate158 full archives are extracted to `data/prostate158_train/` and `data/prostate158_test/`.
+- Supervised Prostate158 discovery reads upstream CSV splits (`train.csv`, `valid.csv`, `test.csv`) and maps `t2 -> t2w`, `adc -> adc`, and `dwi -> hbv`.
+- The default supervised Prostate158 label is `adc_tumor_reader1` (`prostate158_label_target: tumor`, `prostate158_label_reader: 1`).
+- Unlabeled Prostate158 SSL discovery still expects flattened files in `data/unlabeled_images/` as `<case>_{t2,adc,dwi}.nii.gz`; the downloader derives these from `data/prostate158_train/train/`.
 - For SSL pretraining, Prostate158 DWI is mapped to the HBV channel (`hbv_source="dwi"`), with optional DWI preprocessing via `dwi_hbv_preprocess`.
 - Labels are `<case_id>.nii.gz`; labels are binarized at load time (`>0` means lesion).
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# download_dataset.sh - Download PI-CAI data + Prostate158 unlabeled images
+# download_dataset.sh - Download PI-CAI data + Prostate158 train/test images
 #
 # Usage:
 #   bash scripts/download_dataset.sh [N] [OPTIONS]
@@ -14,7 +14,7 @@
 #   --keep-zip      Keep image .zip files after extraction (default: delete)
 #   --no-images     Skip PI-CAI image download/extraction
 #   --no-labels     Skip label download
-#   --no-unlabeled  Skip Prostate158 unlabeled image download
+#   --no-unlabeled  Skip Prostate158 train/test download
 #   --images-only   Alias for --no-labels
 #   --labels-only   Alias for --no-images --no-unlabeled
 #   --dry-run       Print what would be downloaded without doing anything
@@ -64,8 +64,10 @@ N_FOLDS=5
 
 IMAGE_BASE_URL="https://zenodo.org/records/6624726/files"
 TOTAL_FOLDS=5
-UNLABELED_ZIP_URL="https://zenodo.org/records/6481141/files/prostate158_train.zip?download=1"
-UNLABELED_ZIP_NAME="prostate158_train.zip"
+PROSTATE158_TRAIN_ZIP_URL="https://zenodo.org/records/6481141/files/prostate158_train.zip?download=1"
+PROSTATE158_TEST_ZIP_URL="https://zenodo.org/records/6592345/files/prostate158_test.zip?download=1"
+PROSTATE158_TRAIN_ZIP_NAME="prostate158_train.zip"
+PROSTATE158_TEST_ZIP_NAME="prostate158_test.zip"
 
 LABELS_REPO="https://github.com/DIAGNijmegen/picai_labels"
 SPARSE_PATHS=(
@@ -105,7 +107,7 @@ Options:
   --keep-zip      Keep image .zip files after extraction (default: delete)
   --no-images     Skip PI-CAI image download/extraction
   --no-labels     Skip label download
-  --no-unlabeled  Skip Prostate158 unlabeled image download
+  --no-unlabeled  Skip Prostate158 train/test download
   --images-only   Alias for --no-labels
   --labels-only   Alias for --no-images --no-unlabeled
   --dry-run       Print what would be downloaded without doing anything
@@ -219,7 +221,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DOWNLOAD_IMAGES" == false && "$DOWNLOAD_LABELS" == false && "$DOWNLOAD_UNLABELED" == false ]]; then
-    error "Nothing to do: images, labels, and unlabeled images are all disabled."
+    error "Nothing to do: PI-CAI images, PI-CAI labels, and Prostate158 are all disabled."
     exit 1
 fi
 
@@ -236,8 +238,12 @@ IMAGES_DIR="$OUT_DIR/images"
 TEST_IMAGES_DIR="$OUT_DIR/test_images"
 LABELS_DIR="$OUT_DIR/labels"
 UNLABELED_DIR="$OUT_DIR/unlabeled_images"
+PROSTATE158_TRAIN_DIR="$OUT_DIR/prostate158_train"
+PROSTATE158_TEST_DIR="$OUT_DIR/prostate158_test"
 LABELS_CLONE_DIR="$OUT_DIR/.picai_labels_tmp"
 LABELS_DONE_MARKER="$OUT_DIR/.labels_done"
+PROSTATE158_TRAIN_DONE_MARKER="$OUT_DIR/.prostate158_train_done"
+PROSTATE158_TEST_DONE_MARKER="$OUT_DIR/.prostate158_test_done"
 UNLABELED_DONE_MARKER="$OUT_DIR/.prostate158_unlabeled_done"
 
 if [[ "$DRY_RUN" == false ]]; then
@@ -409,76 +415,24 @@ PYEOF
     fi
 }
 
-download_unlabeled_images() {
-    local zip_name
-    local zip_path
-    local n_files
-
-    zip_name="$UNLABELED_ZIP_NAME"
-    zip_path="$OUT_DIR/$zip_name"
-
-    if [[ "$DRY_RUN" == false ]]; then
-        mkdir -p "$UNLABELED_DIR"
-    fi
-
-    echo ""
-    echo -e "${BOLD}Prostate158 Unlabeled Download${RESET}"
-    echo "  Source            : $UNLABELED_ZIP_URL"
-    echo "  Output directory  : $UNLABELED_DIR"
-    echo "  Keep zip files    : $KEEP_ZIP"
-    echo "  Dry run           : $DRY_RUN"
-    echo ""
-
-    if [[ "$DRY_RUN" == true ]]; then
-        info "[dry-run] Would download: $UNLABELED_ZIP_URL"
-        info "[dry-run] Would extract only t2/adc/dwi from prostate158_train/train/<case_id>/"
-        info "[dry-run] Would flatten to: <case_id>_{t2,adc,dwi}.nii.gz"
-        if [[ "$KEEP_ZIP" == false ]]; then
-            info "[dry-run] Would remove: $zip_path"
-        fi
-        success "Unlabeled image dry run complete."
-        return
-    fi
-
-    if [[ -f "$UNLABELED_DONE_MARKER" ]]; then
-        n_files="$(find "$UNLABELED_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
-        success "Unlabeled images already downloaded ($n_files .nii.gz files in $UNLABELED_DIR) - skipping."
-        echo "  Delete $UNLABELED_DONE_MARKER to force a re-download."
-        return
-    fi
-
-    echo -e "${BOLD}------------------------------------------${RESET}"
-    info "Downloading $zip_name (~2.8 GB)..."
-    if [[ "$DOWNLOADER" == "wget" ]]; then
-        wget -c --show-progress -O "$zip_path" "$UNLABELED_ZIP_URL"
-    else
-        curl -L -C - --progress-bar -o "$zip_path" "$UNLABELED_ZIP_URL"
-    fi
-    success "Download complete: $zip_path"
-
-    echo -e "${BOLD}------------------------------------------${RESET}"
-    info "Extracting t2/adc/dwi files -> $UNLABELED_DIR (flattened) ..."
+extract_prostate158_archive() {
+    local zip_path="$1"
+    local target_dir="$2"
 
     python3 - <<PYEOF
 import shutil
 import zipfile
-from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
-zip_path = "$zip_path"
-out_dir = Path("$UNLABELED_DIR")
-out_dir.mkdir(parents=True, exist_ok=True)
-
-wanted = {
-    "t2.nii.gz": "t2",
-    "adc.nii.gz": "adc",
-    "dwi.nii.gz": "dwi",
-}
+zip_path = Path("$zip_path")
+target_dir = Path("$target_dir")
+out_root = target_dir.parent
+target_name = target_dir.name
+target_dir.mkdir(parents=True, exist_ok=True)
 
 written = 0
-already_present = 0
-ignored = 0
-case_modalities = defaultdict(set)
+dirs = 0
+skipped = 0
 
 print(f"  Opening {zip_path} ...")
 with zipfile.ZipFile(zip_path, "r") as zf:
@@ -493,49 +447,170 @@ with zipfile.ZipFile(zip_path, "r") as zf:
 
         path = PurePosixPath(member)
         parts = path.parts
-
-        if len(parts) != 4:
-            ignored += 1
+        if not parts:
+            skipped += 1
             continue
-        if parts[0] != "prostate158_train" or parts[1] != "train":
-            ignored += 1
-            continue
-
-        case_id = parts[2]
-        filename = parts[3]
-
-        if not (case_id.isdigit() and 20 <= int(case_id) <= 158):
-            ignored += 1
+        if any(part in {"", ".", ".."} for part in parts):
+            skipped += 1
             continue
 
-        modality = wanted.get(filename)
-        if modality is None:
-            ignored += 1
+        if parts[0].lower() == target_name.lower():
+            rel = Path(*parts[1:]) if len(parts) > 1 else Path()
+        else:
+            rel = Path(*parts)
+
+        target = target_dir / rel
+        if not target.resolve().is_relative_to(out_root.resolve()):
+            skipped += 1
             continue
 
-        target = out_dir / f"{case_id}_{modality}.nii.gz"
-        if target.exists():
-            already_present += 1
-            case_modalities[case_id].add(modality)
+        if member.endswith("/"):
+            target.mkdir(parents=True, exist_ok=True)
+            dirs += 1
             continue
 
+        target.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(member) as src, open(target, "wb") as dst:
             shutil.copyfileobj(src, dst)
-
         written += 1
+
+print("  Extraction complete.")
+print(f"  Files written : {written}")
+print(f"  Directories   : {dirs}")
+if skipped:
+    print(f"  [WARN] Skipped unsafe/empty archive entries: {skipped}")
+PYEOF
+}
+
+download_prostate158_archive() {
+    local name="$1"
+    local url="$2"
+    local zip_name="$3"
+    local target_dir="$4"
+    local marker="$5"
+    local zip_path="$OUT_DIR/$zip_name"
+    local n_files
+
+    if [[ "$DRY_RUN" == false ]]; then
+        mkdir -p "$target_dir"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Prostate158 ${name} Download${RESET}"
+    echo "  Source            : $url"
+    echo "  Output directory  : $target_dir"
+    echo "  Keep zip files    : $KEEP_ZIP"
+    echo "  Dry run           : $DRY_RUN"
+    echo ""
+
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] Would download: $url"
+        info "[dry-run] Would extract full archive to: $target_dir"
+        if [[ "$KEEP_ZIP" == false ]]; then
+            info "[dry-run] Would remove: $zip_path"
+        fi
+        return
+    fi
+
+    if [[ -f "$marker" ]]; then
+        n_files="$(find "$target_dir" -type f 2>/dev/null | wc -l | tr -d ' ')"
+        success "Prostate158 ${name} already prepared ($n_files files in $target_dir) - skipping."
+        echo "  Delete $marker to force a re-download."
+        return
+    fi
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Downloading $zip_name ..."
+    if [[ "$DOWNLOADER" == "wget" ]]; then
+        wget -c --show-progress -O "$zip_path" "$url"
+    else
+        curl -L -C - --progress-bar -o "$zip_path" "$url"
+    fi
+    success "Download complete: $zip_path"
+
+    echo -e "${BOLD}------------------------------------------${RESET}"
+    info "Extracting $zip_name -> $target_dir ..."
+    extract_prostate158_archive "$zip_path" "$target_dir"
+
+    if [[ "$KEEP_ZIP" == false ]]; then
+        rm -f "$zip_path"
+        info "Removed $zip_name"
+    fi
+
+    touch "$marker"
+}
+
+prepare_prostate158_unlabeled_flat() {
+    local n_files
+
+    if [[ "$DRY_RUN" == false ]]; then
+        mkdir -p "$UNLABELED_DIR"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Prostate158 SSL Flattening${RESET}"
+    echo "  Source directory  : $PROSTATE158_TRAIN_DIR/train"
+    echo "  Output directory  : $UNLABELED_DIR"
+    echo "  Dry run           : $DRY_RUN"
+    echo ""
+
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] Would flatten t2/adc/dwi from prostate158_train/train/<case_id>/"
+        info "[dry-run] Would write: <case_id>_{t2,adc,dwi}.nii.gz"
+        success "Prostate158 SSL flattening dry run complete."
+        return
+    fi
+
+    if [[ -f "$UNLABELED_DONE_MARKER" ]]; then
+        n_files="$(find "$UNLABELED_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
+        success "Flattened SSL files already prepared ($n_files .nii.gz files in $UNLABELED_DIR) - skipping."
+        echo "  Delete $UNLABELED_DONE_MARKER to regenerate."
+        return
+    fi
+
+    python3 - <<PYEOF
+import shutil
+from collections import defaultdict
+from pathlib import Path
+
+train_dir = Path("$PROSTATE158_TRAIN_DIR") / "train"
+out_dir = Path("$UNLABELED_DIR")
+out_dir.mkdir(parents=True, exist_ok=True)
+
+wanted = {
+    "t2.nii.gz": "t2",
+    "adc.nii.gz": "adc",
+    "dwi.nii.gz": "dwi",
+}
+case_modalities = defaultdict(set)
+written = 0
+already_present = 0
+
+if not train_dir.is_dir():
+    raise FileNotFoundError(f"Expected Prostate158 train cases under {train_dir}")
+
+for case_dir in sorted(p for p in train_dir.iterdir() if p.is_dir()):
+    case_id = case_dir.name
+    for filename, modality in wanted.items():
+        src = case_dir / filename
+        if not src.exists():
+            continue
+        dst = out_dir / f"{case_id}_{modality}.nii.gz"
+        if dst.exists():
+            already_present += 1
+        else:
+            shutil.copy2(src, dst)
+            written += 1
         case_modalities[case_id].add(modality)
 
-cases = sorted(case_modalities.keys(), key=int)
+cases = sorted(case_modalities.keys())
 complete_cases = sum(1 for cid in cases if len(case_modalities[cid]) == 3)
 incomplete_cases = [cid for cid in cases if len(case_modalities[cid]) != 3]
 
-print("  Extraction complete.")
-print(f"  Cases found      : {len(cases)}")
-print(f"  Complete cases   : {complete_cases}")
-print(f"  Files written    : {written}")
+print(f"  Cases found       : {len(cases)}")
+print(f"  Complete cases    : {complete_cases}")
+print(f"  Files written     : {written}")
 print(f"  Files pre-existing: {already_present}")
-print(f"  Archive entries ignored: {ignored}")
-
 if incomplete_cases:
     preview = ", ".join(incomplete_cases[:10])
     suffix = " ..." if len(incomplete_cases) > 10 else ""
@@ -543,14 +618,26 @@ if incomplete_cases:
 PYEOF
 
     n_files="$(find "$UNLABELED_DIR" -name '*.nii.gz' | wc -l | tr -d ' ')"
-    success "Prepared $n_files unlabeled files in $UNLABELED_DIR"
-
-    if [[ "$KEEP_ZIP" == false ]]; then
-        rm -f "$zip_path"
-        info "Removed $zip_name"
-    fi
-
+    success "Prepared $n_files flattened SSL files in $UNLABELED_DIR"
     touch "$UNLABELED_DONE_MARKER"
+}
+
+download_unlabeled_images() {
+    download_prostate158_archive \
+        "train" \
+        "$PROSTATE158_TRAIN_ZIP_URL" \
+        "$PROSTATE158_TRAIN_ZIP_NAME" \
+        "$PROSTATE158_TRAIN_DIR" \
+        "$PROSTATE158_TRAIN_DONE_MARKER"
+
+    download_prostate158_archive \
+        "test" \
+        "$PROSTATE158_TEST_ZIP_URL" \
+        "$PROSTATE158_TEST_ZIP_NAME" \
+        "$PROSTATE158_TEST_DIR" \
+        "$PROSTATE158_TEST_DONE_MARKER"
+
+    prepare_prostate158_unlabeled_flat
 }
 
 download_labels() {
@@ -669,7 +756,7 @@ if [[ "$DOWNLOAD_IMAGES" == true ]]; then
     echo "  Image folds      : fold0 - fold$((N_FOLDS - 1))  ($N_FOLDS of $TOTAL_FOLDS)"
 fi
 echo "  Download labels  : $DOWNLOAD_LABELS"
-echo "  Download unlabeled: $DOWNLOAD_UNLABELED"
+echo "  Download Prostate158: $DOWNLOAD_UNLABELED"
 echo "  Keep zip files   : $KEEP_ZIP"
 echo "  Dry run          : $DRY_RUN"
 
@@ -688,7 +775,7 @@ fi
 if [[ "$DOWNLOAD_UNLABELED" == true ]]; then
     download_unlabeled_images
 else
-    info "Skipping unlabeled image download."
+    info "Skipping Prostate158 train/test download."
 fi
 
 echo ""
@@ -705,7 +792,9 @@ else
         echo "  Labels      : $LABELS_DIR"
     fi
     if [[ "$DOWNLOAD_UNLABELED" == true ]]; then
-        echo "  Unlabeled   : $UNLABELED_DIR"
+        echo "  Prostate158 train : $PROSTATE158_TRAIN_DIR"
+        echo "  Prostate158 test  : $PROSTATE158_TEST_DIR"
+        echo "  SSL unlabeled     : $UNLABELED_DIR"
     fi
     echo ""
     echo "Start training with:"

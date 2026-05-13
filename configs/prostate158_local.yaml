@@ -1,0 +1,97 @@
+experiment_name: prostate158_local
+epochs: 5
+batch_size: 2
+learning_rate: 2.0e-4
+weight_decay: 1.0e-5
+num_workers: 2
+device: cuda
+base_output_dir: outputs/runs
+random_seed: 42
+deterministic: false
+
+# Data
+dataset_type: prostate158
+prostate158_train_dir: data/prostate158_train
+prostate158_test_dir: data/prostate158_test
+prostate158_train_split: train
+prostate158_val_split: valid
+prostate158_test_split: test
+prostate158_label_target: tumor
+prostate158_label_reader: 1
+images_dir: data/prostate158_train
+labels_dir: data/prostate158_train
+target_spacing: [3.0, 0.5, 0.5]
+val_fraction: 0.2
+
+# Patch sampling
+patch_size: [16, 128, 128]
+pos_fraction: 0.75
+num_samples: 1
+
+# Model
+model: unet3d
+use_t2w: true
+use_adc: true
+use_hbv: true
+out_channels: 1
+features: [32, 64, 128, 256]
+deep_supervision: false
+
+# Deconver-specific hyperparameters
+deconver_encoder_depth: [1, 1, 1, 1]
+deconver_encoder_width: [64, 128, 256, 512]
+deconver_strides: [1, 2, 2, 2]
+deconver_kernel_size: [3, 3, 3]
+deconver_groups: -1
+deconver_ndc_ratio: 4
+
+# Loss
+dice_weight: 1.0
+bce_weight: 1.0
+bce_pos_weight: 10.0
+
+# DWI -> HBV preprocessing for Prostate158
+dwi_hbv_preprocess:
+  enabled: true
+  clip_percentiles: [1.0, 99.5]
+  log1p: true
+
+# Validation
+sw_overlap: 0.5
+sw_batch_size: 2
+val_min_sw_batch_size: 1
+val_compute_hd95_every: 0
+val_every: 1
+val_start_epoch: 1
+
+# Prediction / post-processing
+pred_threshold: 0.5
+postprocess_enabled: false
+postprocess_min_component_volume_mm3: 30.0
+postprocess_connectivity: 26
+
+# Runtime
+use_amp: true
+amp_dtype: bf16
+use_compile: false
+cache_mode: ram
+cache_rate: 1.0
+
+# Checkpointing
+keep_last_checkpoints: 3
+pretrained_encoder_checkpoint: ""
+freeze_encoder_epochs: 0
+
+# Best checkpoint selection
+best_ckpt_w_sensitivity: 0.5
+best_ckpt_w_dice: 0.3
+best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
+
+# Early stopping
+early_stopping_patience: 0
+early_stopping_min_delta: 0.001
+
+ntfy_url: ""
+ntfy_topic: ""
+ntfy_notify_best_model: true

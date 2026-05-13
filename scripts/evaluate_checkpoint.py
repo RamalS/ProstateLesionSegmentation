@@ -1,11 +1,12 @@
 """
 evaluate_checkpoint.py — Load a trained checkpoint and evaluate on the
-fixed hold-out test set (data/test_images/).
+configured hold-out test set.
 
 The test set is a permanently reserved group of 10 PI-CAI cases (5 positive,
 5 negative) that are segregated from the training pool by download_dataset.sh.
 Using a fixed set makes all evaluation runs directly comparable across
-checkpoints and training runs.
+checkpoints and training runs. For ``dataset_type: prostate158`` runs, the
+script reads the Prostate158 test CSV from ``prostate158_test_dir`` instead.
 
 Usage
 -----
@@ -62,9 +63,10 @@ sys.path.insert(0, str(_SRC))
 from config import load_config  # noqa: E402
 from dataset import (  # noqa: E402
     PiCaiDataset,
+    annotate_cases_with_lesion_flags,
     active_modality_pairs,
     discover_cases,
-    stratified_train_val_split,
+    discover_prostate158_cases,
 )
 from metrics import compute_all_metrics  # noqa: E402
 from models import build_model  # noqa: E402
@@ -561,6 +563,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="",
+        metavar="NAME_OR_PATH",
+        help=(
+            "Checkpoint to evaluate. Accepts a filename inside <run>/checkpoints "
+            "(e.g. best.pt) or an explicit path. Default opens the selector."
+        ),
+    )
+    parser.add_argument(
         "--images-dir",
         type=str,
         default="data/test_images",
@@ -573,6 +585,27 @@ def main() -> None:
         default="data/labels",
         metavar="DIR",
         help="Directory containing .nii.gz label masks",
+    )
+    parser.add_argument(
+        "--dataset-type",
+        type=str,
+        default="",
+        choices=["", "picai", "prostate158"],
+        help="Dataset adapter to use. Default reads dataset_type from the run config.",
+    )
+    parser.add_argument(
+        "--prostate158-root",
+        type=str,
+        default="",
+        metavar="DIR",
+        help="Extracted Prostate158 test root. Default reads prostate158_test_dir from config.",
+    )
+    parser.add_argument(
+        "--prostate158-label-reader",
+        type=str,
+        default="",
+        metavar="N",
+        help="Prostate158 label reader to evaluate against. Default reads config or uses 1.",
     )
     parser.add_argument(
         "--device",
@@ -648,8 +681,16 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ---- Select checkpoint interactively ----------------------------------------
-    ckpt_path = select_checkpoint(ckpts_dir)
+    # ---- Select checkpoint ------------------------------------------------------
+    if args.checkpoint:
+        requested = Path(args.checkpoint)
+        ckpt_path = requested if requested.is_absolute() else ckpts_dir / requested
+        ckpt_path = ckpt_path.resolve()
+        if not ckpt_path.exists():
+            logger.error("Requested checkpoint not found: %s", ckpt_path)
+            sys.exit(1)
+    else:
+        ckpt_path = select_checkpoint(ckpts_dir)
     logger.info("Selected checkpoint: %s", ckpt_path.name)
 
     # ---- Device -----------------------------------------------------------------
@@ -669,29 +710,51 @@ def main() -> None:
     model.eval()
 
     # ---- Discover + annotate cases ----------------------------------------------
-    images_dir = Path(args.images_dir)
-    labels_dir = Path(args.labels_dir)
+    dataset_type = (
+        args.dataset_type
+        or str(cfg.get("dataset_type", "picai")).strip().lower()
+        or "picai"
+    )
+    active_modalities = [key for key, _ in active_modality_pairs(cfg)]
 
-    logger.info("Discovering cases in %s ...", images_dir)
-    all_cases = discover_cases(images_dir, labels_dir)
+    if dataset_type == "prostate158":
+        images_dir = Path(
+            args.prostate158_root
+            or cfg.get("prostate158_test_dir", "data/prostate158_test")
+        )
+        labels_dir = images_dir
+        label_reader = (
+            args.prostate158_label_reader
+            or cfg.get("prostate158_label_reader", 1)
+        )
+        logger.info("Discovering Prostate158 test cases in %s ...", images_dir)
+        test_cases = discover_prostate158_cases(
+            root_dir=images_dir,
+            split=str(cfg.get("prostate158_test_split", "test")),
+            active_keys=active_modalities,
+            label_target=str(cfg.get("prostate158_label_target", "tumor")),
+            label_reader=label_reader,
+            label_modality=cfg.get("prostate158_label_modality"),
+        )
+    elif dataset_type == "picai":
+        images_dir = Path(args.images_dir)
+        labels_dir = Path(args.labels_dir)
+        logger.info("Discovering cases in %s ...", images_dir)
+        test_cases = discover_cases(images_dir, labels_dir, active_keys=active_modalities)
+    else:
+        logger.error("Unsupported dataset_type: %s", dataset_type)
+        sys.exit(1)
 
-    if not all_cases:
+    if not test_cases:
         logger.error(
             "No cases found in %s. Check that the data directory is correct.",
             images_dir,
         )
         sys.exit(1)
 
-    # stratified_train_val_split annotates every case dict with has_lesion
-    # in-place (reads all label files once).  We call it purely for that
-    # side-effect; the actual split result is not used here.
-    logger.info(
-        "Annotating %d test cases with has_lesion ...",
-        len(all_cases),
-    )
-    stratified_train_val_split(all_cases, val_fraction=0.2, seed=42)
+    logger.info("Annotating %d test cases with has_lesion ...", len(test_cases))
+    annotate_cases_with_lesion_flags(test_cases)
 
-    test_cases = all_cases
     pos_count  = sum(1 for c in test_cases if c.get("has_lesion", False))
     neg_count  = len(test_cases) - pos_count
 
@@ -704,8 +767,6 @@ def main() -> None:
     )
     sw_overlap    = float(cfg.get("sw_overlap", 0.5))
     sw_batch_size = int(cfg.get("sw_batch_size", 4))
-    active_modalities = [key for key, _ in active_modality_pairs(cfg)]
-
     ds = PiCaiDataset(
         images_dir=images_dir,
         labels_dir=labels_dir,
@@ -713,6 +774,7 @@ def main() -> None:
         transform=get_val_transforms(),
         cases=test_cases,
         active_modalities=active_modalities,
+        dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
     )
 
     loader = DataLoader(
@@ -729,6 +791,7 @@ def main() -> None:
     print(f"  Epoch       : {ckpt_epoch}   |   Best val Dice (training): {_fmt(best_val_dice)}")
     print(f"  Device      : {device}")
     print(f"  Test cases  : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
+    print(f"  Dataset     : {dataset_type}")
     print(f"  Images dir  : {images_dir}")
     print(f"  Modalities  : {active_modalities}")
     print(f"  Patch size  : {patch_size}   SW overlap: {sw_overlap}")
@@ -881,6 +944,7 @@ def main() -> None:
             "best_val_dice_training": _json_float(best_val_dice),
         },
         "dataset": {
+            "dataset_type": dataset_type,
             "images_dir": str(images_dir),
             "labels_dir": str(labels_dir),
             "total_cases": len(per_case),

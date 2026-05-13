@@ -1248,7 +1248,11 @@ try:
 
     import numpy as np
 
-    from dataset import _preprocess_dwi_as_hbv, discover_unlabeled_cases
+    from dataset import (
+        _preprocess_dwi_as_hbv,
+        discover_prostate158_cases,
+        discover_unlabeled_cases,
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1296,6 +1300,46 @@ try:
             ok("inactive HBV key is absent from unlabeled case dicts")
         else:
             fail("HBV key unexpectedly present when active_keys excludes 'hbv'")
+
+        prostate_root = root / "prostate158_train"
+        case_dir = prostate_root / "train" / "020"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        for filename in (
+            "t2.nii.gz",
+            "adc.nii.gz",
+            "dwi.nii.gz",
+            "adc_tumor_reader1.nii.gz",
+        ):
+            (case_dir / filename).touch()
+        (prostate_root / "train.csv").write_text(
+            "t2,adc,dwi,adc_tumor_reader1\n"
+            "train/020/t2.nii.gz,train/020/adc.nii.gz,"
+            "train/020/dwi.nii.gz,train/020/adc_tumor_reader1.nii.gz\n"
+        )
+
+        prostate_cases = discover_prostate158_cases(
+            prostate_root,
+            split="train",
+            active_keys=["t2w", "adc", "hbv"],
+        )
+        if len(prostate_cases) == 1 and prostate_cases[0]["case_id"] == "020":
+            ok("discover_prostate158_cases reads upstream CSV rows")
+        else:
+            fail(
+                "discover_prostate158_cases expected one CSV case "
+                f"(got {len(prostate_cases)})"
+            )
+
+        if prostate_cases and prostate_cases[0].get("hbv_source") == "dwi":
+            ok("discover_prostate158_cases maps dwi -> hbv")
+        else:
+            fail("discover_prostate158_cases did not tag DWI as HBV source")
+
+        expected_label = case_dir / "adc_tumor_reader1.nii.gz"
+        if prostate_cases and prostate_cases[0].get("label") == expected_label:
+            ok("discover_prostate158_cases selects adc_tumor_reader1 by default")
+        else:
+            fail("discover_prostate158_cases selected the wrong default label")
 
     raw = np.array([-5.0, 0.0, 1.0, np.nan, np.inf], dtype=np.float32)
     proc = _preprocess_dwi_as_hbv(

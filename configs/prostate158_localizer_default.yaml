@@ -1,4 +1,4 @@
-experiment_name: prostate158_deconver
+experiment_name: prostate158_localizer
 epochs: 300
 batch_size: 8
 learning_rate: 1.0e-4
@@ -8,7 +8,7 @@ device: cuda
 base_output_dir: /outputs/runs
 random_seed: 42
 deterministic: false
-task: lesion_segmentation
+task: prostate_localization
 
 # Data
 dataset_type: prostate158
@@ -19,7 +19,7 @@ prostate158_val_split: valid
 prostate158_test_split: test
 prostate158_label_target: tumor
 prostate158_label_reader: 1
-# prostate158_prostate_label_col: t2_prostate_reader1
+prostate158_prostate_label_col: t2_prostate_reader1
 images_dir: /data/prostate158_train
 labels_dir: /data/prostate158_train
 target_spacing: [3.0, 0.5, 0.5]

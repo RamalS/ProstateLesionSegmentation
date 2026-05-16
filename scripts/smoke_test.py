@@ -1309,12 +1309,14 @@ try:
             "adc.nii.gz",
             "dwi.nii.gz",
             "adc_tumor_reader1.nii.gz",
+            "t2_prostate_reader1.nii.gz",
         ):
             (case_dir / filename).touch()
         (prostate_root / "train.csv").write_text(
-            "t2,adc,dwi,adc_tumor_reader1\n"
+            "t2,adc,dwi,adc_tumor_reader1,t2_prostate_reader1\n"
             "train/020/t2.nii.gz,train/020/adc.nii.gz,"
-            "train/020/dwi.nii.gz,train/020/adc_tumor_reader1.nii.gz\n"
+            "train/020/dwi.nii.gz,train/020/adc_tumor_reader1.nii.gz,"
+            "train/020/t2_prostate_reader1.nii.gz\n"
         )
 
         prostate_cases = discover_prostate158_cases(
@@ -1340,6 +1342,21 @@ try:
             ok("discover_prostate158_cases selects adc_tumor_reader1 by default")
         else:
             fail("discover_prostate158_cases selected the wrong default label")
+
+        prostate_cases_with_gland = discover_prostate158_cases(
+            prostate_root,
+            split="train",
+            active_keys=["t2w", "adc", "hbv"],
+            prostate_label_col="t2_prostate_reader1",
+        )
+        expected_prostate = case_dir / "t2_prostate_reader1.nii.gz"
+        if (
+            prostate_cases_with_gland
+            and prostate_cases_with_gland[0].get("prostate_label") == expected_prostate
+        ):
+            ok("discover_prostate158_cases attaches prostate_label when requested")
+        else:
+            fail("discover_prostate158_cases did not attach requested prostate_label")
 
     raw = np.array([-5.0, 0.0, 1.0, np.nan, np.inf], dtype=np.float32)
     proc = _preprocess_dwi_as_hbv(
@@ -1379,6 +1396,219 @@ try:
 
 except Exception as exc:
     fail("Prostate158 helper test failed", exc)
+
+# ---------------------------------------------------------------------------
+# 6e. ROI helpers + ROI dataset path
+# ---------------------------------------------------------------------------
+section("6e. ROI helpers and ROI dataset path")
+
+if _sitk is None:
+    skip("SimpleITK not installed — skipping ROI dataset tests")
+else:
+    try:
+        import tempfile
+
+        import numpy as np
+        import SimpleITK as sitk  # noqa: N813
+
+        from dataset import PiCaiDataset
+        from postprocess import logits_to_binary_mask
+        from roi import (
+            compute_crop_bounds,
+            restore_from_roi,
+            resolve_roi_settings,
+            validate_task_and_roi_config,
+        )
+        from transforms import get_train_transforms
+
+        try:
+            validate_task_and_roi_config(
+                {
+                    "task": "lesion_segmentation",
+                    "roi": {"mode": "gt_mask"},
+                    "prostate158_prostate_label_col": "t2_prostate_reader1",
+                },
+                "picai",
+            )
+            fail("gt_mask ROI should fail fast on dataset_type='picai'")
+        except ValueError:
+            ok("gt_mask ROI fails fast on non-prostate158 datasets")
+
+        default_roi_settings = resolve_roi_settings(
+            {
+                "roi": {
+                    "mode": "predicted_mask",
+                    "localizer_run": "x",
+                }
+            }
+        )
+        if default_roi_settings.margin_mm == (3.0, 6.0, 6.0):
+            ok("ROI settings use halved code default margin when margin_mm is omitted")
+        else:
+            fail(
+                "ROI default margin mismatch: "
+                f"got {default_roi_settings.margin_mm}, expected (3.0, 6.0, 6.0)"
+            )
+
+        explicit_roi_settings = resolve_roi_settings(
+            {
+                "roi": {
+                    "mode": "predicted_mask",
+                    "localizer_run": "x",
+                    "margin_mm": [1.0, 2.0, 3.0],
+                }
+            }
+        )
+        if explicit_roi_settings.margin_mm == (1.0, 2.0, 3.0):
+            ok("ROI settings preserve explicit config margin override")
+        else:
+            fail(
+                "ROI explicit margin override mismatch: "
+                f"got {explicit_roi_settings.margin_mm}, expected (1.0, 2.0, 3.0)"
+            )
+
+        mask = np.zeros((12, 40, 40), dtype=np.uint8)
+        mask[3:6, 10:20, 15:25] = 1
+        bounds = compute_crop_bounds(
+            mask=mask,
+            spacing_zyx=(3.0, 0.5, 0.5),
+            margin_mm=(0.0, 0.0, 0.0),
+            min_size_vox=(4, 16, 16),
+            fallback_to_full_volume=True,
+        )
+        roi_logits = torch.ones(1, 1, 4, 16, 16)
+        restored = restore_from_roi(roi_logits, bounds.as_dict())
+        if restored.shape == (1, 1, 12, 40, 40) and float(restored.sum()) == float(roi_logits.sum()):
+            ok("ROI restore pastes ROI-space tensor back into full-volume grid")
+        else:
+            fail(f"ROI restore shape/content mismatch: {tuple(restored.shape)}")
+
+        restored_bin = logits_to_binary_mask(restored, threshold=0.5)
+        if int(restored_bin.sum().item()) == int(roi_logits.numel()):
+            ok("ROI-restored zero-padding stays background after thresholding")
+        else:
+            fail("ROI-restored zero-padding became foreground after thresholding")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images_dir = root / "images"
+            labels_dir = root / "labels"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            labels_dir.mkdir(parents=True, exist_ok=True)
+
+            case_id = "roi_case"
+            image_arr = np.zeros((20, 96, 96), dtype=np.float32)
+            image_arr[:, 20:76, 20:76] = 100.0
+            lesion_arr = np.zeros((20, 96, 96), dtype=np.uint8)
+            lesion_arr[8:12, 42:54, 44:56] = 1
+            prostate_arr = np.zeros((20, 96, 96), dtype=np.uint8)
+            prostate_arr[6:14, 28:72, 30:74] = 1
+
+            def _write_image(path: Path, arr: np.ndarray, spacing_xyz: tuple[float, float, float]) -> None:
+                img = sitk.GetImageFromArray(arr)
+                img.SetSpacing(spacing_xyz)
+                sitk.WriteImage(img, str(path))
+
+            _write_image(images_dir / f"{case_id}_t2w.mha", image_arr, (0.5, 0.5, 3.0))
+            _write_image(labels_dir / f"{case_id}.nii.gz", lesion_arr, (0.5, 0.5, 3.0))
+            prostate_path = labels_dir / f"{case_id}_prostate.nii.gz"
+            _write_image(prostate_path, prostate_arr, (0.5, 0.5, 3.0))
+
+            case = {
+                "case_id": case_id,
+                "t2w": images_dir / f"{case_id}_t2w.mha",
+                "label": labels_dir / f"{case_id}.nii.gz",
+                "prostate_label": prostate_path,
+            }
+
+            roi_cfg = {
+                "task": "lesion_segmentation",
+                "roi": {
+                    "mode": "gt_mask",
+                    "margin_mm": [0.0, 0.0, 0.0],
+                    "min_size_vox": [4, 32, 32],
+                    "fallback_to_full_volume": True,
+                },
+                "prostate158_prostate_label_col": "t2_prostate_reader1",
+            }
+            _, roi_settings = validate_task_and_roi_config(roi_cfg, "prostate158")
+
+            ds_gt = PiCaiDataset(
+                images_dir=images_dir,
+                labels_dir=labels_dir,
+                target_spacing=(3.0, 0.5, 0.5),
+                transform=None,
+                cases=[case],
+                active_modalities=["t2w"],
+                task="lesion_segmentation",
+                roi_settings=roi_settings,
+                include_full_resampled=True,
+            )
+            sample_gt = ds_gt[0]
+            if sample_gt["image"].shape[1:] == (8, 44, 44) and sample_gt["full_label"].shape[1:] == (20, 96, 96):
+                ok("gt_mask ROI crops lesion sample and keeps full_label for restoration")
+            else:
+                fail(
+                    "gt_mask ROI sample shapes mismatch: "
+                    f"crop={tuple(sample_gt['image'].shape)}, full={tuple(sample_gt['full_label'].shape)}"
+                )
+
+            ds_loc = PiCaiDataset(
+                images_dir=images_dir,
+                labels_dir=labels_dir,
+                target_spacing=(3.0, 0.5, 0.5),
+                transform=None,
+                cases=[case],
+                active_modalities=["t2w"],
+                task="prostate_localization",
+                roi_settings=roi_settings,
+            )
+            sample_loc = ds_loc[0]
+            if sample_loc["label"].shape[1:] == (20, 96, 96) and int(sample_loc["label"].sum().item()) > 0:
+                ok("prostate_localization task switches supervision target to prostate mask")
+            else:
+                fail("prostate_localization task did not expose prostate mask target")
+
+            ds_pred = PiCaiDataset(
+                images_dir=images_dir,
+                labels_dir=labels_dir,
+                target_spacing=(3.0, 0.5, 0.5),
+                transform=get_train_transforms(patch_size=(4, 32, 32), num_samples=1),
+                cases=[dict(case)],
+                active_modalities=["t2w"],
+                task="lesion_segmentation",
+                roi_settings=validate_task_and_roi_config(
+                    {
+                        "task": "lesion_segmentation",
+                        "roi": {
+                            "mode": "predicted_mask",
+                            "localizer_run": str(root / "fake_localizer"),
+                            "margin_mm": [0.0, 0.0, 0.0],
+                            "min_size_vox": [4, 32, 32],
+                        },
+                    },
+                    "prostate158",
+                )[1],
+            )
+
+            class _StubLocalizer:
+                def predict_mask(self, _case: dict) -> np.ndarray:
+                    return prostate_arr.astype(np.float32)
+
+            ds_pred._roi_localizer = _StubLocalizer()  # type: ignore[assignment]
+            sample_pred = ds_pred[0]
+            if isinstance(sample_pred, list):
+                sample_pred = sample_pred[0]
+            if sample_pred["image"].shape == (1, 4, 32, 32):
+                ok("predicted_mask ROI crops before train-time patch sampling")
+            else:
+                fail(
+                    "predicted_mask ROI train sample shape mismatch: "
+                    f"{tuple(sample_pred['image'].shape)}"
+                )
+
+    except Exception as exc:
+        fail("ROI helper / dataset test failed", exc)
 
 # ---------------------------------------------------------------------------
 # 7. Transforms (requires MONAI)
@@ -1778,6 +2008,15 @@ try:
             "t2w_vol":  rng_np.standard_normal((D, H, W)).astype(np.float32),
             "gt_vol":   (rng_np.random((D, H, W)) > 0.85).astype(np.float32),
             "pred_vol": (rng_np.random((D, H, W)) > 0.85).astype(np.float32),
+            "roi_bounds": (
+                {
+                    "start_zyx": (4, 10, 12),
+                    "end_zyx": (18, 36, 34),
+                    "full_shape_zyx": (D, H, W),
+                    "used_fallback": False,
+                }
+                if i == 0 else None
+            ),
         }
         for i in range(3)
     ]

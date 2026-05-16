@@ -38,14 +38,21 @@ Output
 from __future__ import annotations
 
 import argparse
+import csv
 import curses
 import json
 import logging
 import math
+import os
+import re
+import subprocess
 import sys
 import warnings
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 import torch
@@ -71,6 +78,7 @@ from dataset import (  # noqa: E402
 from metrics import compute_all_metrics  # noqa: E402
 from models import build_model  # noqa: E402
 from postprocess import postprocess_logits  # noqa: E402
+from roi import restore_from_roi, validate_task_and_roi_config  # noqa: E402
 from transforms import get_val_transforms  # noqa: E402
 from utils import load_checkpoint  # noqa: E402
 
@@ -103,6 +111,33 @@ _GT_COLOR:   tuple[float, float, float] = (0.0, 1.0, 0.0)   # green — ground t
 _PRED_COLOR: tuple[float, float, float] = (1.0, 0.0, 0.0)   # red   — prediction
 _OVL_COLOR:  tuple[float, float, float] = (1.0, 1.0, 0.0)   # yellow — overlap
 _OVERLAY_ALPHA: float = 0.50
+
+
+@dataclass(frozen=True)
+class RunCandidate:
+    """Run directory candidate shown in the interactive model selector."""
+    run_dir: Path
+    label: str
+
+
+@dataclass(frozen=True)
+class ROIVariant:
+    """ROI override option selected in interactive batch mode."""
+    label: str
+    mode: str
+    localizer_run: str = ""
+
+
+@dataclass(frozen=True)
+class BatchEvalJob:
+    """One concrete evaluation job in interactive batch mode."""
+    run_dir: Path
+    checkpoint: Path
+    dataset_type: str
+    roi_mode: str
+    roi_localizer_run: str
+    summary_json: Path
+    vis_output: Path
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +186,78 @@ def _section(title: str) -> None:
     """Print a labelled section divider to stdout."""
     bar = "─" * 68
     print(f"\n{bar}\n  {title}\n{bar}")
+
+
+def _roi_triplet_from_collate(value: Any, key: str) -> tuple[int, int, int]:
+    """
+    Parse one ROI triplet field from DataLoader-collated batch payload.
+
+    Supports these common collated forms:
+    - list[tensor([z]), tensor([y]), tensor([x])]
+    - tensor([[z, y, x]]) or tensor([z, y, x])
+    """
+    if isinstance(value, torch.Tensor):
+        arr = value.detach().cpu()
+        if arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[1] == 3:
+            vals = arr[0].tolist()
+            return int(vals[0]), int(vals[1]), int(vals[2])
+        if arr.ndim == 1 and arr.numel() == 3:
+            vals = arr.tolist()
+            return int(vals[0]), int(vals[1]), int(vals[2])
+        raise ValueError(
+            f"Unexpected tensor shape for roi.{key}: {tuple(arr.shape)}"
+        )
+
+    if isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError(f"Expected 3 values for roi.{key}, got {len(value)}")
+        out: list[int] = []
+        for item in value:
+            if isinstance(item, torch.Tensor):
+                flat = item.detach().cpu().reshape(-1)
+                if flat.numel() != 1:
+                    raise ValueError(
+                        f"Expected scalar tensor entries for roi.{key}, got {tuple(item.shape)}"
+                    )
+                out.append(int(flat[0].item()))
+            else:
+                out.append(int(item))
+        return out[0], out[1], out[2]
+
+    raise ValueError(f"Unsupported collated type for roi.{key}: {type(value)!r}")
+
+
+def _roi_bool_from_collate(value: Any) -> bool:
+    """Parse boolean ROI field from collated batch payload."""
+    if isinstance(value, torch.Tensor):
+        flat = value.detach().cpu().reshape(-1)
+        if flat.numel() == 0:
+            return False
+        return bool(flat[0].item())
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return False
+        head = value[0]
+        if isinstance(head, torch.Tensor):
+            flat = head.detach().cpu().reshape(-1)
+            return bool(flat[0].item()) if flat.numel() else False
+        return bool(head)
+    return bool(value)
+
+
+def _roi_bounds_from_collated_batch(roi_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize DataLoader-collated ROI metadata to restore_from_roi format."""
+    required = ("start_zyx", "end_zyx", "full_shape_zyx", "used_fallback")
+    missing = [k for k in required if k not in roi_payload]
+    if missing:
+        raise KeyError(f"ROI payload missing required key(s): {missing}")
+
+    return {
+        "start_zyx": _roi_triplet_from_collate(roi_payload["start_zyx"], "start_zyx"),
+        "end_zyx": _roi_triplet_from_collate(roi_payload["end_zyx"], "end_zyx"),
+        "full_shape_zyx": _roi_triplet_from_collate(roi_payload["full_shape_zyx"], "full_shape_zyx"),
+        "used_fallback": _roi_bool_from_collate(roi_payload["used_fallback"]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +354,7 @@ def save_visualization(
                   "t2w_vol"  np.ndarray (D, H, W)  z-scored T2w channel
                   "gt_vol"   np.ndarray (D, H, W)  binary GT mask
                   "pred_vol" np.ndarray (D, H, W)  binary prediction mask
+                  "roi_bounds" dict[str, Any] | None  ROI crop bounds metadata
     output_path : destination PNG file path
     n_cols      : number of axial slices per row
     """
@@ -281,6 +389,7 @@ def save_visualization(
         t2w_norm = _normalize_vol_for_display(res["t2w_vol"])  # (D, H, W) in [0,1]
         gt_vol   = res["gt_vol"]                               # (D, H, W) binary
         pred_vol = res["pred_vol"]                             # (D, H, W) binary
+        roi_bounds = res.get("roi_bounds")
 
         D = t2w_norm.shape[0]
         slice_indices = np.linspace(0, D - 1, n_cols, dtype=int)
@@ -301,6 +410,25 @@ def save_visualization(
                 _segmentation_overlay(gt_vol[s], pred_vol[s], _OVERLAY_ALPHA),
                 aspect="equal", interpolation="nearest",
             )
+
+            if (
+                isinstance(roi_bounds, Mapping)
+                and not bool(roi_bounds.get("used_fallback", False))
+            ):
+                start_z, start_y, start_x = (int(v) for v in roi_bounds["start_zyx"])
+                end_z, end_y, end_x = (int(v) for v in roi_bounds["end_zyx"])
+                if start_z <= s < end_z:
+                    ax.add_patch(
+                        mpatches.Rectangle(
+                            (start_x - 0.5, start_y - 0.5),
+                            end_x - start_x,
+                            end_y - start_y,
+                            fill=False,
+                            edgecolor="#00D7FF",
+                            linewidth=0.9,
+                            linestyle="-",
+                        )
+                    )
 
             ax.set_xticks([])
             ax.set_yticks([])
@@ -334,11 +462,12 @@ def save_visualization(
         mpatches.Patch(facecolor=(*_GT_COLOR,   0.9), label="Ground truth (GT)"),
         mpatches.Patch(facecolor=(*_PRED_COLOR, 0.9), label="Prediction"),
         mpatches.Patch(facecolor=(*_OVL_COLOR,  0.9), label="Overlap (GT ∩ Pred)"),
+        mpatches.Patch(facecolor="none", edgecolor="#00D7FF", linewidth=1.2, label="ROI crop"),
     ]
     fig.legend(
         handles=legend_patches,
         loc="lower center",
-        ncol=3,
+        ncol=4,
         fontsize=8,
         framealpha=0.3,
         facecolor="#333333",
@@ -568,6 +697,725 @@ def select_checkpoint(ckpts_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Interactive batch selection helpers
+# ---------------------------------------------------------------------------
+
+
+def _default_runs_root() -> str:
+    """Pick a sensible default runs root for local and Docker environments."""
+    docker_root = Path("/outputs/runs")
+    if docker_root.is_dir():
+        return str(docker_root)
+    return str((Path(__file__).resolve().parent.parent / "outputs" / "runs").resolve())
+
+
+def _slugify(value: str) -> str:
+    """Convert an arbitrary string to a filesystem-safe ASCII-ish token."""
+    token = "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in value)
+    token = token.strip("._")
+    return token or "item"
+
+
+def _directory_is_writable(path: Path) -> bool:
+    """Return True when *path* can be created and written by this process."""
+    probe: Path | None = None
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".write_probe_{os.getpid()}"
+        with probe.open("w", encoding="utf-8") as fh:
+            fh.write("ok")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:  # noqa: BLE001
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+
+def _default_vis_output_path(run_dir: Path, vis_name: str, repo_root: Path) -> Path:
+    """
+    Resolve a writable default visualization path.
+
+    Preference order:
+    1) <repo_root>/visualizations/<vis_name>
+    2) <outputs>/evaluation_summaries/<vis_name>
+    3) <run_dir>/<vis_name>
+    """
+    preferred_dir = (repo_root / "visualizations").resolve()
+    if _directory_is_writable(preferred_dir):
+        return preferred_dir / vis_name
+
+    fallback_dir = run_dir.resolve()
+    outputs_root = fallback_dir.parent.parent if fallback_dir.parent.name == "runs" else repo_root / "outputs"
+    shared_dir = (outputs_root / "evaluation_summaries").resolve()
+    logger.warning(
+        "Visualization directory is not writable (%s). Trying shared fallback locations.",
+        preferred_dir,
+    )
+
+    if _directory_is_writable(shared_dir):
+        logger.warning(
+            "Writing visualization to shared summaries directory: %s",
+            shared_dir,
+        )
+        return shared_dir / vis_name
+
+    logger.warning(
+        "Shared summaries directory is not writable (%s). Falling back to %s",
+        shared_dir,
+        fallback_dir,
+    )
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    return fallback_dir / vis_name
+
+
+def _default_eval_summary_path(run_dir: Path, summary_name: str, repo_root: Path) -> Path:
+    """
+    Resolve a writable default evaluation summary path.
+
+    Evaluation commonly runs from Docker as a UID that can read historical run
+    directories but cannot write into them. Keep summaries beside the run when
+    possible; otherwise use a shared outputs-level summaries directory.
+    """
+    run_dir = run_dir.resolve()
+    if _directory_is_writable(run_dir):
+        return run_dir / summary_name
+
+    outputs_root = run_dir.parent.parent if run_dir.parent.name == "runs" else repo_root / "outputs"
+    fallback_dir = (outputs_root / "evaluation_summaries").resolve()
+    if _directory_is_writable(fallback_dir):
+        logger.warning(
+            "Run directory is not writable (%s). Writing summary to %s",
+            run_dir,
+            fallback_dir,
+        )
+        return fallback_dir / f"{run_dir.name}_{summary_name}"
+
+    logger.warning(
+        "Neither run directory nor evaluation_summaries is writable. Falling back to %s",
+        run_dir,
+    )
+    return run_dir / summary_name
+
+
+def _format_run_candidate_label(run_dir: Path) -> str:
+    """Build a compact run label with config metadata for selector display."""
+    cfg_path = run_dir / "config.yaml"
+    model = "?"
+    dataset_type = "?"
+    try:
+        cfg = load_config(str(cfg_path))
+        model = str(cfg.get("model", "?")).strip() or "?"
+        dataset_type = str(cfg.get("dataset_type", "?")).strip() or "?"
+    except Exception:  # noqa: BLE001
+        pass
+    return f"{run_dir.name}   [{model} | {dataset_type}]"
+
+
+def _discover_run_candidates(runs_root: Path) -> list[RunCandidate]:
+    """Discover runnable model directories from runs_root."""
+    if not runs_root.is_dir():
+        return []
+
+    run_dirs = sorted(
+        [d for d in runs_root.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+        reverse=True,
+    )
+    out: list[RunCandidate] = []
+    for run_dir in run_dirs:
+        cfg_path = run_dir / "config.yaml"
+        ckpt_dir = run_dir / "checkpoints"
+        if not cfg_path.exists() or not ckpt_dir.is_dir():
+            continue
+        if not any(ckpt_dir.glob("*.pt")):
+            continue
+        out.append(
+            RunCandidate(
+                run_dir=run_dir.resolve(),
+                label=_format_run_candidate_label(run_dir),
+            )
+        )
+    return out
+
+
+def _discover_roi_localizer_candidates(runs_root: Path) -> list[RunCandidate]:
+    """Discover ROI-localizer runs (task=prostate_localization) for predicted ROI mode."""
+    candidates = _discover_run_candidates(runs_root)
+    out: list[RunCandidate] = []
+    for candidate in candidates:
+        cfg_path = candidate.run_dir / "config.yaml"
+        try:
+            cfg = load_config(str(cfg_path))
+            task = str(cfg.get("task", "lesion_segmentation")).strip().lower()
+        except Exception:  # noqa: BLE001
+            continue
+        if task != "prostate_localization":
+            continue
+        out.append(candidate)
+    return out
+
+
+def _checkbox_menu(
+    title: str,
+    options: list[str],
+    *,
+    include_all: bool = True,
+    all_label: str = "All",
+    preselected: set[int] | None = None,
+) -> list[int]:
+    """
+    Curses multi-select UI.
+
+    Returns selected option indices in ``options`` order, excluding the synthetic
+    "All" row when ``include_all=True``.
+    """
+    if not options:
+        return []
+    if not sys.stdin.isatty():
+        return sorted(preselected or set(range(len(options))))
+
+    if preselected is None:
+        selected_opts = set(range(len(options)))
+    else:
+        selected_opts = {i for i in preselected if 0 <= i < len(options)}
+
+    rows = [all_label, *options] if include_all else list(options)
+    selected: set[int] = (
+        {idx + 1 for idx in selected_opts}
+        if include_all
+        else set(selected_opts)
+    )
+    if include_all and len(selected_opts) == len(options):
+        selected.add(0)
+
+    selected_idx = 0
+    scroll = 0
+
+    def _sync_all_row() -> None:
+        if not include_all:
+            return
+        option_rows = set(range(1, len(rows)))
+        if option_rows and option_rows.issubset(selected):
+            selected.add(0)
+        else:
+            selected.discard(0)
+
+    def _draw(stdscr: curses.window) -> None:
+        nonlocal scroll
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+
+        help_line = "↑/↓ move   Space toggle   PgUp/PgDn jump   Enter confirm   q quit"
+        stdscr.addstr(0, 0, title[: max_x - 1], curses.A_BOLD)
+        stdscr.addstr(1, 0, help_line[: max_x - 1], curses.A_DIM)
+        stdscr.addstr(2, 0, ("─" * (max_x - 1))[: max_x - 1])
+
+        visible = max(1, max_y - 4)
+        if selected_idx < scroll:
+            scroll = selected_idx
+        elif selected_idx >= scroll + visible:
+            scroll = selected_idx - visible + 1
+
+        for row_offset in range(visible):
+            row_idx = scroll + row_offset
+            if row_idx >= len(rows):
+                break
+            y = 3 + row_offset
+            mark = "[x]" if row_idx in selected else "[ ]"
+            prefix = "▶ " if row_idx == selected_idx else "  "
+            line = f"{prefix}{mark} {rows[row_idx]}"
+            attr = curses.A_REVERSE if row_idx == selected_idx else curses.A_NORMAL
+            stdscr.addstr(y, 0, line[: max_x - 1], attr)
+
+        stdscr.refresh()
+
+    def _run(stdscr: curses.window) -> list[int]:
+        nonlocal selected_idx
+        curses.curs_set(0)
+        stdscr.keypad(True)
+
+        while True:
+            _draw(stdscr)
+            key = stdscr.getch()
+
+            if key in (curses.KEY_UP, ord("k")):
+                selected_idx = max(0, selected_idx - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected_idx = min(len(rows) - 1, selected_idx + 1)
+            elif key == curses.KEY_PPAGE:
+                selected_idx = max(0, selected_idx - 5)
+            elif key == curses.KEY_NPAGE:
+                selected_idx = min(len(rows) - 1, selected_idx + 5)
+            elif key == ord(" "):
+                if include_all and selected_idx == 0:
+                    if 0 in selected:
+                        selected.clear()
+                    else:
+                        selected.update(range(len(rows)))
+                else:
+                    if selected_idx in selected:
+                        selected.discard(selected_idx)
+                    else:
+                        selected.add(selected_idx)
+                _sync_all_row()
+            elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+                if include_all:
+                    chosen = sorted(i - 1 for i in selected if i > 0)
+                else:
+                    chosen = sorted(selected)
+                if chosen:
+                    return chosen
+                curses.beep()
+            elif key in (ord("q"), ord("Q"), 27):
+                return []
+
+    try:
+        return curses.wrapper(_run)
+    except KeyboardInterrupt:
+        return []
+
+
+def _select_datasets_for_batch() -> list[str]:
+    """Interactive dataset checkbox step."""
+    keys = ["picai", "prostate158"]
+    labels = ["PI-CAI", "Prostate158"]
+    chosen = _checkbox_menu(
+        title="Dataset test",
+        options=labels,
+        include_all=True,
+        all_label="All datasets",
+    )
+    return [keys[i] for i in chosen]
+
+
+def _select_models_for_batch(candidates: list[RunCandidate]) -> list[RunCandidate]:
+    """Interactive model checkbox step."""
+    labels = [c.label for c in candidates]
+    chosen = _checkbox_menu(
+        title="Models",
+        options=labels,
+        include_all=True,
+        all_label="All models",
+    )
+    return [candidates[i] for i in chosen]
+
+
+def _select_roi_variants_for_batch(localizer_candidates: list[RunCandidate]) -> list[ROIVariant]:
+    """Interactive ROI checkbox step."""
+    variants: list[ROIVariant] = [
+        ROIVariant(label="Use each model config ROI setting", mode=""),
+        ROIVariant(label="Disabled ROI", mode="disabled"),
+        ROIVariant(
+            label=(
+                "GT prostate ROI (roi.mode=gt_mask, requires dataset=prostate158 "
+                "+ prostate label column)"
+            ),
+            mode="gt_mask",
+        ),
+    ]
+    variants.extend(
+        ROIVariant(
+            label=f"Predicted ROI via {c.run_dir.name}",
+            mode="predicted_mask",
+            localizer_run=str(c.run_dir),
+        )
+        for c in localizer_candidates
+    )
+
+    chosen = _checkbox_menu(
+        title="ROI model",
+        options=[v.label for v in variants],
+        include_all=True,
+        all_label="All ROI variants",
+        preselected={0},
+    )
+    return [variants[i] for i in chosen]
+
+
+def _roi_tag(mode: str, localizer_run: str) -> str:
+    if not mode:
+        return "roi_cfg"
+    if mode == "disabled":
+        return "roi_disabled"
+    if mode == "gt_mask":
+        return "roi_gt"
+    if mode == "predicted_mask":
+        return f"roi_pred_{_slugify(Path(localizer_run).name)}"
+    return f"roi_{_slugify(mode)}"
+
+
+def _build_batch_jobs(
+    selected_models: list[RunCandidate],
+    checkpoints_by_run: dict[Path, Path],
+    datasets: list[str],
+    roi_variants: list[ROIVariant],
+    repo_root: Path,
+    prostate158_prostate_label_col: str,
+    prostate158_root_override: str,
+    visualization_enabled: bool,
+) -> list[BatchEvalJob]:
+    """Create the cross-product jobs for selected datasets/models/ROI variants."""
+    jobs: list[BatchEvalJob] = []
+    for candidate in selected_models:
+        run_dir = candidate.run_dir
+        checkpoint = checkpoints_by_run[run_dir]
+        cfg_path = run_dir / "config.yaml"
+        base_cfg = load_config(str(cfg_path))
+        ckpt_tag = _slugify(checkpoint.stem)
+        for dataset_type in datasets:
+            for roi in roi_variants:
+                cfg_for_combo = _apply_roi_overrides(base_cfg, roi.mode, roi.localizer_run)
+                cfg_for_combo, _ = _ensure_prostate_label_col(
+                    cfg_for_combo,
+                    dataset_type=dataset_type,
+                    explicit_col=prostate158_prostate_label_col,
+                    prostate158_root_override=prostate158_root_override,
+                )
+                try:
+                    _ = validate_task_and_roi_config(cfg_for_combo, dataset_type)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Skipping incompatible combo run=%s dataset=%s roi=%s (%s)",
+                        run_dir.name,
+                        dataset_type,
+                        roi.mode or "config",
+                        exc,
+                    )
+                    continue
+
+                roi_tag = _roi_tag(roi.mode, roi.localizer_run)
+                summary_name = f"evaluation_summary_{dataset_type}_{roi_tag}_{ckpt_tag}.json"
+                vis_name = (
+                    f"{run_dir.name}_{dataset_type}_{roi_tag}_{ckpt_tag}_"
+                    "eval_visualization.png"
+                )
+                vis_output = (
+                    _default_vis_output_path(
+                        run_dir=run_dir,
+                        vis_name=vis_name,
+                        repo_root=repo_root,
+                    ).resolve()
+                    if visualization_enabled
+                    else (run_dir / vis_name).resolve()
+                )
+                jobs.append(
+                    BatchEvalJob(
+                        run_dir=run_dir,
+                        checkpoint=checkpoint,
+                        dataset_type=dataset_type,
+                        roi_mode=roi.mode,
+                        roi_localizer_run=roi.localizer_run,
+                        summary_json=_default_eval_summary_path(
+                            run_dir=run_dir,
+                            summary_name=summary_name,
+                            repo_root=repo_root,
+                        ).resolve(),
+                        vis_output=vis_output,
+                    )
+                )
+    return jobs
+
+
+def _batch_command_for_job(job: BatchEvalJob, args: argparse.Namespace) -> list[str]:
+    """Build subprocess argv for one batch job."""
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--run", str(job.run_dir),
+        "--checkpoint", str(job.checkpoint),
+        "--dataset-type", job.dataset_type,
+        "--images-dir", args.images_dir,
+        "--labels-dir", args.labels_dir,
+        "--summary-json", str(job.summary_json),
+    ]
+    if args.visualize:
+        cmd.extend(["--visualize", "--vis-output", str(job.vis_output)])
+    if job.roi_mode:
+        cmd.extend(["--roi-mode", job.roi_mode])
+    if job.roi_localizer_run:
+        cmd.extend(["--roi-localizer-run", job.roi_localizer_run])
+    if args.prostate158_root:
+        cmd.extend(["--prostate158-root", args.prostate158_root])
+    if args.prostate158_label_reader:
+        cmd.extend(["--prostate158-label-reader", args.prostate158_label_reader])
+    if args.prostate158_prostate_label_col:
+        cmd.extend(["--prostate158-prostate-label-col", args.prostate158_prostate_label_col])
+    if args.device:
+        cmd.extend(["--device", args.device])
+    if args.sw_batch_size is not None:
+        cmd.extend(["--sw-batch-size", str(args.sw_batch_size)])
+    return cmd
+
+
+def _run_interactive_batch(args: argparse.Namespace) -> None:
+    """Top-level interactive selector flow for dataset/model/ROI batch evaluation."""
+    if not sys.stdin.isatty():
+        logger.error("Interactive selector requires a TTY. Provide --run in non-interactive mode.")
+        sys.exit(1)
+
+    runs_root = Path(args.runs_root).expanduser().resolve()
+    candidates = _discover_run_candidates(runs_root)
+    if not candidates:
+        logger.error("No run directories with checkpoints found in: %s", runs_root)
+        sys.exit(1)
+    roi_localizer_candidates = _discover_roi_localizer_candidates(runs_root)
+
+    datasets = _select_datasets_for_batch()
+    if not datasets:
+        print("Aborted.")
+        sys.exit(0)
+
+    selected_models = _select_models_for_batch(candidates)
+    if not selected_models:
+        print("Aborted.")
+        sys.exit(0)
+
+    checkpoints_by_run: dict[Path, Path] = {}
+    for candidate in selected_models:
+        print(f"\nSelect checkpoint for model: {candidate.run_dir.name}")
+        checkpoints_by_run[candidate.run_dir] = select_checkpoint(candidate.run_dir / "checkpoints")
+
+    roi_variants = _select_roi_variants_for_batch(roi_localizer_candidates)
+    if not roi_variants:
+        print("Aborted.")
+        sys.exit(0)
+
+    if args.summary_json or args.vis_output:
+        logger.warning(
+            "--summary-json/--vis-output are ignored in selector mode; "
+            "per-job unique paths are generated automatically."
+        )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    jobs = _build_batch_jobs(
+        selected_models=selected_models,
+        checkpoints_by_run=checkpoints_by_run,
+        datasets=datasets,
+        roi_variants=roi_variants,
+        repo_root=repo_root,
+        prostate158_prostate_label_col=args.prostate158_prostate_label_col,
+        prostate158_root_override=args.prostate158_root,
+        visualization_enabled=bool(args.visualize),
+    )
+    if not jobs:
+        logger.error("No valid jobs remain after dataset/model/ROI compatibility checks.")
+        logger.error(
+            "Hint: roi.mode='gt_mask' needs dataset_type='prostate158' and "
+            "'prostate158_prostate_label_col' (from config or --prostate158-prostate-label-col). "
+            "For PI-CAI use ROI 'config' or 'disabled'."
+        )
+        sys.exit(1)
+
+    _section("Batch Evaluation Plan")
+    print(f"  Runs selected    : {len(selected_models)}")
+    print(f"  Datasets         : {datasets}")
+    print(f"  ROI variants     : {len(roi_variants)}")
+    print(f"  Total jobs       : {len(jobs)}")
+
+    preview_n = min(8, len(jobs))
+    if preview_n:
+        print("\n  Job preview:")
+        for job in jobs[:preview_n]:
+            roi_desc = job.roi_mode or "config"
+            if job.roi_localizer_run:
+                roi_desc = f"{roi_desc}:{Path(job.roi_localizer_run).name}"
+            print(
+                f"    - run={job.run_dir.name}  ckpt={job.checkpoint.name}  "
+                f"dataset={job.dataset_type}  roi={roi_desc}"
+            )
+        if len(jobs) > preview_n:
+            print(f"    ... ({len(jobs) - preview_n} more)")
+
+    proceed = input(f"\nRun {len(jobs)} evaluation job(s)? [y/N]: ").strip().lower()
+    if proceed not in {"y", "yes"}:
+        print("Aborted.")
+        sys.exit(0)
+
+    failures = 0
+    for idx, job in enumerate(jobs, start=1):
+        _section(f"Batch job {idx}/{len(jobs)}")
+        roi_desc = job.roi_mode or "config"
+        if job.roi_localizer_run:
+            roi_desc = f"{roi_desc}:{Path(job.roi_localizer_run).name}"
+        print(f"  Run        : {job.run_dir}")
+        print(f"  Checkpoint : {job.checkpoint.name}")
+        print(f"  Dataset    : {job.dataset_type}")
+        print(f"  ROI        : {roi_desc}")
+
+        cmd = _batch_command_for_job(job, args)
+        rc = subprocess.run(cmd).returncode
+        if rc != 0:
+            failures += 1
+            logger.error(
+                "Batch job failed (rc=%d): run=%s checkpoint=%s dataset=%s roi=%s",
+                rc,
+                job.run_dir.name,
+                job.checkpoint.name,
+                job.dataset_type,
+                roi_desc,
+            )
+
+    if failures:
+        logger.error("Batch run finished with %d failed job(s).", failures)
+        sys.exit(1)
+
+    logger.info("Batch run complete: all %d job(s) succeeded.", len(jobs))
+
+
+def _apply_roi_overrides(
+    cfg: dict[str, Any],
+    roi_mode: str,
+    roi_localizer_run: str,
+) -> dict[str, Any]:
+    """Apply CLI ROI overrides on top of the run config."""
+    if not roi_mode and not roi_localizer_run:
+        return cfg
+    merged = deepcopy(cfg)
+    roi_cfg = dict(merged.get("roi", {}) or {})
+    if roi_mode:
+        roi_cfg["mode"] = roi_mode
+    if roi_localizer_run:
+        roi_cfg["localizer_run"] = roi_localizer_run
+    merged["roi"] = roi_cfg
+    return merged
+
+
+def _default_prostate_label_col(label_reader: Any) -> str:
+    """Build fallback Prostate158 prostate-label column from label-reader id."""
+    text = str(label_reader).strip()
+    if not text:
+        return "t2_anatomy_reader1"
+    match = re.search(r"\d+", text)
+    suffix = match.group(0) if match else "1"
+    return f"t2_anatomy_reader{suffix}"
+
+
+def _resolve_prostate158_csv_path(root_dir: Path, split: str) -> Path:
+    """Resolve Prostate158 split CSV path using the dataset loader's conventions."""
+    root_dir = root_dir.expanduser().resolve()
+    csv_path = root_dir / f"{split}.csv"
+    if csv_path.exists():
+        return csv_path
+    nested = root_dir / root_dir.name / f"{split}.csv"
+    if nested.exists():
+        return nested
+    raise FileNotFoundError(
+        f"Prostate158 {split}.csv not found under {root_dir} "
+        f"(checked {csv_path} and {nested})."
+    )
+
+
+def _read_csv_columns(path: Path) -> list[str]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        return list(reader.fieldnames or [])
+
+
+def _infer_prostate_label_col(columns: list[str], label_reader: Any) -> str | None:
+    """Infer prostate-mask column from CSV headers."""
+    text = str(label_reader).strip()
+    match = re.search(r"\d+", text)
+    suffix = match.group(0) if match else "1"
+
+    preferred = [
+        f"t2_prostate_reader{suffix}",
+        f"t2_anatomy_reader{suffix}",
+    ]
+    for col in preferred:
+        if col in columns:
+            return col
+
+    prostate_like = [
+        col
+        for col in columns
+        if col.startswith("t2_")
+        and "reader" in col
+        and ("anatomy" in col or "prostate" in col)
+        and "tumor" not in col
+    ]
+    with_reader = [col for col in prostate_like if col.endswith(f"reader{suffix}")]
+    if with_reader:
+        return sorted(with_reader)[0]
+    if prostate_like:
+        return sorted(prostate_like)[0]
+    return None
+
+
+def _ensure_prostate_label_col(
+    cfg: dict[str, Any],
+    dataset_type: str,
+    explicit_col: str,
+    prostate158_root_override: str = "",
+) -> tuple[dict[str, Any], bool]:
+    """
+    Ensure prostate158_prostate_label_col exists when ROI/task requires it.
+
+    Returns
+    -------
+    (cfg, was_auto_filled)
+    """
+    merged = deepcopy(cfg)
+
+    dataset_norm = str(dataset_type).strip().lower()
+    task = str(merged.get("task", "lesion_segmentation")).strip().lower()
+    roi_mode = str((merged.get("roi", {}) or {}).get("mode", "disabled")).strip().lower()
+
+    needs_col = (
+        dataset_norm == "prostate158"
+        and (task == "prostate_localization" or roi_mode == "gt_mask")
+    )
+    has_col = bool(str(merged.get("prostate158_prostate_label_col", "")).strip())
+    if not needs_col:
+        return merged, False
+
+    chosen = str(explicit_col).strip() or str(merged.get("prostate158_prostate_label_col", "")).strip()
+    root_dir = Path(
+        prostate158_root_override
+        or merged.get("prostate158_test_dir", "data/prostate158_test")
+    ).expanduser()
+    split = str(merged.get("prostate158_test_split", "test")).strip().lower() or "test"
+    columns: list[str] = []
+    csv_path: Path | None = None
+    try:
+        csv_path = _resolve_prostate158_csv_path(root_dir, split)
+        columns = _read_csv_columns(csv_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not inspect Prostate158 CSV headers for prostate label inference "
+            "(root=%s split=%s): %s",
+            root_dir,
+            split,
+            exc,
+        )
+
+    if chosen and columns and chosen not in columns:
+        raise ValueError(
+            "Requested prostate label column "
+            f"'{chosen}' was not found in {csv_path}. "
+            f"Available columns: {', '.join(columns)}"
+        )
+    if chosen:
+        merged["prostate158_prostate_label_col"] = chosen
+        return merged, False
+
+    inferred = _infer_prostate_label_col(columns, merged.get("prostate158_label_reader", 1))
+    if inferred:
+        merged["prostate158_prostate_label_col"] = inferred
+        return merged, True
+
+    if has_col:
+        return merged, False
+
+    fallback = _default_prostate_label_col(merged.get("prostate158_label_reader", 1))
+    merged["prostate158_prostate_label_col"] = fallback
+    return merged, True
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -582,12 +1430,31 @@ def main() -> None:
     )
     parser.add_argument(
         "--run",
-        required=True,
+        default="",
         metavar="DIR",
         help=(
             "Path to a training run directory "
             "(e.g. /outputs/20260418_224246_deconver). "
-            "Must contain config.yaml and a checkpoints/ subdirectory."
+            "Must contain config.yaml and a checkpoints/ subdirectory. "
+            "If omitted (or with --selector), an interactive checkbox selector opens."
+        ),
+    )
+    parser.add_argument(
+        "--selector",
+        action="store_true",
+        help=(
+            "Open interactive checkbox selection for dataset/model/ROI and run "
+            "the selected evaluations in batch."
+        ),
+    )
+    parser.add_argument(
+        "--runs-root",
+        type=str,
+        default=_default_runs_root(),
+        metavar="DIR",
+        help=(
+            "Root directory that contains run folders used by --selector "
+            "(each run must have config.yaml and checkpoints/*.pt)."
         ),
     )
     parser.add_argument(
@@ -622,6 +1489,26 @@ def main() -> None:
         help="Dataset adapter to use. Default reads dataset_type from the run config.",
     )
     parser.add_argument(
+        "--roi-mode",
+        type=str,
+        default="",
+        choices=["", "disabled", "gt_mask", "predicted_mask"],
+        help=(
+            "Override roi.mode from config.yaml. "
+            "Default keeps the run config setting."
+        ),
+    )
+    parser.add_argument(
+        "--roi-localizer-run",
+        type=str,
+        default="",
+        metavar="DIR_OR_PT",
+        help=(
+            "Override roi.localizer_run from config.yaml (used with "
+            "--roi-mode predicted_mask)."
+        ),
+    )
+    parser.add_argument(
         "--prostate158-root",
         type=str,
         default="",
@@ -634,6 +1521,17 @@ def main() -> None:
         default="",
         metavar="N",
         help="Prostate158 label reader to evaluate against. Default reads config or uses 1.",
+    )
+    parser.add_argument(
+        "--prostate158-prostate-label-col",
+        type=str,
+        default="",
+        metavar="COL",
+        help=(
+            "Prostate158 prostate-mask column (e.g. t2_prostate_reader1). "
+            "Needed for roi.mode=gt_mask or task=prostate_localization "
+            "when missing in run config."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -649,12 +1547,17 @@ def main() -> None:
     parser.add_argument(
         "--sw-batch-size",
         type=int,
-        default=None,
+        default=2,
         metavar="N",
         help=(
-            "Override the sliding-window batch size from the run config. "
-            "Lower values reduce peak inference memory."
+            "Sliding-window batch size used for evaluation inference. "
+            "Lower values reduce peak memory."
         ),
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Enable evaluation visualization PNG export (disabled by default).",
     )
     parser.add_argument(
         "--summary-json",
@@ -663,7 +1566,8 @@ def main() -> None:
         metavar="PATH",
         help=(
             "Write aggregate evaluation summary JSON to this path. "
-            "Default writes to <run>/evaluation_summary.json."
+            "Default writes to <run>/evaluation_summary.json, or to "
+            "<outputs>/evaluation_summaries/ when <run> is not writable."
         ),
     )
     parser.add_argument(
@@ -672,11 +1576,19 @@ def main() -> None:
         default="",
         metavar="PATH",
         help=(
-            "Write eval visualization PNG to this path. "
-            "Default writes to <repo_root>/visualizations/<run_name>_eval_visualization.png."
+            "Write eval visualization PNG to this path (used only with --visualize). "
+            "Default writes to <repo_root>/visualizations/<run_name>_eval_visualization.png, "
+            "or to <outputs>/evaluation_summaries/ when the preferred directory is not writable."
         ),
     )
     args = parser.parse_args()
+
+    if args.vis_output and not args.visualize:
+        logger.warning("--vis-output ignored because --visualize was not enabled.")
+
+    if args.selector or not args.run:
+        _run_interactive_batch(args)
+        return
 
     # ---- Validate run directory -------------------------------------------------
     run_dir   = Path(args.run).resolve()
@@ -695,7 +1607,17 @@ def main() -> None:
 
     # ---- Load config ------------------------------------------------------------
     cfg = load_config(str(cfg_path))
+    cfg = _apply_roi_overrides(cfg, args.roi_mode, args.roi_localizer_run)
     logger.info("Config loaded from %s", cfg_path)
+    if args.roi_mode:
+        logger.info("ROI override from CLI: roi.mode=%s", args.roi_mode)
+    if args.roi_localizer_run:
+        logger.info("ROI override from CLI: roi.localizer_run=%s", args.roi_localizer_run)
+    if args.prostate158_prostate_label_col:
+        logger.info(
+            "Prostate label column override from CLI: prostate158_prostate_label_col=%s",
+            args.prostate158_prostate_label_col,
+        )
     pred_threshold: float = float(cfg.get("pred_threshold", 0.5))
     postprocess_enabled: bool = bool(cfg.get("postprocess_enabled", False))
     postprocess_min_component_volume_mm3: float = float(
@@ -753,6 +1675,19 @@ def main() -> None:
         or str(cfg.get("dataset_type", "picai")).strip().lower()
         or "picai"
     )
+    cfg, auto_prostate_col = _ensure_prostate_label_col(
+        cfg,
+        dataset_type=dataset_type,
+        explicit_col=args.prostate158_prostate_label_col,
+        prostate158_root_override=args.prostate158_root,
+    )
+    if auto_prostate_col:
+        logger.info(
+            "Auto-filled prostate158_prostate_label_col=%s from prostate158_label_reader=%s",
+            cfg.get("prostate158_prostate_label_col"),
+            cfg.get("prostate158_label_reader", 1),
+        )
+    task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
     active_modalities = [key for key, _ in active_modality_pairs(cfg)]
 
     if dataset_type == "prostate158":
@@ -765,6 +1700,7 @@ def main() -> None:
             args.prostate158_label_reader
             or cfg.get("prostate158_label_reader", 1)
         )
+        prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
         logger.info("Discovering Prostate158 test cases in %s ...", images_dir)
         test_cases = discover_prostate158_cases(
             root_dir=images_dir,
@@ -773,6 +1709,7 @@ def main() -> None:
             label_target=str(cfg.get("prostate158_label_target", "tumor")),
             label_reader=label_reader,
             label_modality=cfg.get("prostate158_label_modality"),
+            prostate_label_col=prostate_label_col if (prostate_label_col and (task == "prostate_localization" or roi_settings.mode == "gt_mask")) else None,
         )
     elif dataset_type == "picai":
         images_dir = Path(args.images_dir)
@@ -804,7 +1741,7 @@ def main() -> None:
         int(v) for v in cfg.get("patch_size", [20, 128, 128])
     )
     sw_overlap    = float(cfg.get("sw_overlap", 0.5))
-    sw_batch_size = int(args.sw_batch_size if args.sw_batch_size is not None else cfg.get("sw_batch_size", 4))
+    sw_batch_size = int(args.sw_batch_size)
     ds = PiCaiDataset(
         images_dir=images_dir,
         labels_dir=labels_dir,
@@ -813,6 +1750,9 @@ def main() -> None:
         cases=test_cases,
         active_modalities=active_modalities,
         dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
+        task=task,
+        roi_settings=roi_settings,
+        include_full_resampled=roi_settings.enabled and task == "lesion_segmentation",
     )
 
     loader = DataLoader(
@@ -830,6 +1770,8 @@ def main() -> None:
     print(f"  Device      : {device}")
     print(f"  Test cases  : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
     print(f"  Dataset     : {dataset_type}")
+    print(f"  Task        : {task}")
+    print(f"  ROI mode    : {roi_settings.mode}")
     print(f"  Images dir  : {images_dir}")
     print(f"  Modalities  : {active_modalities}")
     print(f"  Patch size  : {patch_size}   SW overlap: {sw_overlap}")
@@ -857,7 +1799,7 @@ def main() -> None:
     with torch.no_grad():
         for batch in tqdm(loader, desc="Inference", unit="vol"):
             images   = batch["image"].to(device)    # (1, 3, D, H, W)
-            labels   = batch["label"].to(device)    # (1, 1, D, H, W)
+            labels   = batch.get("full_label", batch["label"]).to(device)
             case_id: str = batch["case_id"][0]
 
             logits = sliding_window_inference(
@@ -868,8 +1810,13 @@ def main() -> None:
                 overlap=sw_overlap,
             )   # (1, 1, D, H, W) — raw logits
 
+            logits = logits.float()
+            if "roi" in batch:
+                roi_batch = _roi_bounds_from_collated_batch(batch["roi"])
+                logits = restore_from_roi(logits, roi_batch)
+
             metric_logits, pred_bin = postprocess_logits(
-                logits=logits.float(),
+                logits=logits,
                 threshold=pred_threshold,
                 enabled=postprocess_enabled,
                 spacing_zyx=target_spacing,
@@ -890,12 +1837,17 @@ def main() -> None:
             })
 
             # Store volumetric data for the first 5 positive cases (visualization)
-            if has_lesion and len(vis_data) < 5:
+            if args.visualize and has_lesion and len(vis_data) < 5:
+                t2w_source = batch.get("full_image", batch["image"])
+                roi_payload = None
+                if "roi" in batch:
+                    roi_payload = _roi_bounds_from_collated_batch(batch["roi"])
                 vis_data.append({
                     "case_id":  case_id,
-                    "t2w_vol":  images[0, 0].cpu().numpy(),      # (D, H, W)
+                    "t2w_vol":  t2w_source[0, 0].cpu().numpy(),
                     "gt_vol":   labels[0, 0].cpu().numpy(),      # (D, H, W)
                     "pred_vol": pred_bin[0, 0].cpu().numpy(),    # (D, H, W)
+                    "roi_bounds": roi_payload,
                 })
 
     # ---- Per-case table ---------------------------------------------------------
@@ -952,24 +1904,38 @@ def main() -> None:
     print(f"  HD95         (non-empty pairs)     : {_fmt(agg_hd95)} voxels")
 
     # ---- Visualization ----------------------------------------------------------
-    _section("Visualization  (5 rows × 20 axial slices)")
-    if args.vis_output:
-        vis_path = Path(args.vis_output).expanduser().resolve()
+    vis_path: Path | None = None
+    if args.visualize:
+        _section("Visualization  (5 rows × 20 axial slices)")
+        if args.vis_output:
+            vis_path = Path(args.vis_output).expanduser().resolve()
+        else:
+            repo_root = Path(__file__).resolve().parent.parent
+            vis_name = f"{run_dir.name}_eval_visualization.png"
+            vis_path = _default_vis_output_path(
+                run_dir=run_dir,
+                vis_name=vis_name,
+                repo_root=repo_root,
+            ).resolve()
+        vis_path.parent.mkdir(parents=True, exist_ok=True)
+        save_visualization(vis_data, vis_path, n_cols=_N_VIS_COLS)
+        print(
+            "\n  Colour key:\n"
+            "    Green  = ground truth only\n"
+            "    Red    = prediction only\n"
+            "    Yellow = overlap (GT ∩ Pred)\n"
+        )
     else:
-        repo_root = Path(__file__).resolve().parent.parent
-        vis_path = (repo_root / "visualizations" / f"{run_dir.name}_eval_visualization.png").resolve()
-    vis_path.parent.mkdir(parents=True, exist_ok=True)
-    save_visualization(vis_data, vis_path, n_cols=_N_VIS_COLS)
-    print(
-        "\n  Colour key:\n"
-        "    Green  = ground truth only\n"
-        "    Red    = prediction only\n"
-        "    Yellow = overlap (GT ∩ Pred)\n"
-    )
+        _section("Visualization")
+        print("  Skipped (disabled by default; pass --visualize to enable).")
 
     # ---- Machine-readable summary ----------------------------------------------
     summary_path = Path(args.summary_json).expanduser().resolve() if args.summary_json else (
-        run_dir / "evaluation_summary.json"
+        _default_eval_summary_path(
+            run_dir=run_dir,
+            summary_name="evaluation_summary.json",
+            repo_root=Path(__file__).resolve().parent.parent,
+        ).resolve()
     )
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -989,6 +1955,8 @@ def main() -> None:
             "negative_cases": len(neg_rows),
         },
         "inference": {
+            "task": task,
+            "roi_mode": roi_settings.mode,
             "device": str(device),
             "active_modalities": list(active_modalities),
             "patch_size": list(patch_size),
@@ -1007,10 +1975,11 @@ def main() -> None:
             "hd95_non_empty_pairs_voxels": _json_float(agg_hd95),
         },
         "artifacts": {
-            "eval_visualization_png": str(vis_path),
-            "eval_visualization_png_exists": vis_path.exists(),
-            "visualized_positive_cases": len(vis_data),
-            "visualization_cols": _N_VIS_COLS,
+            "visualization_enabled": bool(args.visualize),
+            "eval_visualization_png": str(vis_path) if vis_path is not None else None,
+            "eval_visualization_png_exists": bool(vis_path is not None and vis_path.exists()),
+            "visualized_positive_cases": len(vis_data) if args.visualize else 0,
+            "visualization_cols": _N_VIS_COLS if args.visualize else 0,
         },
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)

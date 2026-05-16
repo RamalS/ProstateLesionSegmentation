@@ -23,7 +23,9 @@ except ImportError:
 
 def logits_to_binary_mask(logits: Tensor, threshold: float = 0.5) -> Tensor:
     """Convert raw logits to binary mask {0,1} with sigmoid+threshold."""
-    return (torch.sigmoid(logits) >= threshold).to(torch.uint8)
+    # Use a strict threshold so ROI-restored padding logits of 0.0
+    # (sigmoid -> 0.5) remain background instead of becoming positives.
+    return (torch.sigmoid(logits) > threshold).to(torch.uint8)
 
 
 def binary_mask_to_pseudo_logits(

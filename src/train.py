@@ -50,6 +50,10 @@ from src.metrics import compute_all_metrics
 from src.models import build_model
 from src.notify import send_ntfy
 from src.postprocess import postprocess_logits
+from src.roi import (
+    restore_from_roi,
+    validate_task_and_roi_config,
+)
 from src.transforms import get_train_transforms, get_val_transforms
 from src.utils import (
     compute_composite_score,
@@ -235,7 +239,7 @@ def validate(
     with torch.inference_mode():
         for batch in tqdm(loader, desc="Val", leave=False, unit="vol"):
             images = batch["image"].to(device, non_blocking=True)   # (1, 3, D, H, W)
-            labels = batch["label"].to(device, non_blocking=True)   # (1, 1, D, H, W)
+            labels = batch.get("full_label", batch["label"]).to(device, non_blocking=True)
 
             with torch.autocast(
                 device_type=autocast_device,
@@ -253,6 +257,12 @@ def validate(
             # Cast back to float32 for metrics (avoids BF16 precision loss in distance
             # transforms and other numpy-backed metric operations).
             logits = logits.float()
+            if "roi" in batch:
+                roi_batch = {
+                    key: batch["roi"][key][0]
+                    for key in ("start_zyx", "end_zyx", "full_shape_zyx", "used_fallback")
+                }
+                logits = restore_from_roi(logits, roi_batch)
             metric_logits, _ = postprocess_logits(
                 logits=logits,
                 threshold=threshold,
@@ -468,6 +478,7 @@ def main() -> None:
     _active_keys = [k for k, _ in active_modality_pairs(cfg)]
 
     dataset_type = str(cfg.get("dataset_type", "picai")).strip().lower()
+    task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
     if dataset_type == "prostate158":
         prostate158_train_dir = Path(
             cfg.get(
@@ -478,6 +489,7 @@ def main() -> None:
         label_target = str(cfg.get("prostate158_label_target", "tumor"))
         label_reader = cfg.get("prostate158_label_reader", 1)
         label_modality = cfg.get("prostate158_label_modality")
+        prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
 
         train_cases = discover_prostate158_cases(
             root_dir=prostate158_train_dir,
@@ -486,6 +498,7 @@ def main() -> None:
             label_target=label_target,
             label_reader=label_reader,
             label_modality=label_modality,
+            prostate_label_col=prostate_label_col if (prostate_label_col and (task == "prostate_localization" or roi_settings.mode == "gt_mask")) else None,
         )
         val_cases = discover_prostate158_cases(
             root_dir=prostate158_train_dir,
@@ -494,6 +507,7 @@ def main() -> None:
             label_target=label_target,
             label_reader=label_reader,
             label_modality=label_modality,
+            prostate_label_col=prostate_label_col if (prostate_label_col and (task == "prostate_localization" or roi_settings.mode == "gt_mask")) else None,
         )
         all_cases = train_cases + val_cases
         lesion_flag_cache_path = (
@@ -596,6 +610,8 @@ def main() -> None:
         cache_dir=cache_dir,
         active_modalities=_active_keys,
         dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
+        task=task,
+        roi_settings=roi_settings,
     )
 
     val_ds = PiCaiDataset(
@@ -609,6 +625,9 @@ def main() -> None:
         cache_dir=cache_dir,
         active_modalities=_active_keys,
         dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
+        task=task,
+        roi_settings=roi_settings,
+        include_full_resampled=roi_settings.enabled and task == "lesion_segmentation",
     )
 
     loader_generator = torch.Generator()

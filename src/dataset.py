@@ -48,6 +48,7 @@ import hashlib
 import csv
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
@@ -57,6 +58,22 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from torch.utils.data import Dataset
+
+from src.config import load_config
+from src.models import build_model
+from src.roi import (
+    ROISettings,
+    TASK_LESION_SEGMENTATION,
+    TASK_PROSTATE_LOCALIZATION,
+    binarize_mask,
+    compute_crop_bounds,
+    crop_tensor,
+    keep_largest_component,
+    resolve_localizer_checkpoint,
+    resolve_roi_settings,
+    resolve_task,
+)
+from src.utils import load_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +546,22 @@ def _prostate158_label_column(
     )
 
 
+def _require_prostate158_column(
+    columns: Sequence[str],
+    column_name: str,
+    description: str,
+) -> str:
+    column = str(column_name).strip()
+    if not column:
+        raise ValueError(f"Missing Prostate158 {description} column name.")
+    if column not in columns:
+        raise ValueError(
+            f"Could not find Prostate158 {description} column '{column}' in CSV. "
+            f"Available columns: {', '.join(columns)}"
+        )
+    return column
+
+
 def discover_prostate158_cases(
     root_dir: str | Path,
     split: str = "train",
@@ -536,6 +569,7 @@ def discover_prostate158_cases(
     label_target: str = "tumor",
     label_reader: int | str = 1,
     label_modality: str | None = None,
+    prostate_label_col: str | None = None,
 ) -> list[dict]:
     """
     Discover Prostate158 cases from the upstream CSV files.
@@ -577,6 +611,13 @@ def discover_prostate158_cases(
             label_reader=label_reader,
             label_modality=label_modality,
         )
+        prostate_col: str | None = None
+        if prostate_label_col not in (None, ""):
+            prostate_col = _require_prostate158_column(
+                columns=columns,
+                column_name=str(prostate_label_col),
+                description="prostate mask",
+            )
 
         for row_idx, row in enumerate(reader, 1):
             t2_path = _resolve_prostate158_path(root_dir, csv_path, row["t2"])
@@ -589,6 +630,11 @@ def discover_prostate158_cases(
                 "prostate158_split": split,
                 "prostate158_label_col": label_col,
             }
+            if prostate_col is not None:
+                paths["prostate_label"] = _resolve_prostate158_path(
+                    root_dir, csv_path, row[prostate_col]
+                )
+                paths["prostate158_prostate_label_col"] = prostate_col
 
             if "adc" in active_keys:
                 paths["adc"] = _resolve_prostate158_path(root_dir, csv_path, row["adc"])
@@ -598,7 +644,7 @@ def discover_prostate158_cases(
 
             missing_paths = [
                 str(paths[key])
-                for key in ("t2w", "adc", "hbv", "label")
+                for key in ("t2w", "adc", "hbv", "label", "prostate_label")
                 if key in paths and paths[key] is not None and not Path(paths[key]).exists()
             ]
             if missing_paths:
@@ -1020,6 +1066,101 @@ def stratified_train_val_split(
 # Dataset
 # ---------------------------------------------------------------------------
 
+@dataclass
+class _PreprocessedCase:
+    image: torch.Tensor
+    lesion_label: torch.Tensor
+    prostate_label: torch.Tensor | None = None
+
+
+class _ProstateROILocalizer:
+    def __init__(
+        self,
+        localizer_run: str,
+        target_spacing: tuple[float, ...],
+    ) -> None:
+        cfg_path, ckpt_path = resolve_localizer_checkpoint(localizer_run)
+        self.cfg = load_config(str(cfg_path))
+        self.model = build_model(self.cfg).to(torch.device("cpu"))
+        load_checkpoint(ckpt_path, self.model, device=torch.device("cpu"))
+        self.model.eval()
+        self.target_spacing = target_spacing
+        self.active_modalities = tuple(
+            k for k in MODALITY_KEYS if self.cfg.get(f"use_{k}", True)
+        )
+        if not self.active_modalities:
+            raise ValueError("ROI localizer config disables all modalities.")
+        dwi_hbv_preprocess = self.cfg.get("dwi_hbv_preprocess", {}) or {}
+        self.dwi_hbv_preprocess_enabled = bool(dwi_hbv_preprocess.get("enabled", False))
+        clip = dwi_hbv_preprocess.get("clip_percentiles", (1.0, 99.5))
+        if not isinstance(clip, (list, tuple)) or len(clip) != 2:
+            clip = (1.0, 99.5)
+        self.dwi_hbv_clip_percentiles = (float(clip[0]), float(clip[1]))
+        self.dwi_hbv_log1p = bool(dwi_hbv_preprocess.get("log1p", True))
+
+    def predict_mask(self, case: dict) -> np.ndarray:
+        image = _prepare_case_image_tensor(
+            case=case,
+            target_spacing=self.target_spacing,
+            active_modalities=self.active_modalities,
+            dwi_hbv_preprocess_enabled=self.dwi_hbv_preprocess_enabled,
+            dwi_hbv_clip_percentiles=self.dwi_hbv_clip_percentiles,
+            dwi_hbv_log1p=self.dwi_hbv_log1p,
+        )
+        with torch.inference_mode():
+            logits = self.model(image.unsqueeze(0))
+            if isinstance(logits, dict):
+                logits = logits["seg"]
+            if isinstance(logits, list):
+                logits = logits[0]
+            probs = torch.sigmoid(logits.float())
+        return probs[0, 0].cpu().numpy()
+
+
+def _prepare_case_image_tensor(
+    case: dict,
+    target_spacing: tuple[float, ...],
+    active_modalities: Sequence[str],
+    dwi_hbv_preprocess_enabled: bool,
+    dwi_hbv_clip_percentiles: tuple[float, float],
+    dwi_hbv_log1p: bool,
+) -> torch.Tensor:
+    t2w_sitk = _load_volume(case["t2w"])
+    secondary: dict[str, sitk.Image] = {}
+    for key in active_modalities:
+        if key == "t2w":
+            continue
+        secondary[key] = _resample_to_reference(
+            _load_volume(case[key]), t2w_sitk, sitk.sitkLinear
+        )
+
+    t2w_sitk = _resample(t2w_sitk, target_spacing, sitk.sitkLinear)
+
+    arrays: list[np.ndarray] = []
+    for key in MODALITY_KEYS:
+        if key not in active_modalities:
+            continue
+        if key == "t2w":
+            arrays.append(_zscore_normalize(_to_numpy(t2w_sitk)))
+        else:
+            resampled = _resample(secondary[key], target_spacing, sitk.sitkLinear)
+            arr = _to_numpy(resampled)
+            if (
+                key == "hbv"
+                and case.get("hbv_source", "hbv") == "dwi"
+                and dwi_hbv_preprocess_enabled
+            ):
+                arr = _preprocess_dwi_as_hbv(
+                    arr,
+                    clip_percentiles=dwi_hbv_clip_percentiles,
+                    use_log1p=dwi_hbv_log1p,
+                )
+            arrays.append(_zscore_normalize(arr))
+
+    image_np = np.stack(arrays, axis=0)
+    return torch.from_numpy(image_np)
+
+
 class PiCaiDataset(Dataset):
     """
     PyTorch Dataset for PI-CAI biparametric MRI prostate lesion segmentation.
@@ -1057,6 +1198,9 @@ class PiCaiDataset(Dataset):
         dwi_hbv_preprocess: Optional[dict[str, Any]] = None,
         cache_mode: str | None = None,
         cache_dir: str | Path | None = None,
+        task: str = TASK_LESION_SEGMENTATION,
+        roi_settings: ROISettings | None = None,
+        include_full_resampled: bool = False,
     ) -> None:
         """
         Parameters
@@ -1098,6 +1242,9 @@ class PiCaiDataset(Dataset):
         self.labels_dir = Path(labels_dir)
         self.target_spacing = target_spacing
         self.transform = transform
+        self.task = resolve_task({"task": task})
+        self.roi_settings = roi_settings or resolve_roi_settings({})
+        self.include_full_resampled = bool(include_full_resampled)
         self.cache_rate = float(cache_rate)
         if not 0.0 <= self.cache_rate <= 1.0:
             raise ValueError(
@@ -1135,6 +1282,11 @@ class PiCaiDataset(Dataset):
             if active_modalities is not None
             else MODALITY_KEYS
         )
+        self.requires_prostate_label = (
+            self.task == TASK_PROSTATE_LOCALIZATION
+            or self.roi_settings.mode == "gt_mask"
+        )
+        self._roi_localizer: _ProstateROILocalizer | None = None
         dwi_hbv_preprocess = dwi_hbv_preprocess or {}
         self.dwi_hbv_preprocess_enabled: bool = bool(
             dwi_hbv_preprocess.get("enabled", False)
@@ -1159,21 +1311,23 @@ class PiCaiDataset(Dataset):
         # Determine which indices are eligible for caching.
         n_cache = math.ceil(len(self.cases) * self.cache_rate) if self.cache_enabled else 0
         self._cache_indices: set[int] = set(range(n_cache))
-        # Mapping from case index → (image_tensor, label_tensor).
+        # Mapping from case index → preprocessed tensors.
         # Used only for cache_mode="ram".  Pre-populated eagerly in the main
         # process so all DataLoader workers inherit a fully-warmed cache via
         # fork() — 100% hit rate from epoch 1.
-        self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._cache: dict[int, _PreprocessedCase] = {}
 
         cache_dir_msg = str(self.cache_dir) if self.cache_mode == "storage" else "-"
         logger.info(
             "PiCaiDataset ready: %d cases, modalities=%s, spacing=%s, "
-            "transform=%s, cache_mode=%s (%.0f%% = %d cases), cache_dir=%s, "
-            "dwi_hbv_preprocess=%s",
+            "transform=%s, task=%s, roi_mode=%s, cache_mode=%s "
+            "(%.0f%% = %d cases), cache_dir=%s, dwi_hbv_preprocess=%s",
             len(self.cases),
             list(self.active_modalities),
             target_spacing,
             type(transform).__name__ if transform is not None else "None",
+            self.task,
+            self.roi_settings.mode,
             self.cache_mode,
             self.cache_rate * 100,
             n_cache,
@@ -1194,7 +1348,7 @@ class PiCaiDataset(Dataset):
                 warmup_workers, n_cache, len(self.cases),
             )
 
-            def _load_one(i: int) -> tuple[int, tuple[torch.Tensor, torch.Tensor]]:
+            def _load_one(i: int) -> tuple[int, _PreprocessedCase]:
                 return i, self._load_and_preprocess(self.cases[i])
 
             with ThreadPoolExecutor(max_workers=warmup_workers) as pool:
@@ -1226,32 +1380,25 @@ class PiCaiDataset(Dataset):
             if idx in self._cache:
                 # Cache hit: return cloned tensors to prevent in-place transform
                 # mutations from corrupting the stored originals.
-                image, label = self._cache[idx]
-                image = image.clone()
-                label = label.clone()
+                cached = self._clone_preprocessed(self._cache[idx])
             else:
                 # Defensive fallback — should never reach here after eager warmup.
                 logger.debug(
                     "Cache miss for idx=%d after eager warmup — loading from disk.", idx
                 )
-                image, label = self._load_and_preprocess(case)
-                self._cache[idx] = (image.clone(), label.clone())
+                cached = self._load_and_preprocess(case)
+                self._cache[idx] = self._clone_preprocessed(cached)
         elif self.cache_mode == "storage" and cache_candidate:
             cache_path = self._storage_cache_path(case)
             cached = self._load_from_storage_cache(cache_path)
             if cached is None:
-                image, label = self._load_and_preprocess(case)
-                self._save_to_storage_cache(cache_path, image, label)
-            else:
-                image, label = cached
+                cached = self._load_and_preprocess(case)
+                self._save_to_storage_cache(cache_path, cached)
         else:
-            image, label = self._load_and_preprocess(case)
+            cached = self._load_and_preprocess(case)
 
-        sample: dict = {
-            "image": image,
-            "label": label,
-            "case_id": case_id,
-        }
+        sample = self._build_sample(case, cached)
+        sample["case_id"] = case_id
 
         if self.transform is not None:
             result = self.transform(sample)
@@ -1278,6 +1425,8 @@ class PiCaiDataset(Dataset):
             "case_id": str(case["case_id"]),
             "target_spacing": [float(v) for v in self.target_spacing],
             "active_modalities": list(self.active_modalities),
+            "task": self.task,
+            "roi_mode": self.roi_settings.mode,
             "dwi_hbv_preprocess": {
                 "enabled": self.dwi_hbv_preprocess_enabled,
                 "clip_percentiles": list(self.dwi_hbv_clip_percentiles),
@@ -1294,6 +1443,11 @@ class PiCaiDataset(Dataset):
                 if case.get("label") is not None
                 else None
             ),
+            "prostate_label_path": (
+                str(Path(case["prostate_label"]).resolve())
+                if case.get("prostate_label") is not None
+                else None
+            ),
         }
         digest = hashlib.sha1(
             json.dumps(cache_meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1307,16 +1461,25 @@ class PiCaiDataset(Dataset):
     def _load_from_storage_cache(
         self,
         cache_path: Path,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> _PreprocessedCase | None:
         if not cache_path.exists():
             return None
         try:
             payload = torch.load(cache_path, map_location="cpu")
             image = payload.get("image")
-            label = payload.get("label")
-            if not isinstance(image, torch.Tensor) or not isinstance(label, torch.Tensor):
-                raise TypeError("cache payload is missing tensor keys 'image'/'label'")
-            return image, label
+            lesion_label = payload.get("lesion_label")
+            prostate_label = payload.get("prostate_label")
+            if not isinstance(image, torch.Tensor) or not isinstance(lesion_label, torch.Tensor):
+                raise TypeError(
+                    "cache payload is missing tensor keys 'image'/'lesion_label'"
+                )
+            if prostate_label is not None and not isinstance(prostate_label, torch.Tensor):
+                raise TypeError("cache payload 'prostate_label' must be a Tensor or None")
+            return _PreprocessedCase(
+                image=image,
+                lesion_label=lesion_label,
+                prostate_label=prostate_label,
+            )
         except Exception as exc:
             logger.warning(
                 "Could not read storage cache entry %s (%s); recomputing.",
@@ -1328,15 +1491,21 @@ class PiCaiDataset(Dataset):
     def _save_to_storage_cache(
         self,
         cache_path: Path,
-        image: torch.Tensor,
-        label: torch.Tensor,
+        payload: _PreprocessedCase,
     ) -> None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = cache_path.with_suffix(
             f"{cache_path.suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
         )
         try:
-            torch.save({"image": image, "label": label}, tmp_path)
+            torch.save(
+                {
+                    "image": payload.image,
+                    "lesion_label": payload.lesion_label,
+                    "prostate_label": payload.prostate_label,
+                },
+                tmp_path,
+            )
             os.replace(tmp_path, cache_path)
         except Exception as exc:
             logger.warning("Could not write storage cache entry %s: %s", cache_path, exc)
@@ -1347,9 +1516,97 @@ class PiCaiDataset(Dataset):
             except Exception:
                 pass
 
+    def _clone_preprocessed(self, payload: _PreprocessedCase) -> _PreprocessedCase:
+        return _PreprocessedCase(
+            image=payload.image.clone(),
+            lesion_label=payload.lesion_label.clone(),
+            prostate_label=(
+                payload.prostate_label.clone()
+                if payload.prostate_label is not None
+                else None
+            ),
+        )
+
+    def _get_roi_localizer(self) -> _ProstateROILocalizer:
+        if self._roi_localizer is None:
+            self._roi_localizer = _ProstateROILocalizer(
+                localizer_run=self.roi_settings.localizer_run,
+                target_spacing=self.target_spacing,
+            )
+        return self._roi_localizer
+
+    def _build_sample(self, case: dict, payload: _PreprocessedCase) -> dict:
+        image = payload.image.clone()
+        lesion_label = payload.lesion_label.clone()
+        prostate_label = (
+            payload.prostate_label.clone() if payload.prostate_label is not None else None
+        )
+
+        if self.task == TASK_PROSTATE_LOCALIZATION:
+            if prostate_label is None:
+                raise ValueError(
+                    f"Case '{case['case_id']}' is missing prostate_label for prostate localization."
+                )
+            return {
+                "image": image,
+                "label": prostate_label,
+            }
+
+        sample: dict[str, Any] = {
+            "image": image,
+            "label": lesion_label,
+        }
+
+        if not self.roi_settings.enabled:
+            return sample
+
+        if self.roi_settings.mode == "gt_mask":
+            if prostate_label is None:
+                raise ValueError(
+                    f"Case '{case['case_id']}' is missing prostate_label required for roi.mode='gt_mask'."
+                )
+            roi_mask = prostate_label[0].cpu().numpy()
+            bounds = compute_crop_bounds(
+                mask=roi_mask,
+                spacing_zyx=self.target_spacing,
+                margin_mm=self.roi_settings.margin_mm,
+                min_size_vox=self.roi_settings.min_size_vox,
+                fallback_to_full_volume=self.roi_settings.fallback_to_full_volume,
+            )
+        else:
+            cached_bounds = case.get("_roi_bounds_predicted")
+            if isinstance(cached_bounds, dict):
+                bounds = cached_bounds
+            else:
+                roi_mask = self._get_roi_localizer().predict_mask(case)
+                roi_mask = binarize_mask(
+                    roi_mask,
+                    threshold=self.roi_settings.localizer_threshold,
+                )
+                if self.roi_settings.localizer_keep_largest_component:
+                    roi_mask = keep_largest_component(roi_mask)
+                bounds = compute_crop_bounds(
+                    mask=roi_mask,
+                    spacing_zyx=self.target_spacing,
+                    margin_mm=self.roi_settings.margin_mm,
+                    min_size_vox=self.roi_settings.min_size_vox,
+                    fallback_to_full_volume=self.roi_settings.fallback_to_full_volume,
+                ).as_dict()
+                case["_roi_bounds_predicted"] = bounds
+        if not isinstance(bounds, dict):
+            bounds = bounds.as_dict()
+        sample["roi"] = bounds
+        if self.include_full_resampled:
+            sample["full_image"] = image.clone()
+            sample["full_label"] = lesion_label.clone()
+
+        sample["image"] = crop_tensor(image, bounds)
+        sample["label"] = crop_tensor(lesion_label, bounds)
+        return sample
+
     def _load_and_preprocess(
         self, case: dict
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> _PreprocessedCase:
         """
         Run full SimpleITK I/O, co-registration, resampling, and
         z-score normalisation for one case.
@@ -1364,49 +1621,16 @@ class PiCaiDataset(Dataset):
         (image, label) as float32 tensors shaped (C, D, H, W) and
         (1, D, H, W), where C = ``len(self.active_modalities)``.
         """
-        # 1. Always load T2w — co-registration + label-resampling reference.
-        t2w_sitk = _load_volume(case["t2w"])
-
-        # 2. Load active non-T2w modalities and co-register to T2w space.
-        secondary: dict[str, sitk.Image] = {}
-        for key in self.active_modalities:
-            if key == "t2w":
-                continue
-            secondary[key] = _resample_to_reference(
-                _load_volume(case[key]), t2w_sitk, sitk.sitkLinear
-            )
-
-        # 3. Resample T2w to target spacing (always needed for label grid).
-        t2w_sitk = _resample(t2w_sitk, self.target_spacing, sitk.sitkLinear)
-
-        # 4. Resample + normalise each active modality; collect in canonical
-        #    order (T2w → ADC → HBV) regardless of how active_modalities is
-        #    ordered.
-        arrays: list[np.ndarray] = []
-        for key in MODALITY_KEYS:
-            if key not in self.active_modalities:
-                continue
-            if key == "t2w":
-                arrays.append(_zscore_normalize(_to_numpy(t2w_sitk)))
-            else:
-                resampled = _resample(
-                    secondary[key], self.target_spacing, sitk.sitkLinear
-                )
-                arr = _to_numpy(resampled)
-                if (
-                    key == "hbv"
-                    and case.get("hbv_source", "hbv") == "dwi"
-                    and self.dwi_hbv_preprocess_enabled
-                ):
-                    arr = _preprocess_dwi_as_hbv(
-                        arr,
-                        clip_percentiles=self.dwi_hbv_clip_percentiles,
-                        use_log1p=self.dwi_hbv_log1p,
-                    )
-                arrays.append(_zscore_normalize(arr))
-
-        # 5. Stack → (C, D, H, W)
-        image_np = np.stack(arrays, axis=0)
+        image = _prepare_case_image_tensor(
+            case=case,
+            target_spacing=self.target_spacing,
+            active_modalities=self.active_modalities,
+            dwi_hbv_preprocess_enabled=self.dwi_hbv_preprocess_enabled,
+            dwi_hbv_clip_percentiles=self.dwi_hbv_clip_percentiles,
+            dwi_hbv_log1p=self.dwi_hbv_log1p,
+        )
+        image_np = image.numpy()
+        t2w_sitk = _resample(_load_volume(case["t2w"]), self.target_spacing, sitk.sitkLinear)
 
         # 6. Load and binarise label.
         # Resample the label into the *resampled* T2w's exact voxel grid rather
@@ -1432,4 +1656,25 @@ class PiCaiDataset(Dataset):
 
         label_np = label_np[np.newaxis]  # (1, D, H, W)
 
-        return torch.from_numpy(image_np), torch.from_numpy(label_np)
+        prostate_label_t: torch.Tensor | None = None
+        if self.requires_prostate_label:
+            prostate_path = case.get("prostate_label")
+            if prostate_path is None:
+                raise ValueError(
+                    f"Case '{case['case_id']}' is missing prostate_label but the current task/ROI requires it."
+                )
+            prostate_sitk = _load_volume(prostate_path)
+            prostate_sitk = _resample_to_reference(
+                prostate_sitk,
+                t2w_sitk,
+                interpolator=sitk.sitkNearestNeighbor,
+                default_value=0.0,
+            )
+            prostate_np = (_to_numpy(prostate_sitk) > 0).astype(np.float32)[np.newaxis]
+            prostate_label_t = torch.from_numpy(prostate_np)
+
+        return _PreprocessedCase(
+            image=torch.from_numpy(image_np),
+            lesion_label=torch.from_numpy(label_np),
+            prostate_label=prostate_label_t,
+        )

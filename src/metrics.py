@@ -40,7 +40,9 @@ except ImportError:
 
 def _binarise(logits: Tensor, threshold: float = 0.5) -> Tensor:
     """Apply sigmoid then threshold to produce a binary {0, 1} mask."""
-    return (torch.sigmoid(logits) >= threshold).float()
+    # Use a strict threshold so ROI-restored padding logits of 0.0
+    # (sigmoid -> 0.5) remain background instead of becoming positives.
+    return (torch.sigmoid(logits) > threshold).float()
 
 
 # ---------------------------------------------------------------------------

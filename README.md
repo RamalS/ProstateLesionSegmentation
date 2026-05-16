@@ -270,6 +270,10 @@ bash scripts/download_dataset.sh --no-images --no-labels
 docker compose run --rm trainer train --config /workspace/configs/prostate158_default.yaml
 PYTHONPATH=. python -m src.train --config configs/prostate158_local.yaml
 
+# Prostate localizer training (stage 1 for predicted ROI cropping)
+docker compose run --rm trainer train --config /workspace/configs/prostate158_localizer_default.yaml
+PYTHONPATH=. python -m src.train --config configs/prostate158_localizer_local.yaml
+
 # Verify dataset statistics after download
 PYTHONPATH=. python scripts/count_positives.py \
     --images-dir data/images \
@@ -292,6 +296,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Train Deconver tuned A | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml` |
 | Train Deconver tuned B (`num_samples=2`) | `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_b.yaml` |
 | Train Deconver tuned C (`bce_pos_weight=20`) | `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_c.yaml` |
+| Train Prostate158 localizer | `docker compose run --rm trainer train --config /workspace/configs/prostate158_localizer_default.yaml` |
 | Train with current config from resumed checkpoint weights only | `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --resume /outputs/runs/<run_name>/checkpoints/best.pt --current-config` |
 | Pretrain encoder (SSL) | `docker compose run --rm trainer pretrain` |
 | Pretrain encoder (Volta/TITAN V) | `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain` |
@@ -312,6 +317,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 | Train Deconver tuned A | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml` |
 | Train Deconver tuned B (`num_samples=2`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_b.yaml` |
 | Train Deconver tuned C (`bce_pos_weight=20`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_c.yaml` |
+| Train Prostate158 localizer | `PYTHONPATH=. python -m src.train --config configs/prostate158_localizer_local.yaml` |
 | Train with current config from resumed checkpoint weights only | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml --resume outputs/runs/<run_name>/checkpoints/best.pt --current-config` |
 | Pretrain encoder (SSL) | `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml` |
 | Smoke test | `PYTHONPATH=. python scripts/smoke_test.py` |
@@ -357,6 +363,89 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 | `early_stopping_patience` | 30 | 0 | Consecutive val epochs without improvement before stopping (0 = disabled) |
 | `amp_dtype` | `fp16` | `bf16` | AMP dtype (`fp16` for Volta/Turing, `bf16` for Ampere+/Blackwell) |
 | `ntfy_url / ntfy_topic` | set | `""` | ntfy push notification server URL and topic (empty = disabled) |
+
+---
+
+## Localizer and ROI Training
+
+The repo supports a two-stage Prostate158 workflow:
+
+1. Train a prostate **localizer** with `task: prostate_localization`.
+2. Train lesion segmentation with `task: lesion_segmentation`, optionally cropping each case to a prostate ROI first.
+
+The localizer predicts the whole-prostate mask. ROI cropping then converts that mask into a bounding box, expands it by `roi.margin_mm`, enforces `roi.min_size_vox`, and crops the image/label tensors before patch sampling. This behavior is wired through [`src/roi.py`](src/roi.py) and [`src/dataset.py`](src/dataset.py).
+
+### Localizer
+
+Use the dedicated configs:
+
+- Docker: `docker compose run --rm trainer train --config /workspace/configs/prostate158_localizer_default.yaml`
+- Local: `PYTHONPATH=. python -m src.train --config configs/prostate158_localizer_local.yaml`
+
+These configs set:
+
+- `task: prostate_localization`
+- `dataset_type: prostate158`
+- `prostate158_prostate_label_col: t2_prostate_reader1`
+
+Current constraint: `task: prostate_localization` requires `dataset_type: prostate158`, and ROI cropping is not allowed while training the localizer itself.
+
+### ROI Modes
+
+The `roi` block supports three modes:
+
+- `disabled`: no cropping.
+- `gt_mask`: crop from the ground-truth prostate mask. This requires a prostate label column and is currently intended for `dataset_type: prostate158`.
+- `predicted_mask`: crop from a trained localizer prediction. This requires `roi.localizer_run`.
+
+Important ROI keys:
+
+- `roi.margin_mm`
+- `roi.min_size_vox`
+- `roi.fallback_to_full_volume`
+- `roi.localizer_threshold`
+- `roi.localizer_keep_largest_component`
+
+### How to Train ROI Lesion Segmentation
+
+Start from a lesion-segmentation config such as [`configs/prostate158_default.yaml`](configs/prostate158_default.yaml), [`configs/prostate158_local.yaml`](configs/prostate158_local.yaml), or [`configs/deconver_conf.yaml`](configs/deconver_conf.yaml), then enable ROI cropping.
+
+Ground-truth ROI example:
+
+```yaml
+task: lesion_segmentation
+dataset_type: prostate158
+prostate158_prostate_label_col: t2_prostate_reader1
+
+roi:
+  mode: gt_mask
+  margin_mm: [6.0, 12.0, 12.0]
+  min_size_vox: [16, 128, 128]
+```
+
+Predicted ROI example:
+
+```yaml
+task: lesion_segmentation
+dataset_type: prostate158
+
+roi:
+  mode: predicted_mask
+  localizer_run: /outputs/runs/<localizer_run_name>
+  margin_mm: [6.0, 12.0, 12.0]
+  min_size_vox: [16, 128, 128]
+  localizer_threshold: 0.5
+  localizer_keep_largest_component: true
+```
+
+`roi.localizer_run` can point either to the localizer run directory or to a checkpoint inside `<run>/checkpoints/`. The code resolves the matching `config.yaml` and checkpoint automatically.
+
+Recommended order for predicted ROI training:
+
+1. Train a localizer.
+2. Copy a lesion-segmentation config and set `roi.mode: predicted_mask`.
+3. Set `roi.localizer_run` to the trained localizer run.
+4. Launch normal lesion training with that ROI-enabled config.
 
 ---
 

@@ -1,9 +1,9 @@
 # Training Run Report
 
-- generated_at: `2026-05-12 16:17:39`
+- generated_at: `2026-05-14 19:04:24`
 - base_dir: `/outputs/runs`
 - xai_dir: `/workspace/visualizations/xai`
-- runs: `10`
+- runs: `13`
 - sort_by: `best_composite_score`
 
 ## Comparison
@@ -12,9 +12,12 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 20260415_210631_v3_multimodal | 2:41:19 | 74 | 14 | 0.5285 | 0.3182 | 0.2155 | 0.7893 | n/a | n/a | attention_unet3d | tversky_bce | (20, 128, 128) |
 | 20260415_173357_v3_multimodal | 3:16:35 | 91 | 38 | 0.5278 | 0.3472 | 0.2423 | 0.7603 | n/a | n/a | attention_unet3d | tversky_bce | (20, 128, 128) |
+| 20260513_210500_deconver_tuned_a | 1:43:11 | 140 | 52 | 0.5123 | 0.5064 | 0.3744 | 0.5341 | 0.7284 | 11.4219 | deconver | tversky_bce | (16, 128, 128) |
 | 20260507_193114_deconver_tuned_a | 55:23:54 | 140 | 96 | 0.4772 | 0.4373 | 0.3203 | 0.6095 | 0.4974 | 43.5947 | deconver | tversky_bce | (16, 128, 128) |
 | 20260418_224246_deconver | 7:19:20 | 139 | 122 | 0.4709 | 0.4067 | 0.2859 | 0.6567 | 0.4451 | 58.3092 | deconver | tversky_bce | (16, 128, 128) |
+| 20260514_153746_deconver_tuned_a | 0:18:24 | 25 | 10 | 0.4646 | 0.4728 | 0.3419 | 0.4586 | 0.6755 | 19.9069 | deconver | tversky_bce | (16, 128, 128) |
 | 20260427_221309_unet3d | 13:25:46 | 300 | 276 | 0.4409 | 0.4152 | 0.3042 | 0.5181 | 0.5335 | 39.3815 | attention_unet3d | tversky_bce | (16, 128, 128) |
+| 20260513_105631_deconver_multitask_a | 9:59:57 | 26 | 4 | 0.4377 | 0.4313 | 0.3118 | 0.5606 | 0.5256 | 45.8476 | deconver_multitask | tversky_bce | (16, 128, 128) |
 | 20260416_112700_v3_multimodal | 7:26:21 | 170 | 146 | 0.4323 | 0.3620 | 0.2547 | 0.6184 | 0.4602 | 55.2121 | attention_unet3d | tversky_bce | (20, 128, 128) |
 | 20260507_205845_fct_default | 44:06:05 | 300 | 268 | 0.4311 | 0.4149 | 0.2979 | 0.5023 | 0.7547 | 51.4333 | fct | tversky_bce | (16, 128, 128) |
 | 20260416_193800_v3_multimodal | 12:08:57 | 300 | 206 | 0.4166 | 0.3732 | 0.2650 | 0.5171 | 0.4833 | 79.1391 | attention_unet3d | tversky_bce | (20, 128, 128) |
@@ -181,6 +184,67 @@
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
 
+## 20260513_210500_deconver_tuned_a
+
+- run_dir: `/outputs/runs/20260513_210500_deconver_tuned_a`
+- experiment_name: `deconver_tuned_a`
+- git_commit: `unknown`
+- config_source: `metadata.json`
+- start_time: `2026-05-13 21:05:43`
+- end_time: `2026-05-13 22:48:53`
+- duration: `1:43:11`
+- epochs: stopped=140, configured=140, best=52
+- early_stopped: `False`
+
+### Visualization
+<img src="visualizations/20260513_210500_deconver_tuned_a_10726_1000742_t2w_orbit.gif" alt="20260513_210500_deconver_tuned_a orbit" loading="lazy" decoding="async">
+
+<img src="visualizations/20260513_210500_deconver_tuned_a_eval_visualization.png" alt="20260513_210500_deconver_tuned_a evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: `n/a`
+
+### Evaluation
+- checkpoint: `best.pt`
+- test_cases: `10` (`5` positive, `5` negative)
+
+| Metric | Value |
+| --- | --- |
+| dice | 0.5030 |
+| iou | 0.3569 |
+| sensitivity | 0.9005 |
+| precision | 0.3890 |
+| hd95 | 99.6676 |
+
+### Training Validation Metrics
+
+| Metric | Best | At Best Epoch | Last Val |
+| --- | --- | --- | --- |
+| composite_score | 0.5123 | 0.5123 | 0.4194 |
+| dice | 0.5064 | 0.5064 | 0.4335 |
+| iou | 0.3744 | 0.3744 | 0.3105 |
+| sensitivity | 0.5341 | 0.5212 | 0.3983 |
+| precision | 0.7284 | 0.5265 | 0.6426 |
+| hd95 | 11.4219 | 26.6939 | 15.9666 |
+
+### Config Highlights
+- model: `deconver`
+- features: `[32, 64, 128, 256]`
+- loss: `tversky_bce` (alpha=0.3, beta=0.7, dice_weight=1.0, bce_weight=1.0, bce_pos_weight=10.0)
+- patch_size: `[16, 128, 128]`
+- target_spacing: `[3.0, 0.5, 0.5]`
+- modalities: use_t2w=True, use_adc=True, use_hbv=True
+- optimizer/schedule: lr=0.0001, weight_decay=1e-05, warmup_epochs=8
+- train/val cadence: batch_size=2, epochs=140, val_every=2, val_start_epoch=1, val_compute_hd95_every=1
+- best-checkpoint score weights: w_sensitivity=0.4, w_dice=0.6, w_hd95=0.0, hd95_scale=10.0
+- early stopping: patience=50, min_delta=0.001
+- runtime: use_amp=True, amp_dtype=bf16, use_compile=False
+- encoder init: pretrained_encoder_checkpoint=/outputs/pretrain_runs/20260505_215426_ssl_pretrain_deconver_mae/checkpoints/best.pt, freeze_encoder_epochs=0
+- parameters: total=10,478,659, trainable=10,478,659
+
+### Warnings
+- Using centralized eval PNG from visualizations directory: 20260513_210500_deconver_tuned_a_eval_visualization.png
+
 ## 20260507_193114_deconver_tuned_a
 
 - run_dir: `/outputs/runs/20260507_193114_deconver_tuned_a`
@@ -341,6 +405,64 @@
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: postprocess_connectivity, postprocess_enabled, postprocess_min_component_volume_mm3, pred_threshold, sw_batch_size).
 
+## 20260514_153746_deconver_tuned_a
+
+- run_dir: `/outputs/runs/20260514_153746_deconver_tuned_a`
+- experiment_name: `deconver_tuned_a`
+- git_commit: `unknown`
+- config_source: `metadata.json`
+- start_time: `2026-05-14 15:38:26`
+- end_time: `2026-05-14 15:56:50`
+- duration: `0:18:24`
+- epochs: stopped=25, configured=25, best=10
+- early_stopped: `False`
+
+### Visualization
+<img src="visualizations/20260514_153746_deconver_tuned_a_10726_1000742_t2w_orbit.gif" alt="20260514_153746_deconver_tuned_a orbit" loading="lazy" decoding="async">
+
+<img src="visualizations/20260514_153746_deconver_tuned_a_eval_visualization.png" alt="20260514_153746_deconver_tuned_a evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: `n/a`
+
+### Evaluation
+- checkpoint: `best.pt`
+- test_cases: `10` (`5` positive, `5` negative)
+
+| Metric | Value |
+| --- | --- |
+| dice | 0.5118 |
+| iou | 0.3690 |
+| sensitivity | 0.9002 |
+| precision | 0.3873 |
+| hd95 | 115.9511 |
+
+### Training Validation Metrics
+
+| Metric | Best | At Best Epoch | Last Val |
+| --- | --- | --- | --- |
+| composite_score | 0.4646 | 0.4646 | 0.3874 |
+| dice | 0.4728 | 0.4686 | 0.4151 |
+| iou | 0.3419 | 0.3419 | 0.2882 |
+| sensitivity | 0.4586 | 0.4586 | 0.3458 |
+| precision | 0.6755 | 0.5231 | 0.6152 |
+| hd95 | 19.9069 | 37.8259 | 29.8171 |
+
+### Config Highlights
+- model: `deconver`
+- features: `[32, 64, 128, 256]`
+- loss: `tversky_bce` (alpha=0.3, beta=0.7, dice_weight=1.0, bce_weight=1.0, bce_pos_weight=10.0)
+- patch_size: `[16, 128, 128]`
+- target_spacing: `[3.0, 0.5, 0.5]`
+- modalities: use_t2w=True, use_adc=True, use_hbv=True
+- optimizer/schedule: lr=0.0001, weight_decay=1e-05, warmup_epochs=8
+- train/val cadence: batch_size=2, epochs=25, val_every=2, val_start_epoch=1, val_compute_hd95_every=1
+- best-checkpoint score weights: w_sensitivity=0.4, w_dice=0.6, w_hd95=0.0, hd95_scale=10.0
+- early stopping: patience=50, min_delta=0.001
+- runtime: use_amp=True, amp_dtype=bf16, use_compile=False
+- encoder init: pretrained_encoder_checkpoint=/outputs/pretrain_runs/20260505_215426_ssl_pretrain_deconver_mae/checkpoints/best.pt, freeze_encoder_epochs=0
+- parameters: total=10,478,659, trainable=10,478,659
+
 ## 20260427_221309_unet3d
 
 - run_dir: `/outputs/runs/20260427_221309_unet3d`
@@ -420,6 +542,67 @@
 
 ### Warnings
 - metadata.json config differs from config.yaml; using metadata.json (mismatched keys: sw_batch_size).
+
+## 20260513_105631_deconver_multitask_a
+
+- run_dir: `/outputs/runs/20260513_105631_deconver_multitask_a`
+- experiment_name: `deconver_multitask_a`
+- git_commit: `unknown`
+- config_source: `metadata.json`
+- start_time: `2026-05-13 11:01:33`
+- end_time: `2026-05-13 21:01:30`
+- duration: `9:59:57`
+- epochs: stopped=26, configured=140, best=4
+- early_stopped: `True`
+
+### Visualization
+<img src="visualizations/20260513_105631_deconver_multitask_a_10726_1000742_t2w_orbit.gif" alt="20260513_105631_deconver_multitask_a orbit" loading="lazy" decoding="async">
+
+<img src="visualizations/20260513_105631_deconver_multitask_a_eval_visualization.png" alt="20260513_105631_deconver_multitask_a evaluation" loading="lazy" decoding="async">
+
+### Explainability (XAI)
+- xai_summary: `n/a`
+
+### Evaluation
+- checkpoint: `best.pt`
+- test_cases: `10` (`5` positive, `5` negative)
+
+| Metric | Value |
+| --- | --- |
+| dice | 0.6076 |
+| iou | 0.4557 |
+| sensitivity | 0.6686 |
+| precision | 0.6985 |
+| hd95 | 4.7500 |
+
+### Training Validation Metrics
+
+| Metric | Best | At Best Epoch | Last Val |
+| --- | --- | --- | --- |
+| composite_score | 0.4377 | 0.4377 | 0.4094 |
+| dice | 0.4313 | 0.4313 | 0.4068 |
+| iou | 0.3118 | 0.3118 | 0.2945 |
+| sensitivity | 0.5606 | 0.5317 | 0.4853 |
+| precision | 0.5256 | 0.4336 | 0.4319 |
+| hd95 | 45.8476 | 61.9843 | 63.4659 |
+
+### Config Highlights
+- model: `deconver_multitask`
+- features: `[32, 64, 128, 256]`
+- loss: `tversky_bce` (alpha=0.3, beta=0.7, dice_weight=1.0, bce_weight=1.0, bce_pos_weight=10.0)
+- patch_size: `[16, 128, 128]`
+- target_spacing: `[3.0, 0.5, 0.5]`
+- modalities: use_t2w=True, use_adc=True, use_hbv=True
+- optimizer/schedule: lr=0.0001, weight_decay=1e-05, warmup_epochs=8
+- train/val cadence: batch_size=2, epochs=140, val_every=2, val_start_epoch=1, val_compute_hd95_every=1
+- best-checkpoint score weights: w_sensitivity=0.35, w_dice=0.45, w_hd95=0.2, hd95_scale=25.0
+- early stopping: patience=50, min_delta=0.001
+- runtime: use_amp=True, amp_dtype=bf16, use_compile=False
+- encoder init: pretrained_encoder_checkpoint=/outputs/pretrain_runs/20260505_215426_ssl_pretrain_deconver_mae/checkpoints/best.pt, freeze_encoder_epochs=0
+- parameters: total=10,479,172, trainable=10,479,172
+
+### Warnings
+- Using centralized eval PNG from visualizations directory: 20260513_105631_deconver_multitask_a_eval_visualization.png
 
 ## 20260416_112700_v3_multimodal
 

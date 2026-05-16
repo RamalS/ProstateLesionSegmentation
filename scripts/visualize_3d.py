@@ -144,6 +144,34 @@ def _fmt(v: float) -> str:
     return f"{v:.4f}" if not math.isnan(v) else "n/a"
 
 
+def _seg_logits(outputs: object) -> torch.Tensor:
+    """
+    Extract segmentation logits from model outputs.
+
+    Supported structures:
+    - Tensor (single-task models)
+    - list[Tensor] / tuple[Tensor] (deep supervision; use finest-scale logits)
+    - dict with key ``"seg"`` (multi-task models)
+    """
+    if isinstance(outputs, dict):
+        outputs = outputs.get("seg")
+
+    if isinstance(outputs, (list, tuple)):
+        if not outputs:
+            raise ValueError("Model returned an empty segmentation output list.")
+        first = outputs[0]
+        if isinstance(first, torch.Tensor):
+            return first
+        raise TypeError(
+            f"Expected first deep-supervision output to be a Tensor, got {type(first)!r}."
+        )
+
+    if isinstance(outputs, torch.Tensor):
+        return outputs
+
+    raise TypeError(f"Unsupported model output type: {type(outputs)!r}.")
+
+
 def _case_id_from_t2w(t2w_path: Path) -> str:
     """Infer case id from a T2w filename."""
     if t2w_path.name.endswith("_t2w.mha"):
@@ -441,8 +469,7 @@ def _run_inference(
     amp_dtype = torch.float16 if amp_dtype_key == "fp16" else torch.bfloat16
 
     def predictor(x: torch.Tensor) -> torch.Tensor:
-        out = model(x)
-        return out[0] if isinstance(out, (list, tuple)) else out
+        return _seg_logits(model(x))
 
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=True)

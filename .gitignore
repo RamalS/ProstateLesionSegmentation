@@ -16,3 +16,8 @@ __pycache__/
 visualizations/*.html
 visualizations/**/*.html
 conversation/
+
+# Ignore LaTeX build artifacts in notes, but keep source/PDF
+notes/*
+!notes/*.tex
+!notes/*.pdf

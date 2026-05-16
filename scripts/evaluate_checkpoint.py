@@ -119,6 +119,34 @@ def _json_float(v: float) -> float | None:
     return float(v) if math.isfinite(v) else None
 
 
+def _seg_logits(outputs: object) -> torch.Tensor:
+    """
+    Return segmentation logits tensor from model outputs.
+
+    Supported output structures:
+    - Tensor (single-task models)
+    - list[Tensor] (deep supervision; uses finest-scale logits at index 0)
+    - dict with key ``"seg"`` (multi-task models)
+    """
+    if isinstance(outputs, dict):
+        outputs = outputs.get("seg")
+
+    if isinstance(outputs, list):
+        if not outputs:
+            raise ValueError("Model returned an empty segmentation output list.")
+        first = outputs[0]
+        if isinstance(first, torch.Tensor):
+            return first
+        raise TypeError(
+            f"Expected first deep-supervision output to be a Tensor, got {type(first)!r}."
+        )
+
+    if isinstance(outputs, torch.Tensor):
+        return outputs
+
+    raise TypeError(f"Unsupported model output type: {type(outputs)!r}.")
+
+
 def _section(title: str) -> None:
     """Print a labelled section divider to stdout."""
     bar = "─" * 68
@@ -619,6 +647,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--sw-batch-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Override the sliding-window batch size from the run config. "
+            "Lower values reduce peak inference memory."
+        ),
+    )
+    parser.add_argument(
         "--summary-json",
         type=str,
         default="",
@@ -766,7 +804,7 @@ def main() -> None:
         int(v) for v in cfg.get("patch_size", [20, 128, 128])
     )
     sw_overlap    = float(cfg.get("sw_overlap", 0.5))
-    sw_batch_size = int(cfg.get("sw_batch_size", 4))
+    sw_batch_size = int(args.sw_batch_size if args.sw_batch_size is not None else cfg.get("sw_batch_size", 4))
     ds = PiCaiDataset(
         images_dir=images_dir,
         labels_dir=labels_dir,
@@ -812,10 +850,9 @@ def main() -> None:
         c["case_id"]: c.get("has_lesion", False) for c in test_cases
     }
 
-    # When deep supervision is active the model returns a list of tensors
-    # (finest → coarsest).  sliding_window_inference requires a callable
-    # that returns a single tensor, so we wrap accordingly.
-    _predictor = (lambda x: model(x)[0]) if cfg.get("deep_supervision") else model
+    # sliding_window_inference requires predictor -> Tensor logits.
+    # Models in this repo can return Tensor, list[Tensor], or {"seg": ...}.
+    _predictor = lambda x: _seg_logits(model(x))
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Inference", unit="vol"):

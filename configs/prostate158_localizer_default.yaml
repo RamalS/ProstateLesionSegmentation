@@ -1,6 +1,6 @@
 experiment_name: prostate158_localizer
 epochs: 300
-batch_size: 8
+batch_size: 2
 learning_rate: 1.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
@@ -19,7 +19,7 @@ prostate158_val_split: valid
 prostate158_test_split: test
 prostate158_label_target: tumor
 prostate158_label_reader: 1
-prostate158_prostate_label_col: t2_prostate_reader1
+prostate158_prostate_label_col: t2_anatomy_reader1
 images_dir: /data/prostate158_train
 labels_dir: /data/prostate158_train
 target_spacing: [3.0, 0.5, 0.5]
@@ -81,7 +81,7 @@ sw_batch_size: 20
 val_min_sw_batch_size: 1
 val_compute_hd95_every: 1
 val_every: 2
-val_start_epoch: 50
+val_start_epoch: 0
 
 # Prediction / post-processing
 pred_threshold: 0.5
@@ -91,9 +91,9 @@ postprocess_connectivity: 26
 
 # Runtime
 use_amp: true
-amp_dtype: fp16
+amp_dtype: bf16
 use_compile: false
-cache_mode: ram
+cache_mode: storage
 cache_rate: 1.0
 
 # Checkpointing

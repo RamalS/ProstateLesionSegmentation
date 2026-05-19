@@ -12,17 +12,9 @@ deterministic: false
 task: lesion_segmentation
 
 # Data
-dataset_type: prostate158
-prostate158_train_dir: /data/prostate158_train
-prostate158_test_dir: /data/prostate158_test
-prostate158_train_split: train
-prostate158_val_split: valid
-prostate158_test_split: test
-prostate158_label_target: tumor
-prostate158_label_reader: 1
-# prostate158_prostate_label_col: t2_prostate_reader1
-images_dir: /data/prostate158_train
-labels_dir: /data/prostate158_train
+dataset_type: picai
+images_dir: /data/images
+labels_dir: /data/labels
 target_spacing: [3.0, 0.5, 0.5]   # (z, y, x) in mm — preserves T2w in-plane res
 val_fraction: 0.2
 

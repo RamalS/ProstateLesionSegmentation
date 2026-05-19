@@ -315,6 +315,7 @@ PYTHONPATH=. python scripts/count_positives.py \
 
 | Task | Command |
 |---|---|
+| Convert external Deconver checkpoint | `PYTHONPATH=. python scripts/convert_external_deconver_checkpoint.py --input /home/ramals/School/deconver_isles22/logs/train_fold0_250225_082642565889/model_fold=0_checkpoint_epoch=500.pt --output outputs/pretrained_external/deconver_isles22_fold0_epoch500_model_state_dict.pt` |
 | Train | `PYTHONPATH=. python -m src.train --config configs/local_default.yaml` |
 | Train Deconver tuned A | `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml` |
 | Train Deconver tuned B (`num_samples=2`) | `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_b.yaml` |

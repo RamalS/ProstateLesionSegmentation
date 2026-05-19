@@ -368,7 +368,7 @@ def validate_with_oom_retry(
             ):
                 raise
 
-            next_sw_batch_size = max(min_sw_batch_size, current_sw_batch_size // 2)
+            next_sw_batch_size = max(min_sw_batch_size, current_sw_batch_size - 1)
             if next_sw_batch_size == current_sw_batch_size:
                 raise
 
@@ -874,7 +874,8 @@ def main() -> None:
     last_hd95: float = float("nan")   # most-recent finite HD95; NaN until first computation
     start_epoch = 1
     sw_overlap = cfg.get("sw_overlap", 0.5)
-    sw_batch_size = cfg.get("sw_batch_size", 4)
+    sw_batch_size = int(cfg.get("sw_batch_size", 4))
+    val_sw_batch_size = sw_batch_size
     val_min_sw_batch_size: int = max(1, int(cfg.get("val_min_sw_batch_size", 1)))
     val_compute_hd95_every: int = max(0, int(cfg.get("val_compute_hd95_every", 0)))
     epochs = cfg["epochs"]
@@ -1177,7 +1178,7 @@ def main() -> None:
                 device=device,
                 patch_size=patch_size,
                 sw_overlap=sw_overlap,
-                sw_batch_size=sw_batch_size,
+                sw_batch_size=val_sw_batch_size,
                 min_sw_batch_size=val_min_sw_batch_size,
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
@@ -1189,12 +1190,13 @@ def main() -> None:
                 spacing_zyx=target_spacing,
             )
 
-            if used_sw_batch_size != sw_batch_size:
+            if used_sw_batch_size != val_sw_batch_size:
                 logger.info(
-                    "Validation used reduced sw_batch_size=%d (configured=%d).",
+                    "Validation sw_batch_size adjusted to %d (configured=%d); future validations will start from this value.",
                     used_sw_batch_size,
                     sw_batch_size,
                 )
+            val_sw_batch_size = used_sw_batch_size
 
             writer.add_scalar("val/dice",        val_metrics["dice"],        epoch)
             writer.add_scalar("val/iou",         val_metrics["iou"],         epoch)

@@ -101,7 +101,7 @@ keep_last_checkpoints: 3
 # resume_checkpoint: /outputs/runs/<run_name>/checkpoints/epoch_0050.pt
 
 # SSL encoder initialization
-pretrained_encoder_checkpoint: "/outputs/pretrain_runs/20260505_215426_ssl_pretrain_deconver_mae/checkpoints/best.pt"
+pretrained_encoder_checkpoint: "/outputs/pretrained_external/deconver_isles22_fold0_epoch500_model_state_dict.pt"
 freeze_encoder_epochs: 0            # >0 freezes encoder for first N epochs
 
 # Best checkpoint selection (composite score)

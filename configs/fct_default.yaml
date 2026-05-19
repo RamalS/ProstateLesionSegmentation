@@ -1,6 +1,6 @@
 experiment_name: fct_default
 epochs: 300
-batch_size: 8
+batch_size: 6
 learning_rate: 4.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
@@ -70,7 +70,7 @@ warmup_epochs: 10                  # linear warm-up from 10 % → 100 % of learn
 
 # Validation (sliding window)
 sw_overlap: 0.50                   # overlap fraction for sliding window inference
-sw_batch_size: 40                  # number of patches processed per SW step
+sw_batch_size: 24                  # number of patches processed per SW step
 val_min_sw_batch_size: 1           # lower bound if validation OOM fallback is triggered
 val_compute_hd95_every: 1          # 0 = skip HD95 during training-time validation
 val_every: 2                       # run validation every N epochs (also always runs on the final epoch)

@@ -91,6 +91,26 @@ class Deconv(nn.Module):
 
     def update_s(self, x: Tensor, s: Tensor, h: Tensor) -> Tensor:
         # x ≈ conv(s,h) --> s = ?
+        if x.dtype == torch.float16:
+            # Under FP16 autocast this ratio can overflow/underflow; keep BF16/FP32
+            # behavior unchanged and stabilize only FP16 by computing in FP32.
+            fp16_eps = max(float(self.eps), 1e-6)
+            autocast_off = (
+                torch.autocast(device_type="cuda", enabled=False)
+                if x.is_cuda
+                else nullcontext()
+            )
+            with autocast_off:
+                x32 = x.float()
+                s32 = s.float()
+                h32 = h.float()
+                numerator = self.conv(x32, t(flip(h32))) + fp16_eps
+                denominator = self.conv(self.conv(s32, h32), t(flip(h32))).clamp_min(
+                    fp16_eps
+                )
+                updated = s32 * numerator / denominator
+            return updated.to(dtype=s.dtype)
+
         numerator = self.conv(x, t(flip(h))) + self.eps
         denominator = self.conv(self.conv(s, h), t(flip(h))) + self.eps
         return s * numerator / denominator

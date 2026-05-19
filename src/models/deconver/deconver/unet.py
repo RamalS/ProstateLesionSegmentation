@@ -2,6 +2,7 @@ from typing import Sequence
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .utils.helpers import as_tuple, partialize
@@ -125,6 +126,11 @@ class UNetDecoderBlock(nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.upsample(x1)
+        if x1.shape[2:] != x2.shape[2:]:
+            pad = []
+            for x2_dim, x1_dim in zip(reversed(x2.shape[2:]), reversed(x1.shape[2:])):
+                pad.extend([0, x2_dim - x1_dim])
+            x1 = F.pad(x1, pad)
         out = torch.cat([x2, x1], dim=1)
         out = self.block(out)
         return out

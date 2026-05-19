@@ -48,6 +48,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+import torch.nn as nn
 import torch
 
 # ---------------------------------------------------------------------------
@@ -520,6 +521,34 @@ try:
     else:
         _got = tuple(_dconv_out.shape) if isinstance(_dconv_out, torch.Tensor) else type(_dconv_out).__name__
         fail(f"Deconver forward: got {_got}, expected {_dconv_expected}")
+
+    # --- 3e-iia. Odd-sized direct forward should pad decoder skips -----------
+    _dconv_odd_cfg = dict(_dconv_cfg_base)
+    _dconv_odd_cfg.update(
+        {
+            "deconver_encoder_depth": [1, 1],
+            "deconver_encoder_width": [16, 32],
+            "deconver_strides": [1, 2],
+        }
+    )
+    _dconv_odd_model = _bm_dconv(_dconv_odd_cfg).to(DEVICE)
+    _dconv_odd_inp = torch.randn(1, 3, 5, 33, 35, device=DEVICE)
+    with torch.no_grad():
+        _dconv_odd_out = _dconv_odd_model(_dconv_odd_inp)
+
+    if (
+        isinstance(_dconv_odd_out, torch.Tensor)
+        and _dconv_odd_out.shape == (1, 1, 5, 33, 35)
+        and torch.isfinite(_dconv_odd_out).all()
+    ):
+        ok("Deconver odd-dim forward pass OK — output shape matches input and is finite")
+    else:
+        _odd_shape = (
+            tuple(_dconv_odd_out.shape)
+            if isinstance(_dconv_odd_out, torch.Tensor)
+            else type(_dconv_odd_out).__name__
+        )
+        fail(f"Deconver odd-dim forward mismatch: got {_odd_shape}, expected (1, 1, 5, 33, 35)")
 
     # --- 3e-iii. Deep supervision (num_deep_supr) returns a list ---------------
     _dconv_cfg_ds = dict(_dconv_cfg_base)
@@ -1406,15 +1435,19 @@ if _sitk is None:
     skip("SimpleITK not installed — skipping ROI dataset tests")
 else:
     try:
+        import importlib.util
         import tempfile
 
         import numpy as np
         import SimpleITK as sitk  # noqa: N813
 
         from dataset import PiCaiDataset
+        from dataset import _ProstateROILocalizer
         from postprocess import logits_to_binary_mask
         from roi import (
+            binarize_mask,
             compute_crop_bounds,
+            crop_tensor,
             restore_from_roi,
             resolve_roi_settings,
             validate_task_and_roi_config,
@@ -1606,6 +1639,281 @@ else:
                     "predicted_mask ROI train sample shape mismatch: "
                     f"{tuple(sample_pred['image'].shape)}"
                 )
+
+            localizer_run = root / "fake_localizer_run"
+            (localizer_run / "checkpoints").mkdir(parents=True, exist_ok=True)
+            localizer_cfg = {
+                "model": "deconver",
+                "task": "prostate_localization",
+                "use_t2w": True,
+                "use_adc": False,
+                "use_hbv": False,
+                "out_channels": 1,
+                "patch_size": [4, 32, 32],
+                "sw_overlap": 0.25,
+                "deconver_encoder_depth": [1, 1],
+                "deconver_encoder_width": [16, 32],
+                "deconver_strides": [1, 2],
+                "deconver_kernel_size": [3, 3, 3],
+                "deconver_groups": -1,
+                "deconver_ndc_ratio": 2,
+                "dwi_hbv_preprocess": {"enabled": False},
+            }
+            (localizer_run / "config.yaml").write_text(
+                "\n".join(
+                    [
+                        "model: deconver",
+                        "task: prostate_localization",
+                        "use_t2w: true",
+                        "use_adc: false",
+                        "use_hbv: false",
+                        "out_channels: 1",
+                        "patch_size: [4, 32, 32]",
+                        "sw_overlap: 0.25",
+                        "deconver_encoder_depth: [1, 1]",
+                        "deconver_encoder_width: [16, 32]",
+                        "deconver_strides: [1, 2]",
+                        "deconver_kernel_size: [3, 3, 3]",
+                        "deconver_groups: -1",
+                        "deconver_ndc_ratio: 2",
+                        "dwi_hbv_preprocess:",
+                        "  enabled: false",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _localizer_model = _bm_dconv(localizer_cfg)
+            torch.save(
+                {"model_state_dict": _localizer_model.state_dict(), "epoch": 0},
+                localizer_run / "checkpoints" / "best.pt",
+            )
+
+            odd_case_id = "roi_case_odd"
+            odd_image_arr = np.zeros((9, 65, 67), dtype=np.float32)
+            odd_image_arr[:, 12:53, 16:58] = 75.0
+            odd_lesion_arr = np.zeros((9, 65, 67), dtype=np.uint8)
+            odd_lesion_arr[3:6, 28:40, 30:44] = 1
+            odd_prostate_arr = np.zeros((9, 65, 67), dtype=np.uint8)
+            odd_prostate_arr[2:7, 18:50, 20:54] = 1
+            _write_image(images_dir / f"{odd_case_id}_t2w.mha", odd_image_arr, (0.5, 0.5, 3.0))
+            _write_image(labels_dir / f"{odd_case_id}.nii.gz", odd_lesion_arr, (0.5, 0.5, 3.0))
+            odd_prostate_path = labels_dir / f"{odd_case_id}_prostate.nii.gz"
+            _write_image(odd_prostate_path, odd_prostate_arr, (0.5, 0.5, 3.0))
+            odd_case = {
+                "case_id": odd_case_id,
+                "t2w": images_dir / f"{odd_case_id}_t2w.mha",
+                "label": labels_dir / f"{odd_case_id}.nii.gz",
+                "prostate_label": odd_prostate_path,
+            }
+
+            localizer = _ProstateROILocalizer(
+                localizer_run=str(localizer_run),
+                target_spacing=(3.0, 0.5, 0.5),
+            )
+
+            class _WindowGuardLocalizer(nn.Module):
+                def __init__(self, patch_size: tuple[int, int, int]) -> None:
+                    super().__init__()
+                    self.patch_size = tuple(int(v) for v in patch_size)
+
+                def forward(self, x: torch.Tensor) -> torch.Tensor:
+                    if any(dim > limit for dim, limit in zip(x.shape[2:], self.patch_size)):
+                        raise RuntimeError(
+                            f"localizer received full-volume input {tuple(x.shape[2:])}, expected sliding windows"
+                        )
+                    logits = torch.full_like(x[:, :1], -10.0)
+                    d, h, w = x.shape[2:]
+                    logits[:, :, d // 4 : max(d // 4 + 1, (3 * d) // 4),
+                                 h // 4 : max(h // 4 + 1, (3 * h) // 4),
+                                 w // 4 : max(w // 4 + 1, (3 * w) // 4)] = 10.0
+                    return {"seg": logits}
+
+            localizer.model = _WindowGuardLocalizer(localizer.patch_size).eval()
+            odd_mask = localizer.predict_mask(odd_case)
+            odd_mask_bin = binarize_mask(odd_mask, threshold=0.5)
+            odd_bounds = compute_crop_bounds(
+                mask=odd_mask_bin,
+                spacing_zyx=(3.0, 0.5, 0.5),
+                margin_mm=(0.0, 0.0, 0.0),
+                min_size_vox=(4, 24, 24),
+                fallback_to_full_volume=True,
+            )
+            odd_payload = ds_gt._load_and_preprocess(odd_case)
+            odd_crop = crop_tensor(odd_payload.image, odd_bounds.as_dict())
+
+            if odd_mask.shape == odd_image_arr.shape and np.isfinite(odd_mask).all():
+                ok("predicted_mask localizer uses sliding-window inference on odd full volumes")
+            else:
+                fail(
+                    "predicted_mask localizer output shape/values mismatch: "
+                    f"shape={odd_mask.shape}, expected={odd_image_arr.shape}"
+                )
+
+            if (
+                odd_bounds.full_shape_zyx == odd_image_arr.shape
+                and all(0 <= s < e <= full for s, e, full in zip(
+                    odd_bounds.start_zyx,
+                    odd_bounds.end_zyx,
+                    odd_bounds.full_shape_zyx,
+                ))
+                and odd_crop.shape[1:] == (
+                    odd_bounds.end_zyx[0] - odd_bounds.start_zyx[0],
+                    odd_bounds.end_zyx[1] - odd_bounds.start_zyx[1],
+                    odd_bounds.end_zyx[2] - odd_bounds.start_zyx[2],
+                )
+                and all(dim >= min_dim for dim, min_dim in zip(odd_crop.shape[1:], (4, 24, 24)))
+            ):
+                ok("predicted_mask ROI yields valid crop bounds on odd full volumes")
+            else:
+                fail(
+                    "predicted_mask ROI odd-volume bounds/crop mismatch: "
+                    f"bounds={odd_bounds.as_dict()}, crop={tuple(odd_crop.shape)}"
+                )
+
+            _eval_spec = importlib.util.spec_from_file_location(
+                "evaluate_checkpoint",
+                Path(__file__).parent / "evaluate_checkpoint.py",
+            )
+            _eval_mod = importlib.util.module_from_spec(_eval_spec)  # type: ignore[arg-type]
+            sys.modules[_eval_spec.name] = _eval_mod
+            _eval_spec.loader.exec_module(_eval_mod)  # type: ignore[union-attr]
+
+            roi_pred_cfg = {
+                "task": "lesion_segmentation",
+                "roi": {
+                    "mode": "predicted_mask",
+                    "localizer_run": str(localizer_run),
+                    "margin_mm": [0.0, 0.0, 0.0],
+                    "min_size_vox": [4, 32, 32],
+                    "localizer_threshold": 0.5,
+                    "localizer_keep_largest_component": True,
+                    "fallback_to_full_volume": True,
+                },
+            }
+            roi_pred_settings = validate_task_and_roi_config(
+                roi_pred_cfg,
+                "prostate158",
+            )[1]
+
+            class _CacheLocalizer:
+                init_devices: list[str] = []
+                predict_calls = 0
+                close_calls = 0
+
+                def __init__(
+                    self,
+                    localizer_run: str,
+                    target_spacing: tuple[float, ...],
+                    device: torch.device | str | None = None,
+                ) -> None:
+                    del localizer_run, target_spacing
+                    dev = torch.device(device) if device is not None else torch.device("cpu")
+                    self.device = dev
+                    type(self).init_devices.append(str(dev))
+
+                def predict_mask(self, _case: dict) -> np.ndarray:
+                    type(self).predict_calls += 1
+                    return prostate_arr.astype(np.float32)
+
+                def close(self) -> None:
+                    type(self).close_calls += 1
+
+            original_eval_localizer = _eval_mod._ProstateROILocalizer
+            _eval_mod._ProstateROILocalizer = _CacheLocalizer
+            try:
+                cache_cases = [dict(case)]
+                stats_first = _eval_mod._precompute_predicted_roi_bounds(
+                    test_cases=cache_cases,
+                    roi_settings=roi_pred_settings,
+                    target_spacing=(3.0, 0.5, 0.5),
+                    device=DEVICE,
+                    repo_root=root,
+                )
+                cache_path = Path(cache_cases[0]["_roi_bounds_predicted_path"])
+                if (
+                    stats_first["cache_hits"] == 0
+                    and stats_first["cache_misses"] == 1
+                    and _CacheLocalizer.predict_calls == 1
+                    and _CacheLocalizer.close_calls == 1
+                    and cache_path.exists()
+                ):
+                    ok("predicted_mask ROI precompute writes cache and tears down the localizer")
+                else:
+                    fail(
+                        "predicted_mask ROI precompute/cache write mismatch: "
+                        f"stats={stats_first}, predict_calls={_CacheLocalizer.predict_calls}, "
+                        f"close_calls={_CacheLocalizer.close_calls}, cache_exists={cache_path.exists()}"
+                    )
+
+                expected_device = str(DEVICE)
+                if _CacheLocalizer.init_devices == [expected_device]:
+                    ok("predicted_mask ROI precompute constructs localizer on the evaluation device")
+                else:
+                    fail(
+                        "predicted_mask ROI localizer device mismatch: "
+                        f"got {_CacheLocalizer.init_devices}, expected {[expected_device]}"
+                    )
+
+                class _ExplodingLocalizer:
+                    def __init__(
+                        self,
+                        localizer_run: str,
+                        target_spacing: tuple[float, ...],
+                        device: torch.device | str | None = None,
+                    ) -> None:
+                        raise AssertionError(
+                            "localizer should not be constructed when ROI bounds cache is warm"
+                        )
+
+                _eval_mod._ProstateROILocalizer = _ExplodingLocalizer
+                cache_cases_second = [dict(case)]
+                stats_second = _eval_mod._precompute_predicted_roi_bounds(
+                    test_cases=cache_cases_second,
+                    roi_settings=roi_pred_settings,
+                    target_spacing=(3.0, 0.5, 0.5),
+                    device=DEVICE,
+                    repo_root=root,
+                )
+                if (
+                    stats_second["cache_hits"] == 1
+                    and stats_second["cache_misses"] == 0
+                    and isinstance(cache_cases_second[0].get("_roi_bounds_predicted"), dict)
+                ):
+                    ok("predicted_mask ROI precompute reuses cached bounds without localizer inference")
+                else:
+                    fail(
+                        "predicted_mask ROI cache reuse mismatch: "
+                        f"stats={stats_second}, case_keys={sorted(cache_cases_second[0].keys())}"
+                    )
+
+                ds_cached_bounds = PiCaiDataset(
+                    images_dir=images_dir,
+                    labels_dir=labels_dir,
+                    target_spacing=(3.0, 0.5, 0.5),
+                    transform=None,
+                    cases=[
+                        {
+                            **case,
+                            "_roi_bounds_predicted_path": str(cache_path),
+                        }
+                    ],
+                    active_modalities=["t2w"],
+                    task="lesion_segmentation",
+                    roi_settings=roi_pred_settings,
+                    include_full_resampled=True,
+                )
+                ds_cached_bounds._roi_localizer = _ExplodingLocalizer  # type: ignore[assignment]
+                sample_cached = ds_cached_bounds[0]
+                if sample_cached["image"].shape[1:] == (8, 44, 44):
+                    ok("PiCaiDataset reloads predicted ROI bounds from persistent cache path")
+                else:
+                    fail(
+                        "PiCaiDataset persistent ROI cache sample shape mismatch: "
+                        f"{tuple(sample_cached['image'].shape)}"
+                    )
+            finally:
+                _eval_mod._ProstateROILocalizer = original_eval_localizer
 
     except Exception as exc:
         fail("ROI helper / dataset test failed", exc)
@@ -1953,6 +2261,7 @@ except Exception as exc:
 section("9. evaluate_checkpoint helpers (_normalize, _segmentation_overlay, save_visualization)")
 
 try:
+    import argparse
     import importlib
     import importlib.util
     import tempfile
@@ -1966,11 +2275,24 @@ try:
         Path(__file__).parent / "evaluate_checkpoint.py",
     )
     _eval_mod = importlib.util.module_from_spec(_eval_spec)  # type: ignore[arg-type]
+    sys.modules[_eval_spec.name] = _eval_mod
     _eval_spec.loader.exec_module(_eval_mod)  # type: ignore[union-attr]
 
     _normalize = _eval_mod._normalize_vol_for_display
     _overlay   = _eval_mod._segmentation_overlay
     _save_vis  = _eval_mod.save_visualization
+    _discover_external_candidates = _eval_mod._discover_external_model_candidates
+    _discover_external_roi_candidates = _eval_mod._discover_external_roi_localizer_candidates
+    _build_batch_jobs = _eval_mod._build_batch_jobs
+    _batch_command_for_job = _eval_mod._batch_command_for_job
+    _build_roi_localizer_predictor = _eval_mod._build_roi_localizer_predictor
+
+    from external_models import (
+        MonaiBundleProstateMaskAdapter,
+        build_external_eval_config,
+        build_external_localizer_ref,
+        resolve_external_model_request,
+    )
 
     # --- _normalize_vol_for_display -------------------------------------------
     rng_np = np.random.default_rng(0)
@@ -2026,6 +2348,217 @@ try:
         assert out_png.exists(), "PNG file was not created"
         size_kb = out_png.stat().st_size / 1024
         ok(f"save_visualization wrote {out_png.name} ({size_kb:.0f} KB, 3 rows × 5 cols)")
+
+    # --- external baseline registry / selector helpers ------------------------
+    spec = resolve_external_model_request("monai:prostate_mri_anatomy@0.3.5")
+    if (
+        spec.model_source == "monai_bundle"
+        and spec.dataset_type == "prostate158"
+        and spec.task == "prostate_localization"
+        and spec.required_modalities == ("t2w",)
+    ):
+        ok("external model registry resolves MONAI prostate bundle metadata")
+    else:
+        fail(f"unexpected external model spec: {spec}")
+
+    try:
+        resolve_external_model_request("monai:prostate_mri_anatomy", "9.9.9")
+        fail("unsupported external model version should raise")
+    except ValueError:
+        ok("external model registry rejects unsupported bundle versions")
+
+    ext_cfg = build_external_eval_config(spec)
+    if (
+        ext_cfg["task"] == "prostate_localization"
+        and ext_cfg["dataset_type"] == "prostate158"
+        and ext_cfg["use_t2w"] is True
+        and ext_cfg["use_adc"] is False
+    ):
+        ok("external baseline config builder emits prostate-localization eval config")
+    else:
+        fail(f"unexpected external eval cfg: {ext_cfg}")
+
+    raw_logits = torch.zeros(1, 3, 4, 5, 6)
+    raw_logits[:, 0] = -1.0
+    raw_logits[:, 1, 1:3, 1:4, 1:4] = 5.0
+    binary_logits = MonaiBundleProstateMaskAdapter._binary_logits_from_output(raw_logits)
+    if binary_logits.shape == (1, 1, 4, 5, 6) and float(binary_logits.max()) > 0 and float(binary_logits.min()) < 0:
+        ok("MONAI external adapter converts multiclass bundle output to binary prostate logits")
+    else:
+        fail(f"unexpected binary logits shape/range: shape={tuple(binary_logits.shape)}")
+
+    external_candidates = _discover_external_candidates()
+    if any(c.external_model_id == "monai:prostate_mri_anatomy" for c in external_candidates):
+        ok("interactive selector enumerates external MONAI baseline candidates")
+    else:
+        fail("external MONAI baseline missing from selector candidates")
+
+    external_roi_candidates = _discover_external_roi_candidates()
+    if any(c.external_model_id == "monai:prostate_mri_anatomy" for c in external_roi_candidates):
+        ok("ROI selector enumerates external prostate-localizer baselines")
+    else:
+        fail("external prostate-localizer baseline missing from ROI selector candidates")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo_root = Path(tmp)
+        prostate_root = repo_root / "data" / "prostate158_test"
+        prostate_root.mkdir(parents=True, exist_ok=True)
+        (prostate_root / "test.csv").write_text(
+            "case_id,t2,t2_anatomy_reader1,adc_tumor_reader1\n"
+            "demo_case,demo_t2.nii.gz,demo_prostate.nii.gz,demo_tumor.nii.gz\n",
+            encoding="utf-8",
+        )
+        jobs = _build_batch_jobs(
+            selected_models=[external_candidates[0]],
+            checkpoints_by_run={},
+            datasets=["picai", "prostate158"],
+            roi_variants=[_eval_mod.ROIVariant(label="Config", mode="")],
+            repo_root=repo_root,
+            prostate158_prostate_label_col="",
+            prostate158_root_override=str(prostate_root),
+            visualization_enabled=False,
+        )
+        if len(jobs) == 1 and jobs[0].dataset_type == "prostate158" and jobs[0].run_dir is None:
+            ok("batch job builder keeps compatible external-model combos and skips PI-CAI")
+        else:
+            fail(f"unexpected external batch jobs: {jobs}")
+
+        cmd = _batch_command_for_job(
+            jobs[0],
+            argparse.Namespace(
+                images_dir="data/test_images",
+                labels_dir="data/labels",
+                visualize=False,
+                prostate158_root=str(prostate_root),
+                prostate158_label_reader="",
+                prostate158_prostate_label_col="",
+                device="cpu",
+                sw_batch_size=1,
+            ),
+        )
+        if "--external-model" in cmd and "--run" not in cmd:
+            ok("batch command builder uses external-model CLI without repo run args")
+        else:
+            fail(f"unexpected external batch command: {cmd}")
+
+        run_dir = repo_root / "outputs" / "runs" / "demo_run"
+        ckpt_dir = run_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "config.yaml").write_text(
+            "\n".join(
+                [
+                    "model: unet3d",
+                    "dataset_type: prostate158",
+                    "task: lesion_segmentation",
+                    "use_t2w: true",
+                    "use_adc: false",
+                    "use_hbv: false",
+                    "prostate158_label_reader: 1",
+                    "prostate158_test_dir: data/prostate158_test",
+                    "roi:",
+                    "  mode: disabled",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        ckpt_path = ckpt_dir / "best.pt"
+        ckpt_path.write_bytes(b"pt")
+        roi_jobs = _build_batch_jobs(
+            selected_models=[
+                _eval_mod.ModelCandidate(
+                    label="repo lesion run",
+                    model_source="repo_run",
+                    task="lesion_segmentation",
+                    dataset_type="prostate158",
+                    run_dir=run_dir,
+                )
+            ],
+            checkpoints_by_run={run_dir: ckpt_path},
+            datasets=["prostate158"],
+            roi_variants=[
+                _eval_mod.ROIVariant(
+                    label="External ROI",
+                    mode="predicted_mask",
+                    localizer_run=build_external_localizer_ref(
+                        "monai:prostate_mri_anatomy",
+                        "0.3.5",
+                    ),
+                    localizer_external_model_id="monai:prostate_mri_anatomy",
+                    localizer_external_model_version="0.3.5",
+                )
+            ],
+            repo_root=repo_root,
+            prostate158_prostate_label_col="t2_anatomy_reader1",
+            prostate158_root_override=str(prostate_root),
+            visualization_enabled=False,
+        )
+        if (
+            len(roi_jobs) == 1
+            and roi_jobs[0].roi_localizer_external_model_id == "monai:prostate_mri_anatomy"
+            and roi_jobs[0].roi_localizer_external_model_version == "0.3.5"
+        ):
+            ok("batch job builder carries external ROI localizer metadata")
+        else:
+            fail(f"unexpected external ROI batch jobs: {roi_jobs}")
+
+        roi_cmd = _batch_command_for_job(
+            roi_jobs[0],
+            argparse.Namespace(
+                images_dir="data/test_images",
+                labels_dir="data/labels",
+                visualize=False,
+                prostate158_root=str(prostate_root),
+                prostate158_label_reader="",
+                prostate158_prostate_label_col="",
+                device="cpu",
+                sw_batch_size=1,
+            ),
+        )
+        if (
+            "--roi-localizer-external-model" in roi_cmd
+            and "monai:prostate_mri_anatomy" in roi_cmd
+        ):
+            ok("batch command builder preserves external ROI-localizer CLI flags")
+        else:
+            fail(f"unexpected external ROI batch command: {roi_cmd}")
+
+        class _StubExternalROILocalizer:
+            def __init__(self, spec, *, target_spacing, device, repo_root) -> None:
+                self.spec = spec
+                self.target_spacing = target_spacing
+                self.device = device
+                self.repo_root = repo_root
+
+        original_external_localizer = _eval_mod._ExternalROILocalizer
+        _eval_mod._ExternalROILocalizer = _StubExternalROILocalizer
+        try:
+            roi_settings = _eval_mod.validate_task_and_roi_config(
+                {
+                    "task": "lesion_segmentation",
+                    "prostate158_prostate_label_col": "t2_anatomy_reader1",
+                    "roi": {
+                        "mode": "predicted_mask",
+                        "localizer_run": build_external_localizer_ref(
+                            "monai:prostate_mri_anatomy",
+                            "0.3.5",
+                        ),
+                    },
+                },
+                "prostate158",
+            )[1]
+            predictor = _build_roi_localizer_predictor(
+                roi_settings=roi_settings,
+                target_spacing=(3.0, 0.5, 0.5),
+                device=torch.device("cpu"),
+                repo_root=repo_root,
+            )
+            if isinstance(predictor, _StubExternalROILocalizer) and predictor.spec.model_id == "monai:prostate_mri_anatomy":
+                ok("predicted ROI builder dispatches external localizer refs to MONAI adapter path")
+            else:
+                fail(f"unexpected ROI predictor instance: {predictor}")
+        finally:
+            _eval_mod._ExternalROILocalizer = original_external_localizer
 
 except Exception as exc:
     fail("evaluate_checkpoint helpers test failed", exc)

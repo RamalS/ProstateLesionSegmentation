@@ -37,11 +37,17 @@
 
 ## Evaluation is easy to run wrong
 
-- `scripts/evaluate_checkpoint.py` requires `--run <run_dir>`, not `--checkpoint`.
+- Repo checkpoints still require `--run <run_dir>`; `--checkpoint` alone is not valid.
+- External baseline support is eval-only: `--external-model monai:prostate_mri_anatomy@0.3.5`
 - Docker: `docker compose run --rm -it trainer evaluate --run /outputs/runs/<run_name>`
+- Docker external baseline: `docker compose run --rm trainer evaluate --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
+- Docker external ROI localizer: `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
 - Local: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name>`
+- Local external baseline: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
+- Local external ROI localizer: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
 - Without a TTY, checkpoint selection auto-picks `best.pt` (or newest epoch file).
 - Defaults are `--images-dir data/test_images` and `--labels-dir data/labels`.
+- MONAI bundle cache defaults to `/cache/monai_bundles` in Docker and `cache/monai_bundles/` locally.
 
 ## Repo wiring
 

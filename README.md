@@ -306,6 +306,8 @@ PYTHONPATH=. python scripts/count_positives.py \
 | 3-D visualizer (GT vs model) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>` |
 | 3-D visualizer app (localhost) | `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501` |
 | Evaluate checkpoint | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name>` |
+| Evaluate external MONAI prostate baseline | `docker compose run --rm trainer evaluate --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1` |
+| Evaluate with external MONAI ROI localizer | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1` |
 | Generate run report | `docker compose run --rm trainer report-runs --visualizations-dir /workspace/visualizations --output /workspace/report.md` |
 | Interactive shell | `docker compose run --rm trainer shell` |
 
@@ -324,6 +326,8 @@ PYTHONPATH=. python scripts/count_positives.py \
 | 3-D visualizer (GT only) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha` |
 | 3-D visualizer (GT vs model) | `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --run outputs/runs/<run_name>` |
 | 3-D visualizer app (localhost) | `PYTHONPATH=. streamlit run scripts/visualize_3d_app.py --server.address 0.0.0.0 --server.port 8501` |
+| Evaluate external MONAI prostate baseline | `PYTHONPATH=. python scripts/evaluate_checkpoint.py --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1` |
+| Evaluate with external MONAI ROI localizer | `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1` |
 | Reporting pipeline (missing-only) | `PYTHONPATH=. python scripts/report_pipeline.py` |
 | Reporting pipeline (all runs) | `PYTHONPATH=. python scripts/report_pipeline.py --all` |
 | Estimate resources | `PYTHONPATH=. python scripts/estimate_resources.py --config configs/default.yaml` |
@@ -389,6 +393,31 @@ These configs set:
 - `prostate158_prostate_label_col: t2_prostate_reader1`
 
 Current constraint: `task: prostate_localization` requires `dataset_type: prostate158`, and ROI cropping is not allowed while training the localizer itself.
+
+### Eval-Only MONAI Baseline
+
+The evaluator also supports one curated external baseline: `monai:prostate_mri_anatomy@0.3.5`.
+
+- It is **evaluation-only**. It is not registered in `src/models/__init__.py` and cannot be trained or resumed through the repo training entrypoints.
+- It is treated as `task: prostate_localization` on `dataset_type: prostate158` with `required_modalities: [t2w]`.
+- It requires `--prostate158-prostate-label-col` (or an inferable equivalent from the Prostate158 CSV) because it is scored against the prostate mask, not lesion labels.
+- Bundle downloads are cached under `/cache/monai_bundles` in Docker and `cache/monai_bundles/` when running locally.
+- The same bundle can also be used as a `roi.mode=predicted_mask` localizer for lesion-segmentation evaluation and selector batch mode.
+- Docker note: MONAI bundle download depends on `huggingface_hub`, so rebuild the image after dependency updates before using the external baseline or external ROI localizer.
+
+Examples:
+
+```bash
+docker compose run --rm trainer evaluate \
+  --external-model monai:prostate_mri_anatomy@0.3.5 \
+  --dataset-type prostate158 \
+  --prostate158-prostate-label-col t2_prostate_reader1
+
+PYTHONPATH=. python scripts/evaluate_checkpoint.py \
+  --external-model monai:prostate_mri_anatomy@0.3.5 \
+  --dataset-type prostate158 \
+  --prostate158-prostate-label-col t2_prostate_reader1
+```
 
 ### ROI Modes
 

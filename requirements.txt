@@ -15,6 +15,7 @@ tqdm
 pyyaml
 Pillow
 requests
+huggingface_hub
 
 # Medical imaging
 monai

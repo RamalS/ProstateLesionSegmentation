@@ -15,6 +15,11 @@ python scripts/evaluate_checkpoint.py \\
     [--images-dir data/test_images] \\
     [--labels-dir data/labels]
 
+python scripts/evaluate_checkpoint.py \\
+    --external-model monai:prostate_mri_anatomy@0.3.5 \\
+    --dataset-type prostate158 \\
+    --prostate158-prostate-label-col t2_prostate_reader1
+
 The run directory must contain:
   config.yaml       — the YAML config the model was trained with
   checkpoints/      — one or more .pt checkpoint files
@@ -40,6 +45,7 @@ from __future__ import annotations
 import argparse
 import csv
 import curses
+import hashlib
 import json
 import logging
 import math
@@ -70,15 +76,35 @@ sys.path.insert(0, str(_SRC))
 from config import load_config  # noqa: E402
 from dataset import (  # noqa: E402
     PiCaiDataset,
+    _ProstateROILocalizer,
+    _prepare_case_image_tensor,
     annotate_cases_with_lesion_flags,
     active_modality_pairs,
     discover_cases,
     discover_prostate158_cases,
 )
+from external_models import (  # noqa: E402
+    MonaiBundleProstateMaskAdapter,
+    build_external_eval_config,
+    build_external_localizer_ref,
+    default_external_model_cache_root,
+    list_supported_external_models,
+    parse_external_localizer_ref,
+    resolve_external_model_request,
+)
 from metrics import compute_all_metrics  # noqa: E402
 from models import build_model  # noqa: E402
 from postprocess import postprocess_logits  # noqa: E402
-from roi import restore_from_roi, validate_task_and_roi_config  # noqa: E402
+from roi import (  # noqa: E402
+    ROI_PREDICTED_MASK,
+    binarize_mask,
+    compute_crop_bounds,
+    crop_bounds_from_dict,
+    keep_largest_component,
+    resolve_localizer_checkpoint,
+    restore_from_roi,
+    validate_task_and_roi_config,
+)
 from transforms import get_val_transforms  # noqa: E402
 from utils import load_checkpoint  # noqa: E402
 
@@ -114,10 +140,15 @@ _OVERLAY_ALPHA: float = 0.50
 
 
 @dataclass(frozen=True)
-class RunCandidate:
-    """Run directory candidate shown in the interactive model selector."""
-    run_dir: Path
+class ModelCandidate:
+    """Model candidate shown in the interactive selector."""
     label: str
+    model_source: str
+    task: str
+    dataset_type: str
+    run_dir: Path | None = None
+    external_model_id: str = ""
+    external_model_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -126,18 +157,29 @@ class ROIVariant:
     label: str
     mode: str
     localizer_run: str = ""
+    localizer_external_model_id: str = ""
+    localizer_external_model_version: str = ""
 
 
 @dataclass(frozen=True)
 class BatchEvalJob:
     """One concrete evaluation job in interactive batch mode."""
-    run_dir: Path
-    checkpoint: Path
+    model_source: str
     dataset_type: str
+    task: str
     roi_mode: str
     roi_localizer_run: str
+    roi_localizer_external_model_id: str
+    roi_localizer_external_model_version: str
     summary_json: Path
     vis_output: Path
+    run_dir: Path | None = None
+    checkpoint: Path | None = None
+    external_model_id: str = ""
+    external_model_version: str = ""
+
+
+_ROI_BOUNDS_CACHE_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +299,300 @@ def _roi_bounds_from_collated_batch(roi_payload: Mapping[str, Any]) -> dict[str,
         "end_zyx": _roi_triplet_from_collate(roi_payload["end_zyx"], "end_zyx"),
         "full_shape_zyx": _roi_triplet_from_collate(roi_payload["full_shape_zyx"], "full_shape_zyx"),
         "used_fallback": _roi_bool_from_collate(roi_payload["used_fallback"]),
+    }
+
+
+def _roi_bounds_cache_root(repo_root: Path) -> Path:
+    return (repo_root / "outputs" / "evaluation_summaries" / "roi_bounds_cache").resolve()
+
+
+def _localizer_identity(localizer_run: str) -> dict[str, Any]:
+    external_spec = parse_external_localizer_ref(localizer_run)
+    if external_spec is not None:
+        return {
+            "source": external_spec.model_source,
+            "external_model_id": external_spec.model_id,
+            "external_model_version": external_spec.bundle_version,
+        }
+    cfg_path, ckpt_path = resolve_localizer_checkpoint(localizer_run)
+    ckpt_stat = ckpt_path.stat()
+    cfg_stat = cfg_path.stat()
+    return {
+        "source": "repo_run",
+        "run": str(Path(localizer_run).expanduser().resolve()),
+        "config_path": str(cfg_path.resolve()),
+        "config_mtime_ns": int(cfg_stat.st_mtime_ns),
+        "checkpoint_path": str(ckpt_path.resolve()),
+        "checkpoint_mtime_ns": int(ckpt_stat.st_mtime_ns),
+        "checkpoint_size": int(ckpt_stat.st_size),
+    }
+
+
+def _roi_bounds_cache_key(
+    case: Mapping[str, Any],
+    *,
+    target_spacing: tuple[float, ...],
+    roi_settings: Any,
+    localizer_identity: Mapping[str, Any],
+) -> str:
+    case_paths = {
+        key: str(Path(case[key]).expanduser().resolve())
+        for key in ("t2w", "adc", "hbv")
+        if key in case and case[key] is not None
+    }
+    cache_meta = {
+        "version": _ROI_BOUNDS_CACHE_VERSION,
+        "case_id": str(case["case_id"]),
+        "case_paths": case_paths,
+        "hbv_source": str(case.get("hbv_source", "hbv")),
+        "target_spacing": [float(v) for v in target_spacing],
+        "localizer": dict(localizer_identity),
+        "roi": {
+            "threshold": float(roi_settings.localizer_threshold),
+            "keep_largest_component": bool(roi_settings.localizer_keep_largest_component),
+            "margin_mm": [float(v) for v in roi_settings.margin_mm],
+            "min_size_vox": [int(v) for v in roi_settings.min_size_vox],
+            "fallback_to_full_volume": bool(roi_settings.fallback_to_full_volume),
+        },
+    }
+    return hashlib.sha1(
+        json.dumps(cache_meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _roi_bounds_cache_path(
+    cache_root: Path,
+    case: Mapping[str, Any],
+    *,
+    target_spacing: tuple[float, ...],
+    roi_settings: Any,
+    localizer_identity: Mapping[str, Any],
+) -> Path:
+    digest = _roi_bounds_cache_key(
+        case,
+        target_spacing=target_spacing,
+        roi_settings=roi_settings,
+        localizer_identity=localizer_identity,
+    )
+    safe_case_id = "".join(
+        ch if ch.isalnum() or ch in {"_", "-", "."} else "_"
+        for ch in str(case["case_id"])
+    )
+    return cache_root / f"{safe_case_id}_{digest}.json"
+
+
+def _load_roi_bounds_cache_entry(
+    cache_path: Path,
+    *,
+    case_id: str,
+) -> dict[str, Any] | None:
+    if not cache_path.exists():
+        return None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        bounds_payload = payload.get("bounds", payload)
+        bounds = crop_bounds_from_dict(bounds_payload).as_dict()
+        payload_case_id = str(payload.get("case_id", case_id))
+        if payload_case_id != case_id:
+            raise ValueError(
+                f"cache case_id mismatch: expected {case_id!r}, got {payload_case_id!r}"
+            )
+        return bounds
+    except Exception as exc:
+        logger.warning(
+            "Unreadable ROI bounds cache entry for case '%s' at %s (%s); recomputing.",
+            case_id,
+            cache_path,
+            exc,
+        )
+        return None
+
+
+def _write_roi_bounds_cache_entry(
+    cache_path: Path,
+    *,
+    case: Mapping[str, Any],
+    bounds: Mapping[str, Any],
+    cache_key: str,
+) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": _ROI_BOUNDS_CACHE_VERSION,
+        "cache_key": cache_key,
+        "case_id": str(case["case_id"]),
+        "bounds": crop_bounds_from_dict(bounds).as_dict(),
+    }
+    tmp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp.{os.getpid()}")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    os.replace(tmp_path, cache_path)
+
+
+class _ExternalROILocalizer:
+    def __init__(
+        self,
+        localizer_spec: Any,
+        *,
+        target_spacing: tuple[float, ...],
+        device: torch.device,
+        repo_root: Path,
+    ) -> None:
+        self.spec = localizer_spec
+        self.target_spacing = target_spacing
+        self.device = device
+        self.adapter = MonaiBundleProstateMaskAdapter(
+            spec=localizer_spec,
+            device=device,
+            cache_root=default_external_model_cache_root(repo_root),
+        )
+
+    def predict_mask(self, case: dict[str, Any]) -> np.ndarray:
+        image = _prepare_case_image_tensor(
+            case=case,
+            target_spacing=self.target_spacing,
+            active_modalities=self.spec.required_modalities,
+            dwi_hbv_preprocess_enabled=False,
+            dwi_hbv_clip_percentiles=(1.0, 99.5),
+            dwi_hbv_log1p=True,
+        ).unsqueeze(0)
+        with torch.inference_mode():
+            logits = self.adapter.predict_logits(image, sw_batch_size=1)
+            probs = torch.sigmoid(logits.float())
+        return probs[0, 0].detach().cpu().numpy()
+
+    def close(self) -> None:
+        self.adapter.model = None
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+
+def _build_roi_localizer_predictor(
+    *,
+    roi_settings: Any,
+    target_spacing: tuple[float, ...],
+    device: torch.device,
+    repo_root: Path,
+) -> Any:
+    external_spec = parse_external_localizer_ref(roi_settings.localizer_run)
+    if external_spec is not None:
+        return _ExternalROILocalizer(
+            external_spec,
+            target_spacing=target_spacing,
+            device=device,
+            repo_root=repo_root,
+        )
+    return _ProstateROILocalizer(
+        localizer_run=roi_settings.localizer_run,
+        target_spacing=target_spacing,
+        device=device,
+    )
+
+
+def _precompute_predicted_roi_bounds(
+    *,
+    test_cases: list[dict[str, Any]],
+    roi_settings: Any,
+    target_spacing: tuple[float, ...],
+    device: torch.device,
+    repo_root: Path,
+) -> dict[str, Any]:
+    if roi_settings.mode != ROI_PREDICTED_MASK:
+        return {
+            "enabled": False,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "cache_dir": None,
+            "device": None,
+        }
+
+    cache_root = _roi_bounds_cache_root(repo_root)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    localizer_identity = _localizer_identity(roi_settings.localizer_run)
+
+    misses: list[tuple[dict[str, Any], Path, str]] = []
+    cache_hits = 0
+    for case in test_cases:
+        cache_path = _roi_bounds_cache_path(
+            cache_root,
+            case,
+            target_spacing=target_spacing,
+            roi_settings=roi_settings,
+            localizer_identity=localizer_identity,
+        )
+        cache_key = _roi_bounds_cache_key(
+            case,
+            target_spacing=target_spacing,
+            roi_settings=roi_settings,
+            localizer_identity=localizer_identity,
+        )
+        case["_roi_bounds_predicted_path"] = str(cache_path)
+        cached_bounds = _load_roi_bounds_cache_entry(
+            cache_path,
+            case_id=str(case["case_id"]),
+        )
+        if cached_bounds is not None:
+            case["_roi_bounds_predicted"] = cached_bounds
+            cache_hits += 1
+            continue
+        misses.append((case, cache_path, cache_key))
+
+    logger.info(
+        "Predicted ROI bounds cache: %d hits, %d misses (%s).",
+        cache_hits,
+        len(misses),
+        cache_root,
+    )
+
+    if misses:
+        localizer = _build_roi_localizer_predictor(
+            roi_settings=roi_settings,
+            target_spacing=target_spacing,
+            device=device,
+            repo_root=repo_root,
+        )
+        try:
+            for case, cache_path, cache_key in tqdm(
+                misses,
+                desc="ROI precompute",
+                unit="case",
+            ):
+                roi_mask = localizer.predict_mask(case)
+                roi_mask = binarize_mask(
+                    roi_mask,
+                    threshold=roi_settings.localizer_threshold,
+                )
+                if roi_settings.localizer_keep_largest_component:
+                    roi_mask = keep_largest_component(roi_mask)
+                bounds = compute_crop_bounds(
+                    mask=roi_mask,
+                    spacing_zyx=target_spacing,
+                    margin_mm=roi_settings.margin_mm,
+                    min_size_vox=roi_settings.min_size_vox,
+                    fallback_to_full_volume=roi_settings.fallback_to_full_volume,
+                ).as_dict()
+                case["_roi_bounds_predicted"] = bounds
+                _write_roi_bounds_cache_entry(
+                    cache_path,
+                    case=case,
+                    bounds=bounds,
+                    cache_key=cache_key,
+                )
+        finally:
+            localizer.close()
+            del localizer
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            logger.info(
+                "Predicted ROI localizer precompute finished; released localizer before lesion inference."
+            )
+
+    return {
+        "enabled": True,
+        "cache_hits": cache_hits,
+        "cache_misses": len(misses),
+        "cache_dir": str(cache_root),
+        "device": str(device),
     }
 
 
@@ -806,16 +1142,18 @@ def _format_run_candidate_label(run_dir: Path) -> str:
     cfg_path = run_dir / "config.yaml"
     model = "?"
     dataset_type = "?"
+    task = "?"
     try:
         cfg = load_config(str(cfg_path))
         model = str(cfg.get("model", "?")).strip() or "?"
         dataset_type = str(cfg.get("dataset_type", "?")).strip() or "?"
+        task = str(cfg.get("task", "lesion_segmentation")).strip() or "?"
     except Exception:  # noqa: BLE001
         pass
-    return f"{run_dir.name}   [{model} | {dataset_type}]"
+    return f"{run_dir.name}   [repo | {model} | {dataset_type} | {task}]"
 
 
-def _discover_run_candidates(runs_root: Path) -> list[RunCandidate]:
+def _discover_run_candidates(runs_root: Path) -> list[ModelCandidate]:
     """Discover runnable model directories from runs_root."""
     if not runs_root.is_dir():
         return []
@@ -825,7 +1163,7 @@ def _discover_run_candidates(runs_root: Path) -> list[RunCandidate]:
         key=lambda d: d.name,
         reverse=True,
     )
-    out: list[RunCandidate] = []
+    out: list[ModelCandidate] = []
     for run_dir in run_dirs:
         cfg_path = run_dir / "config.yaml"
         ckpt_dir = run_dir / "checkpoints"
@@ -833,20 +1171,52 @@ def _discover_run_candidates(runs_root: Path) -> list[RunCandidate]:
             continue
         if not any(ckpt_dir.glob("*.pt")):
             continue
+        dataset_type = "?"
+        task = "?"
+        try:
+            cfg = load_config(str(cfg_path))
+            dataset_type = str(cfg.get("dataset_type", "?")).strip() or "?"
+            task = str(cfg.get("task", "lesion_segmentation")).strip().lower()
+        except Exception:  # noqa: BLE001
+            pass
         out.append(
-            RunCandidate(
-                run_dir=run_dir.resolve(),
+            ModelCandidate(
                 label=_format_run_candidate_label(run_dir),
+                model_source="repo_run",
+                task=task,
+                dataset_type=dataset_type,
+                run_dir=run_dir.resolve(),
             )
         )
     return out
 
 
-def _discover_roi_localizer_candidates(runs_root: Path) -> list[RunCandidate]:
+def _discover_external_model_candidates() -> list[ModelCandidate]:
+    out: list[ModelCandidate] = []
+    for spec in list_supported_external_models():
+        out.append(
+            ModelCandidate(
+                label=(
+                    f"{spec.display_name}@{spec.bundle_version}   "
+                    f"[external | {spec.model_source} | {spec.dataset_type} | {spec.task}]"
+                ),
+                model_source=spec.model_source,
+                task=spec.task,
+                dataset_type=spec.dataset_type,
+                external_model_id=spec.model_id,
+                external_model_version=spec.bundle_version,
+            )
+        )
+    return out
+
+
+def _discover_roi_localizer_candidates(runs_root: Path) -> list[ModelCandidate]:
     """Discover ROI-localizer runs (task=prostate_localization) for predicted ROI mode."""
     candidates = _discover_run_candidates(runs_root)
-    out: list[RunCandidate] = []
+    out: list[ModelCandidate] = []
     for candidate in candidates:
+        if candidate.run_dir is None:
+            continue
         cfg_path = candidate.run_dir / "config.yaml"
         try:
             cfg = load_config(str(cfg_path))
@@ -857,6 +1227,14 @@ def _discover_roi_localizer_candidates(runs_root: Path) -> list[RunCandidate]:
             continue
         out.append(candidate)
     return out
+
+
+def _discover_external_roi_localizer_candidates() -> list[ModelCandidate]:
+    return [
+        c
+        for c in _discover_external_model_candidates()
+        if c.task == "prostate_localization" and c.dataset_type == "prostate158"
+    ]
 
 
 def _checkbox_menu(
@@ -992,7 +1370,7 @@ def _select_datasets_for_batch() -> list[str]:
     return [keys[i] for i in chosen]
 
 
-def _select_models_for_batch(candidates: list[RunCandidate]) -> list[RunCandidate]:
+def _select_models_for_batch(candidates: list[ModelCandidate]) -> list[ModelCandidate]:
     """Interactive model checkbox step."""
     labels = [c.label for c in candidates]
     chosen = _checkbox_menu(
@@ -1004,7 +1382,10 @@ def _select_models_for_batch(candidates: list[RunCandidate]) -> list[RunCandidat
     return [candidates[i] for i in chosen]
 
 
-def _select_roi_variants_for_batch(localizer_candidates: list[RunCandidate]) -> list[ROIVariant]:
+def _select_roi_variants_for_batch(
+    localizer_candidates: list[ModelCandidate],
+    external_localizer_candidates: list[ModelCandidate],
+) -> list[ROIVariant]:
     """Interactive ROI checkbox step."""
     variants: list[ROIVariant] = [
         ROIVariant(label="Use each model config ROI setting", mode=""),
@@ -1025,6 +1406,22 @@ def _select_roi_variants_for_batch(localizer_candidates: list[RunCandidate]) -> 
         )
         for c in localizer_candidates
     )
+    variants.extend(
+        ROIVariant(
+            label=(
+                "Predicted ROI via "
+                f"{c.external_model_id}@{c.external_model_version} (external)"
+            ),
+            mode="predicted_mask",
+            localizer_run=build_external_localizer_ref(
+                c.external_model_id,
+                c.external_model_version,
+            ),
+            localizer_external_model_id=c.external_model_id,
+            localizer_external_model_version=c.external_model_version,
+        )
+        for c in external_localizer_candidates
+    )
 
     chosen = _checkbox_menu(
         title="ROI model",
@@ -1044,12 +1441,15 @@ def _roi_tag(mode: str, localizer_run: str) -> str:
     if mode == "gt_mask":
         return "roi_gt"
     if mode == "predicted_mask":
+        external_spec = parse_external_localizer_ref(localizer_run)
+        if external_spec is not None:
+            return f"roi_pred_{_slugify(external_spec.versioned_id.replace(':', '_'))}"
         return f"roi_pred_{_slugify(Path(localizer_run).name)}"
     return f"roi_{_slugify(mode)}"
 
 
 def _build_batch_jobs(
-    selected_models: list[RunCandidate],
+    selected_models: list[ModelCandidate],
     checkpoints_by_run: dict[Path, Path],
     datasets: list[str],
     roi_variants: list[ROIVariant],
@@ -1061,14 +1461,45 @@ def _build_batch_jobs(
     """Create the cross-product jobs for selected datasets/models/ROI variants."""
     jobs: list[BatchEvalJob] = []
     for candidate in selected_models:
-        run_dir = candidate.run_dir
-        checkpoint = checkpoints_by_run[run_dir]
-        cfg_path = run_dir / "config.yaml"
-        base_cfg = load_config(str(cfg_path))
-        ckpt_tag = _slugify(checkpoint.stem)
+        if candidate.model_source == "repo_run":
+            if candidate.run_dir is None:
+                continue
+            run_dir = candidate.run_dir
+            checkpoint = checkpoints_by_run[run_dir]
+            cfg_path = run_dir / "config.yaml"
+            base_cfg = load_config(str(cfg_path))
+            ckpt_tag = _slugify(checkpoint.stem)
+            artifact_stem = run_dir.name
+        else:
+            run_dir = None
+            checkpoint = None
+            spec = resolve_external_model_request(
+                candidate.external_model_id,
+                candidate.external_model_version,
+            )
+            base_cfg = build_external_eval_config(
+                spec,
+                prostate158_root=prostate158_root_override,
+            )
+            ckpt_tag = _slugify(spec.bundle_version)
+            artifact_stem = _slugify(spec.model_id.replace(":", "_"))
         for dataset_type in datasets:
+            if candidate.dataset_type not in {"", "?"} and dataset_type != candidate.dataset_type:
+                logger.warning(
+                    "Skipping incompatible combo model=%s dataset=%s (requires %s)",
+                    candidate.label,
+                    dataset_type,
+                    candidate.dataset_type,
+                )
+                continue
             for roi in roi_variants:
-                cfg_for_combo = _apply_roi_overrides(base_cfg, roi.mode, roi.localizer_run)
+                cfg_for_combo = _apply_roi_overrides(
+                    base_cfg,
+                    roi.mode,
+                    roi.localizer_run,
+                    roi.localizer_external_model_id,
+                    roi.localizer_external_model_version,
+                )
                 cfg_for_combo, _ = _ensure_prostate_label_col(
                     cfg_for_combo,
                     dataset_type=dataset_type,
@@ -1079,8 +1510,8 @@ def _build_batch_jobs(
                     _ = validate_task_and_roi_config(cfg_for_combo, dataset_type)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "Skipping incompatible combo run=%s dataset=%s roi=%s (%s)",
-                        run_dir.name,
+                        "Skipping incompatible combo model=%s dataset=%s roi=%s (%s)",
+                        candidate.label,
                         dataset_type,
                         roi.mode or "config",
                         exc,
@@ -1090,31 +1521,47 @@ def _build_batch_jobs(
                 roi_tag = _roi_tag(roi.mode, roi.localizer_run)
                 summary_name = f"evaluation_summary_{dataset_type}_{roi_tag}_{ckpt_tag}.json"
                 vis_name = (
-                    f"{run_dir.name}_{dataset_type}_{roi_tag}_{ckpt_tag}_"
+                    f"{artifact_stem}_{dataset_type}_{roi_tag}_{ckpt_tag}_"
                     "eval_visualization.png"
                 )
-                vis_output = (
-                    _default_vis_output_path(
+                if run_dir is None:
+                    eval_dir = (repo_root / "outputs" / "evaluation_summaries").resolve()
+                    summary_path = (eval_dir / f"{artifact_stem}_{summary_name}").resolve()
+                    vis_output = (
+                        ((repo_root / "visualizations").resolve() / vis_name)
+                        if visualization_enabled
+                        else (eval_dir / vis_name)
+                    ).resolve()
+                else:
+                    summary_path = _default_eval_summary_path(
                         run_dir=run_dir,
-                        vis_name=vis_name,
+                        summary_name=summary_name,
                         repo_root=repo_root,
                     ).resolve()
-                    if visualization_enabled
-                    else (run_dir / vis_name).resolve()
-                )
+                    vis_output = (
+                        _default_vis_output_path(
+                            run_dir=run_dir,
+                            vis_name=vis_name,
+                            repo_root=repo_root,
+                        ).resolve()
+                        if visualization_enabled
+                        else (run_dir / vis_name).resolve()
+                    )
                 jobs.append(
                     BatchEvalJob(
-                        run_dir=run_dir,
-                        checkpoint=checkpoint,
+                        model_source=candidate.model_source,
                         dataset_type=dataset_type,
+                        task=str(cfg_for_combo.get("task", candidate.task)).strip().lower(),
                         roi_mode=roi.mode,
                         roi_localizer_run=roi.localizer_run,
-                        summary_json=_default_eval_summary_path(
-                            run_dir=run_dir,
-                            summary_name=summary_name,
-                            repo_root=repo_root,
-                        ).resolve(),
+                        roi_localizer_external_model_id=roi.localizer_external_model_id,
+                        roi_localizer_external_model_version=roi.localizer_external_model_version,
+                        summary_json=summary_path,
                         vis_output=vis_output,
+                        run_dir=run_dir,
+                        checkpoint=checkpoint,
+                        external_model_id=candidate.external_model_id,
+                        external_model_version=candidate.external_model_version,
                     )
                 )
     return jobs
@@ -1125,19 +1572,39 @@ def _batch_command_for_job(job: BatchEvalJob, args: argparse.Namespace) -> list[
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
-        "--run", str(job.run_dir),
-        "--checkpoint", str(job.checkpoint),
         "--dataset-type", job.dataset_type,
         "--images-dir", args.images_dir,
         "--labels-dir", args.labels_dir,
         "--summary-json", str(job.summary_json),
     ]
+    if job.run_dir is not None:
+        cmd.extend(["--run", str(job.run_dir)])
+    if job.checkpoint is not None:
+        cmd.extend(["--checkpoint", str(job.checkpoint)])
+    if job.external_model_id:
+        cmd.extend(["--external-model", job.external_model_id])
+    if job.external_model_version:
+        cmd.extend(["--external-model-version", job.external_model_version])
     if args.visualize:
         cmd.extend(["--visualize", "--vis-output", str(job.vis_output)])
     if job.roi_mode:
         cmd.extend(["--roi-mode", job.roi_mode])
-    if job.roi_localizer_run:
+    if job.roi_localizer_run and not job.roi_localizer_external_model_id:
         cmd.extend(["--roi-localizer-run", job.roi_localizer_run])
+    if job.roi_localizer_external_model_id:
+        cmd.extend(
+            [
+                "--roi-localizer-external-model",
+                job.roi_localizer_external_model_id,
+            ]
+        )
+    if job.roi_localizer_external_model_version:
+        cmd.extend(
+            [
+                "--roi-localizer-external-model-version",
+                job.roi_localizer_external_model_version,
+            ]
+        )
     if args.prostate158_root:
         cmd.extend(["--prostate158-root", args.prostate158_root])
     if args.prostate158_label_reader:
@@ -1158,11 +1625,12 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     runs_root = Path(args.runs_root).expanduser().resolve()
-    candidates = _discover_run_candidates(runs_root)
+    candidates = _discover_run_candidates(runs_root) + _discover_external_model_candidates()
     if not candidates:
-        logger.error("No run directories with checkpoints found in: %s", runs_root)
+        logger.error("No repo runs or external baselines available for selection.")
         sys.exit(1)
     roi_localizer_candidates = _discover_roi_localizer_candidates(runs_root)
+    external_roi_localizer_candidates = _discover_external_roi_localizer_candidates()
 
     datasets = _select_datasets_for_batch()
     if not datasets:
@@ -1176,10 +1644,15 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
 
     checkpoints_by_run: dict[Path, Path] = {}
     for candidate in selected_models:
+        if candidate.model_source != "repo_run" or candidate.run_dir is None:
+            continue
         print(f"\nSelect checkpoint for model: {candidate.run_dir.name}")
         checkpoints_by_run[candidate.run_dir] = select_checkpoint(candidate.run_dir / "checkpoints")
 
-    roi_variants = _select_roi_variants_for_batch(roi_localizer_candidates)
+    roi_variants = _select_roi_variants_for_batch(
+        roi_localizer_candidates,
+        external_roi_localizer_candidates,
+    )
     if not roi_variants:
         print("Aborted.")
         sys.exit(0)
@@ -1211,7 +1684,7 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     _section("Batch Evaluation Plan")
-    print(f"  Runs selected    : {len(selected_models)}")
+    print(f"  Models selected  : {len(selected_models)}")
     print(f"  Datasets         : {datasets}")
     print(f"  ROI variants     : {len(roi_variants)}")
     print(f"  Total jobs       : {len(jobs)}")
@@ -1220,11 +1693,20 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
     if preview_n:
         print("\n  Job preview:")
         for job in jobs[:preview_n]:
-            roi_desc = job.roi_mode or "config"
-            if job.roi_localizer_run:
-                roi_desc = f"{roi_desc}:{Path(job.roi_localizer_run).name}"
+            roi_desc = _roi_variant_desc(
+                job.roi_mode,
+                job.roi_localizer_run,
+                job.roi_localizer_external_model_id,
+                job.roi_localizer_external_model_version,
+            )
+            model_desc = (
+                job.run_dir.name
+                if job.run_dir is not None
+                else f"{job.external_model_id}@{job.external_model_version}"
+            )
+            ckpt_desc = job.checkpoint.name if job.checkpoint is not None else "-"
             print(
-                f"    - run={job.run_dir.name}  ckpt={job.checkpoint.name}  "
+                f"    - model={model_desc}  ckpt={ckpt_desc}  "
                 f"dataset={job.dataset_type}  roi={roi_desc}"
             )
         if len(jobs) > preview_n:
@@ -1238,12 +1720,22 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
     failures = 0
     for idx, job in enumerate(jobs, start=1):
         _section(f"Batch job {idx}/{len(jobs)}")
-        roi_desc = job.roi_mode or "config"
-        if job.roi_localizer_run:
-            roi_desc = f"{roi_desc}:{Path(job.roi_localizer_run).name}"
-        print(f"  Run        : {job.run_dir}")
-        print(f"  Checkpoint : {job.checkpoint.name}")
+        roi_desc = _roi_variant_desc(
+            job.roi_mode,
+            job.roi_localizer_run,
+            job.roi_localizer_external_model_id,
+            job.roi_localizer_external_model_version,
+        )
+        model_desc = (
+            str(job.run_dir)
+            if job.run_dir is not None
+            else f"{job.external_model_id}@{job.external_model_version}"
+        )
+        ckpt_desc = job.checkpoint.name if job.checkpoint is not None else "-"
+        print(f"  Model      : {model_desc}")
+        print(f"  Checkpoint : {ckpt_desc}")
         print(f"  Dataset    : {job.dataset_type}")
+        print(f"  Task       : {job.task}")
         print(f"  ROI        : {roi_desc}")
 
         cmd = _batch_command_for_job(job, args)
@@ -1251,10 +1743,10 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         if rc != 0:
             failures += 1
             logger.error(
-                "Batch job failed (rc=%d): run=%s checkpoint=%s dataset=%s roi=%s",
+                "Batch job failed (rc=%d): model=%s checkpoint=%s dataset=%s roi=%s",
                 rc,
-                job.run_dir.name,
-                job.checkpoint.name,
+                model_desc,
+                ckpt_desc,
                 job.dataset_type,
                 roi_desc,
             )
@@ -1270,18 +1762,58 @@ def _apply_roi_overrides(
     cfg: dict[str, Any],
     roi_mode: str,
     roi_localizer_run: str,
+    roi_localizer_external_model_id: str = "",
+    roi_localizer_external_model_version: str = "",
 ) -> dict[str, Any]:
     """Apply CLI ROI overrides on top of the run config."""
-    if not roi_mode and not roi_localizer_run:
+    if (
+        not roi_mode
+        and not roi_localizer_run
+        and not roi_localizer_external_model_id
+        and not roi_localizer_external_model_version
+    ):
         return cfg
     merged = deepcopy(cfg)
     roi_cfg = dict(merged.get("roi", {}) or {})
     if roi_mode:
         roi_cfg["mode"] = roi_mode
-    if roi_localizer_run:
-        roi_cfg["localizer_run"] = roi_localizer_run
+    localizer_ref = roi_localizer_run
+    if roi_localizer_external_model_id:
+        localizer_ref = build_external_localizer_ref(
+            roi_localizer_external_model_id,
+            roi_localizer_external_model_version,
+        )
+    if localizer_ref:
+        roi_cfg["localizer_run"] = localizer_ref
+    if roi_localizer_external_model_id:
+        roi_cfg["localizer_external_model_id"] = roi_localizer_external_model_id
+    if roi_localizer_external_model_version:
+        roi_cfg["localizer_external_model_version"] = roi_localizer_external_model_version
     merged["roi"] = roi_cfg
     return merged
+
+
+def _roi_variant_desc(
+    roi_mode: str,
+    roi_localizer_run: str,
+    roi_localizer_external_model_id: str = "",
+    roi_localizer_external_model_version: str = "",
+) -> str:
+    if not roi_mode:
+        return "config"
+    if roi_mode != "predicted_mask":
+        return roi_mode
+    if roi_localizer_external_model_id:
+        return (
+            f"predicted_mask:{roi_localizer_external_model_id}"
+            f"@{roi_localizer_external_model_version}"
+        )
+    external_spec = parse_external_localizer_ref(roi_localizer_run)
+    if external_spec is not None:
+        return f"predicted_mask:{external_spec.versioned_id}"
+    if roi_localizer_run:
+        return f"predicted_mask:{Path(roi_localizer_run).name}"
+    return "predicted_mask"
 
 
 def _default_prostate_label_col(label_reader: Any) -> str:
@@ -1468,6 +2000,23 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--external-model",
+        type=str,
+        default="",
+        metavar="ID[@VERSION]",
+        help=(
+            "Evaluate a supported external baseline instead of a repo run. "
+            "Currently supports monai:prostate_mri_anatomy@0.3.5."
+        ),
+    )
+    parser.add_argument(
+        "--external-model-version",
+        type=str,
+        default="",
+        metavar="VERSION",
+        help="Optional explicit version for --external-model.",
+    )
+    parser.add_argument(
         "--images-dir",
         type=str,
         default="data/test_images",
@@ -1507,6 +2056,23 @@ def main() -> None:
             "Override roi.localizer_run from config.yaml (used with "
             "--roi-mode predicted_mask)."
         ),
+    )
+    parser.add_argument(
+        "--roi-localizer-external-model",
+        type=str,
+        default="",
+        metavar="ID[@VERSION]",
+        help=(
+            "Use a supported external prostate localizer as the ROI source "
+            "for roi.mode=predicted_mask."
+        ),
+    )
+    parser.add_argument(
+        "--roi-localizer-external-model-version",
+        type=str,
+        default="",
+        metavar="VERSION",
+        help="Optional explicit version for --roi-localizer-external-model.",
     )
     parser.add_argument(
         "--prostate158-root",
@@ -1586,33 +2152,106 @@ def main() -> None:
     if args.vis_output and not args.visualize:
         logger.warning("--vis-output ignored because --visualize was not enabled.")
 
-    if args.selector or not args.run:
+    if args.selector or (not args.run and not args.external_model):
         _run_interactive_batch(args)
         return
 
-    # ---- Validate run directory -------------------------------------------------
-    run_dir   = Path(args.run).resolve()
-    ckpts_dir = run_dir / "checkpoints"
-    cfg_path  = run_dir / "config.yaml"
-
-    if not run_dir.is_dir():
-        logger.error("Run directory not found: %s", run_dir)
+    if args.run and args.external_model:
+        logger.error("--run and --external-model are mutually exclusive.")
         sys.exit(1)
-    if not cfg_path.exists():
-        logger.error("config.yaml not found in run directory: %s", cfg_path)
+    if args.external_model and args.checkpoint:
+        logger.error("--checkpoint cannot be used with --external-model.")
         sys.exit(1)
-    if not ckpts_dir.is_dir():
-        logger.error("checkpoints/ subdirectory not found in: %s", run_dir)
+    if args.roi_localizer_run and args.roi_localizer_external_model:
+        logger.error(
+            "--roi-localizer-run and --roi-localizer-external-model are mutually exclusive."
+        )
         sys.exit(1)
 
-    # ---- Load config ------------------------------------------------------------
-    cfg = load_config(str(cfg_path))
-    cfg = _apply_roi_overrides(cfg, args.roi_mode, args.roi_localizer_run)
-    logger.info("Config loaded from %s", cfg_path)
+    repo_root = Path(__file__).resolve().parent.parent
+    run_dir: Path | None = None
+    ckpt_path: Path | None = None
+    ckpt_epoch: str | int = "external"
+    best_val_dice = float("nan")
+    external_model_id = ""
+    external_model_version = ""
+    model_source = "repo_run"
+
+    if args.external_model:
+        try:
+            spec = resolve_external_model_request(
+                args.external_model,
+                args.external_model_version,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("%s", exc)
+            sys.exit(1)
+        model_source = spec.model_source
+        external_model_id = spec.model_id
+        external_model_version = spec.bundle_version
+        cfg = build_external_eval_config(
+            spec,
+            prostate158_root=args.prostate158_root,
+            prostate158_label_reader=args.prostate158_label_reader,
+        )
+        logger.info(
+            "Using external model baseline: %s@%s",
+            spec.model_id,
+            spec.bundle_version,
+        )
+    else:
+        # ---- Validate run directory ---------------------------------------------
+        run_dir = Path(args.run).resolve()
+        ckpts_dir = run_dir / "checkpoints"
+        cfg_path = run_dir / "config.yaml"
+
+        if not run_dir.is_dir():
+            logger.error("Run directory not found: %s", run_dir)
+            sys.exit(1)
+        if not cfg_path.exists():
+            logger.error("config.yaml not found in run directory: %s", cfg_path)
+            sys.exit(1)
+        if not ckpts_dir.is_dir():
+            logger.error("checkpoints/ subdirectory not found in: %s", run_dir)
+            sys.exit(1)
+
+        # ---- Load config --------------------------------------------------------
+        cfg = load_config(str(cfg_path))
+        logger.info("Config loaded from %s", cfg_path)
+
+        # ---- Select checkpoint --------------------------------------------------
+        if args.checkpoint:
+            requested = Path(args.checkpoint)
+            ckpt_path = requested if requested.is_absolute() else ckpts_dir / requested
+            ckpt_path = ckpt_path.resolve()
+            if not ckpt_path.exists():
+                logger.error("Requested checkpoint not found: %s", ckpt_path)
+                sys.exit(1)
+        else:
+            ckpt_path = select_checkpoint(ckpts_dir)
+        logger.info("Selected checkpoint: %s", ckpt_path.name)
+
     if args.roi_mode:
         logger.info("ROI override from CLI: roi.mode=%s", args.roi_mode)
     if args.roi_localizer_run:
         logger.info("ROI override from CLI: roi.localizer_run=%s", args.roi_localizer_run)
+    if args.roi_localizer_external_model:
+        logger.info(
+            "ROI override from CLI: external localizer=%s version=%s",
+            args.roi_localizer_external_model,
+            args.roi_localizer_external_model_version or "<default>",
+        )
+    try:
+        cfg = _apply_roi_overrides(
+            cfg,
+            args.roi_mode,
+            args.roi_localizer_run,
+            args.roi_localizer_external_model,
+            args.roi_localizer_external_model_version,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Invalid ROI override configuration: %s", exc)
+        sys.exit(1)
     if args.prostate158_prostate_label_col:
         logger.info(
             "Prostate label column override from CLI: prostate158_prostate_label_col=%s",
@@ -1641,18 +2280,6 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ---- Select checkpoint ------------------------------------------------------
-    if args.checkpoint:
-        requested = Path(args.checkpoint)
-        ckpt_path = requested if requested.is_absolute() else ckpts_dir / requested
-        ckpt_path = ckpt_path.resolve()
-        if not ckpt_path.exists():
-            logger.error("Requested checkpoint not found: %s", ckpt_path)
-            sys.exit(1)
-    else:
-        ckpt_path = select_checkpoint(ckpts_dir)
-    logger.info("Selected checkpoint: %s", ckpt_path.name)
-
     # ---- Device -----------------------------------------------------------------
     if args.device:
         device = torch.device(args.device)
@@ -1661,13 +2288,22 @@ def main() -> None:
         use_cuda = torch.cuda.is_available() and cfg.get("device", "cuda") == "cuda"
         device   = torch.device("cuda" if use_cuda else "cpu")
 
-    # ---- Model + checkpoint -----------------------------------------------------
-    model = build_model(cfg).to(device)
-
-    ckpt          = load_checkpoint(ckpt_path, model, device=device)
-    ckpt_epoch    = ckpt.get("epoch", "?")
-    best_val_dice = float(ckpt.get("best_val_dice", float("nan")))
-    model.eval()
+    # ---- Model / adapter --------------------------------------------------------
+    external_adapter: MonaiBundleProstateMaskAdapter | None = None
+    if args.external_model:
+        external_adapter = MonaiBundleProstateMaskAdapter(
+            spec=spec,
+            device=device,
+            cache_root=default_external_model_cache_root(repo_root),
+        )
+        model = None
+    else:
+        model = build_model(cfg).to(device)
+        assert ckpt_path is not None
+        ckpt = load_checkpoint(ckpt_path, model, device=device)
+        ckpt_epoch = ckpt.get("epoch", "?")
+        best_val_dice = float(ckpt.get("best_val_dice", float("nan")))
+        model.eval()
 
     # ---- Discover + annotate cases ----------------------------------------------
     dataset_type = (
@@ -1687,7 +2323,11 @@ def main() -> None:
             cfg.get("prostate158_prostate_label_col"),
             cfg.get("prostate158_label_reader", 1),
         )
-    task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
+    try:
+        task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Invalid evaluation configuration: %s", exc)
+        sys.exit(1)
     active_modalities = [key for key, _ in active_modality_pairs(cfg)]
 
     if dataset_type == "prostate158":
@@ -1730,7 +2370,10 @@ def main() -> None:
     logger.info("Annotating %d test cases with has_lesion ...", len(test_cases))
     annotate_cases_with_lesion_flags(test_cases)
 
-    pos_count  = sum(1 for c in test_cases if c.get("has_lesion", False))
+    if task == "prostate_localization":
+        pos_count = len(test_cases)
+    else:
+        pos_count = sum(1 for c in test_cases if c.get("has_lesion", False))
     neg_count  = len(test_cases) - pos_count
 
     # ---- Dataset + loader -------------------------------------------------------
@@ -1742,6 +2385,13 @@ def main() -> None:
     )
     sw_overlap    = float(cfg.get("sw_overlap", 0.5))
     sw_batch_size = int(args.sw_batch_size)
+    roi_precompute = _precompute_predicted_roi_bounds(
+        test_cases=test_cases,
+        roi_settings=roi_settings,
+        target_spacing=target_spacing,
+        device=device,
+        repo_root=repo_root,
+    )
     ds = PiCaiDataset(
         images_dir=images_dir,
         labels_dir=labels_dir,
@@ -1765,13 +2415,32 @@ def main() -> None:
 
     # ---- Header -----------------------------------------------------------------
     _section("Checkpoint Evaluation  (fixed test set)")
-    print(f"  Checkpoint  : {ckpt_path}")
+    model_label = (
+        f"{external_model_id}@{external_model_version}"
+        if external_model_id
+        else str(run_dir)
+    )
+    print(f"  Model       : {model_label}")
+    print(f"  Source      : {model_source}")
+    print(f"  Checkpoint  : {ckpt_path if ckpt_path is not None else '-'}")
     print(f"  Epoch       : {ckpt_epoch}   |   Best val Dice (training): {_fmt(best_val_dice)}")
     print(f"  Device      : {device}")
     print(f"  Test cases  : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
     print(f"  Dataset     : {dataset_type}")
     print(f"  Task        : {task}")
     print(f"  ROI mode    : {roi_settings.mode}")
+    if roi_settings.mode == ROI_PREDICTED_MASK:
+        print(
+            "  ROI source  : "
+            f"{_roi_variant_desc('predicted_mask', roi_settings.localizer_run)}"
+        )
+    if roi_precompute["enabled"]:
+        print(
+            "  ROI cache   : "
+            f"{roi_precompute['cache_hits']} hit(s), {roi_precompute['cache_misses']} miss(es)"
+        )
+    if external_adapter is not None:
+        print(f"  Bundle cache: {external_adapter.cache_root}")
     print(f"  Images dir  : {images_dir}")
     print(f"  Modalities  : {active_modalities}")
     print(f"  Patch size  : {patch_size}   SW overlap: {sw_overlap}")
@@ -1792,23 +2461,25 @@ def main() -> None:
         c["case_id"]: c.get("has_lesion", False) for c in test_cases
     }
 
-    # sliding_window_inference requires predictor -> Tensor logits.
-    # Models in this repo can return Tensor, list[Tensor], or {"seg": ...}.
-    _predictor = lambda x: _seg_logits(model(x))
-
     with torch.no_grad():
         for batch in tqdm(loader, desc="Inference", unit="vol"):
             images   = batch["image"].to(device)    # (1, 3, D, H, W)
             labels   = batch.get("full_label", batch["label"]).to(device)
             case_id: str = batch["case_id"][0]
-
-            logits = sliding_window_inference(
-                inputs=images,
-                roi_size=patch_size,
-                sw_batch_size=sw_batch_size,
-                predictor=_predictor,
-                overlap=sw_overlap,
-            )   # (1, 1, D, H, W) — raw logits
+            if external_adapter is not None:
+                logits = external_adapter.predict_logits(
+                    images,
+                    sw_batch_size=sw_batch_size,
+                )
+            else:
+                assert model is not None
+                logits = sliding_window_inference(
+                    inputs=images,
+                    roi_size=patch_size,
+                    sw_batch_size=sw_batch_size,
+                    predictor=lambda x: _seg_logits(model(x)),
+                    overlap=sw_overlap,
+                )   # (1, 1, D, H, W) — raw logits
 
             logits = logits.float()
             if "roi" in batch:
@@ -1828,16 +2499,18 @@ def main() -> None:
                 labels,
                 threshold=pred_threshold,
             )
+            has_target = bool(labels[0, 0].detach().sum().item() > 0)
             has_lesion = lesion_map.get(case_id, False)
 
             per_case.append({
                 "case_id":    case_id,
+                "has_target": has_target,
                 "has_lesion": has_lesion,
                 **m,
             })
 
             # Store volumetric data for the first 5 positive cases (visualization)
-            if args.visualize and has_lesion and len(vis_data) < 5:
+            if args.visualize and has_target and len(vis_data) < 5:
                 t2w_source = batch.get("full_image", batch["image"])
                 roi_payload = None
                 if "roi" in batch:
@@ -1853,15 +2526,16 @@ def main() -> None:
     # ---- Per-case table ---------------------------------------------------------
     _section("Per-Case Results")
     cid_w  = max(len(r["case_id"]) for r in per_case)
+    case_flag_label = "target" if task == "prostate_localization" else "lesion"
     header = (
-        f"  {'case_id':<{cid_w}}  {'lesion':<7}"
+        f"  {'case_id':<{cid_w}}  {case_flag_label:<7}"
         f"  {'dice':>7}  {'iou':>7}  {'sens':>7}  {'prec':>7}  {'hd95':>8}"
     )
     print(header)
     print("  " + "─" * (len(header) - 2))
 
     for r in per_case:
-        tag = "yes" if r["has_lesion"] else "no"
+        tag = "yes" if r["has_target"] else "no"
         print(
             f"  {r['case_id']:<{cid_w}}  {tag:<7}"
             f"  {_fmt(r['dice']):>7}  {_fmt(r['iou']):>7}"
@@ -1870,8 +2544,8 @@ def main() -> None:
         )
 
     # ---- Aggregate metrics ------------------------------------------------------
-    pos_rows = [r for r in per_case if r["has_lesion"]]
-    neg_rows = [r for r in per_case if not r["has_lesion"]]
+    pos_rows = [r for r in per_case if r["has_target"]]
+    neg_rows = [r for r in per_case if not r["has_target"]]
 
     # dice / iou / sensitivity: positive cases only (nan-guard)
     dice_vals = [r["dice"]        for r in pos_rows if not math.isnan(r["dice"])]
@@ -1910,13 +2584,20 @@ def main() -> None:
         if args.vis_output:
             vis_path = Path(args.vis_output).expanduser().resolve()
         else:
-            repo_root = Path(__file__).resolve().parent.parent
-            vis_name = f"{run_dir.name}_eval_visualization.png"
-            vis_path = _default_vis_output_path(
-                run_dir=run_dir,
-                vis_name=vis_name,
-                repo_root=repo_root,
-            ).resolve()
+            vis_stem = (
+                run_dir.name
+                if run_dir is not None
+                else _slugify(f"{external_model_id}_{external_model_version}")
+            )
+            vis_name = f"{vis_stem}_eval_visualization.png"
+            if run_dir is not None:
+                vis_path = _default_vis_output_path(
+                    run_dir=run_dir,
+                    vis_name=vis_name,
+                    repo_root=repo_root,
+                ).resolve()
+            else:
+                vis_path = (repo_root / "visualizations" / vis_name).resolve()
         vis_path.parent.mkdir(parents=True, exist_ok=True)
         save_visualization(vis_data, vis_path, n_cols=_N_VIS_COLS)
         print(
@@ -1930,19 +2611,31 @@ def main() -> None:
         print("  Skipped (disabled by default; pass --visualize to enable).")
 
     # ---- Machine-readable summary ----------------------------------------------
-    summary_path = Path(args.summary_json).expanduser().resolve() if args.summary_json else (
-        _default_eval_summary_path(
+    if args.summary_json:
+        summary_path = Path(args.summary_json).expanduser().resolve()
+    elif run_dir is not None:
+        summary_path = _default_eval_summary_path(
             run_dir=run_dir,
             summary_name="evaluation_summary.json",
-            repo_root=Path(__file__).resolve().parent.parent,
+            repo_root=repo_root,
         ).resolve()
-    )
+    else:
+        summary_path = (
+            repo_root
+            / "outputs"
+            / "evaluation_summaries"
+            / f"{_slugify(f'{external_model_id}_{external_model_version}')}_evaluation_summary.json"
+        ).resolve()
     summary = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "run_dir": str(run_dir),
+        "run_dir": str(run_dir) if run_dir is not None else None,
+        "model_source": model_source,
+        "external_model_id": external_model_id or None,
+        "external_model_version": external_model_version or None,
+        "task": task,
         "checkpoint": {
-            "path": str(ckpt_path),
-            "name": ckpt_path.name,
+            "path": str(ckpt_path) if ckpt_path is not None else None,
+            "name": ckpt_path.name if ckpt_path is not None else None,
             "epoch": ckpt_epoch,
             "best_val_dice_training": _json_float(best_val_dice),
         },
@@ -1957,11 +2650,26 @@ def main() -> None:
         "inference": {
             "task": task,
             "roi_mode": roi_settings.mode,
+            "roi_localizer": (
+                {
+                    "ref": roi_settings.localizer_run,
+                    "description": _roi_variant_desc(
+                        "predicted_mask",
+                        roi_settings.localizer_run,
+                    ),
+                }
+                if roi_settings.mode == ROI_PREDICTED_MASK
+                else None
+            ),
             "device": str(device),
             "active_modalities": list(active_modalities),
             "patch_size": list(patch_size),
             "sw_overlap": sw_overlap,
             "sw_batch_size": sw_batch_size,
+            "roi_precompute": roi_precompute,
+            "external_bundle_cache_dir": (
+                str(external_adapter.cache_root) if external_adapter is not None else None
+            ),
             "pred_threshold": pred_threshold,
             "postprocess_enabled": postprocess_enabled,
             "postprocess_min_component_volume_mm3": postprocess_min_component_volume_mm3,

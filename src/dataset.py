@@ -57,6 +57,7 @@ from tqdm import tqdm
 import numpy as np
 import SimpleITK as sitk
 import torch
+from monai.inferers import sliding_window_inference
 from torch.utils.data import Dataset
 
 from src.config import load_config
@@ -67,6 +68,7 @@ from src.roi import (
     TASK_PROSTATE_LOCALIZATION,
     binarize_mask,
     compute_crop_bounds,
+    crop_bounds_from_dict,
     crop_tensor,
     keep_largest_component,
     resolve_localizer_checkpoint,
@@ -1078,13 +1080,17 @@ class _ProstateROILocalizer:
         self,
         localizer_run: str,
         target_spacing: tuple[float, ...],
+        device: torch.device | str | None = None,
     ) -> None:
         cfg_path, ckpt_path = resolve_localizer_checkpoint(localizer_run)
         self.cfg = load_config(str(cfg_path))
-        self.model = build_model(self.cfg).to(torch.device("cpu"))
-        load_checkpoint(ckpt_path, self.model, device=torch.device("cpu"))
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self.model: Any | None = build_model(self.cfg).to(self.device)
+        load_checkpoint(ckpt_path, self.model, device=self.device)
         self.model.eval()
         self.target_spacing = target_spacing
+        self.patch_size = tuple(int(v) for v in self.cfg.get("patch_size", [16, 128, 128]))
+        self.sw_overlap = float(self.cfg.get("sw_overlap", 0.5))
         self.active_modalities = tuple(
             k for k in MODALITY_KEYS if self.cfg.get(f"use_{k}", True)
         )
@@ -1098,7 +1104,21 @@ class _ProstateROILocalizer:
         self.dwi_hbv_clip_percentiles = (float(clip[0]), float(clip[1]))
         self.dwi_hbv_log1p = bool(dwi_hbv_preprocess.get("log1p", True))
 
+    @staticmethod
+    def _seg_logits(outputs: Any) -> torch.Tensor:
+        if isinstance(outputs, dict):
+            outputs = outputs["seg"]
+        if isinstance(outputs, list):
+            outputs = outputs[0]
+        if not isinstance(outputs, torch.Tensor):
+            raise TypeError(
+                "ROI localizer model output must be a Tensor, list[Tensor], or {'seg': Tensor}."
+            )
+        return outputs
+
     def predict_mask(self, case: dict) -> np.ndarray:
+        if self.model is None:
+            raise RuntimeError("ROI localizer has been released and can no longer run inference.")
         image = _prepare_case_image_tensor(
             case=case,
             target_spacing=self.target_spacing,
@@ -1106,15 +1126,22 @@ class _ProstateROILocalizer:
             dwi_hbv_preprocess_enabled=self.dwi_hbv_preprocess_enabled,
             dwi_hbv_clip_percentiles=self.dwi_hbv_clip_percentiles,
             dwi_hbv_log1p=self.dwi_hbv_log1p,
-        )
+        ).to(self.device)
         with torch.inference_mode():
-            logits = self.model(image.unsqueeze(0))
-            if isinstance(logits, dict):
-                logits = logits["seg"]
-            if isinstance(logits, list):
-                logits = logits[0]
+            logits = sliding_window_inference(
+                inputs=image.unsqueeze(0),
+                roi_size=self.patch_size,
+                sw_batch_size=1,
+                predictor=lambda x: self._seg_logits(self.model(x)),
+                overlap=self.sw_overlap,
+            )
             probs = torch.sigmoid(logits.float())
         return probs[0, 0].cpu().numpy()
+
+    def close(self) -> None:
+        self.model = None
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
 
 def _prepare_case_image_tensor(
@@ -1535,6 +1562,89 @@ class PiCaiDataset(Dataset):
             )
         return self._roi_localizer
 
+    def release_roi_localizer(self) -> None:
+        if self._roi_localizer is None:
+            return
+        self._roi_localizer.close()
+        self._roi_localizer = None
+
+    @staticmethod
+    def _normalize_predicted_roi_bounds(
+        payload: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        bounds_payload = payload.get("bounds", payload)
+        if not isinstance(bounds_payload, dict):
+            return None
+        crop = crop_bounds_from_dict(bounds_payload)
+        return crop.as_dict()
+
+    def _load_predicted_roi_bounds_from_cache_path(
+        self,
+        case: dict,
+    ) -> dict[str, Any] | None:
+        cache_path_raw = case.get("_roi_bounds_predicted_path")
+        if cache_path_raw in {None, ""}:
+            return None
+        cache_path = Path(cache_path_raw)
+        if not cache_path.exists():
+            return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            bounds = self._normalize_predicted_roi_bounds(payload)
+            if bounds is None:
+                raise TypeError("cache payload does not contain a valid ROI bounds dict")
+            case["_roi_bounds_predicted"] = bounds
+            return bounds
+        except Exception as exc:
+            logger.warning(
+                "Could not read predicted ROI bounds cache for case '%s' from %s (%s).",
+                case.get("case_id", "<unknown>"),
+                cache_path,
+                exc,
+            )
+            return None
+
+    def get_predicted_roi_bounds(
+        self,
+        case: dict,
+        *,
+        localizer: _ProstateROILocalizer | None = None,
+    ) -> dict[str, Any]:
+        cached_bounds = self._normalize_predicted_roi_bounds(
+            case.get("_roi_bounds_predicted")
+        )
+        if cached_bounds is not None:
+            case["_roi_bounds_predicted"] = cached_bounds
+            return cached_bounds
+
+        path_bounds = self._load_predicted_roi_bounds_from_cache_path(case)
+        if path_bounds is not None:
+            return path_bounds
+
+        roi_mask = (
+            localizer.predict_mask(case)
+            if localizer is not None
+            else self._get_roi_localizer().predict_mask(case)
+        )
+        roi_mask = binarize_mask(
+            roi_mask,
+            threshold=self.roi_settings.localizer_threshold,
+        )
+        if self.roi_settings.localizer_keep_largest_component:
+            roi_mask = keep_largest_component(roi_mask)
+        bounds = compute_crop_bounds(
+            mask=roi_mask,
+            spacing_zyx=self.target_spacing,
+            margin_mm=self.roi_settings.margin_mm,
+            min_size_vox=self.roi_settings.min_size_vox,
+            fallback_to_full_volume=self.roi_settings.fallback_to_full_volume,
+        ).as_dict()
+        case["_roi_bounds_predicted"] = bounds
+        return bounds
+
     def _build_sample(self, case: dict, payload: _PreprocessedCase) -> dict:
         image = payload.image.clone()
         lesion_label = payload.lesion_label.clone()
@@ -1574,25 +1684,7 @@ class PiCaiDataset(Dataset):
                 fallback_to_full_volume=self.roi_settings.fallback_to_full_volume,
             )
         else:
-            cached_bounds = case.get("_roi_bounds_predicted")
-            if isinstance(cached_bounds, dict):
-                bounds = cached_bounds
-            else:
-                roi_mask = self._get_roi_localizer().predict_mask(case)
-                roi_mask = binarize_mask(
-                    roi_mask,
-                    threshold=self.roi_settings.localizer_threshold,
-                )
-                if self.roi_settings.localizer_keep_largest_component:
-                    roi_mask = keep_largest_component(roi_mask)
-                bounds = compute_crop_bounds(
-                    mask=roi_mask,
-                    spacing_zyx=self.target_spacing,
-                    margin_mm=self.roi_settings.margin_mm,
-                    min_size_vox=self.roi_settings.min_size_vox,
-                    fallback_to_full_volume=self.roi_settings.fallback_to_full_volume,
-                ).as_dict()
-                case["_roi_bounds_predicted"] = bounds
+            bounds = self.get_predicted_roi_bounds(case)
         if not isinstance(bounds, dict):
             bounds = bounds.as_dict()
         sample["roi"] = bounds

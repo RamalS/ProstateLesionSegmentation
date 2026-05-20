@@ -20,11 +20,11 @@ target_spacing: [3.0, 0.5, 0.5]   # (z, y, x) in mm — preserves T2w in-plane r
 val_fraction: 0.2
 
 roi:
-  mode: disabled
+  mode: gt_mask
   val:
     mode: gt_mask
   target: prostate
-  margin_mm: [6.0, 12.0, 12.0]
+  margin_mm: [9.0, 16.0, 16.0]
   min_size_vox: [16, 128, 128]
   fallback_to_full_volume: true
   gt_dataset_types: [prostate158]

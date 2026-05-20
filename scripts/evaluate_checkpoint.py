@@ -436,7 +436,7 @@ class _ExternalROILocalizer:
         *,
         target_spacing: tuple[float, ...],
         device: torch.device,
-        repo_root: Path,
+        cache_root: Path,
     ) -> None:
         self.spec = localizer_spec
         self.target_spacing = target_spacing
@@ -444,7 +444,7 @@ class _ExternalROILocalizer:
         self.adapter = MonaiBundleProstateMaskAdapter(
             spec=localizer_spec,
             device=device,
-            cache_root=default_external_model_cache_root(repo_root),
+            cache_root=cache_root,
         )
 
     def predict_mask(self, case: dict[str, Any]) -> np.ndarray:
@@ -476,12 +476,32 @@ def _build_roi_localizer_predictor(
 ) -> Any:
     external_spec = parse_external_localizer_ref(roi_settings.localizer_run)
     if external_spec is not None:
-        return _ExternalROILocalizer(
-            external_spec,
-            target_spacing=target_spacing,
-            device=device,
-            repo_root=repo_root,
-        )
+        cache_root = default_external_model_cache_root(repo_root)
+        try:
+            return _ExternalROILocalizer(
+                external_spec,
+                target_spacing=target_spacing,
+                device=device,
+                cache_root=cache_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "External ROI localizer init failed for %s@%s: %s",
+                external_spec.model_id,
+                external_spec.bundle_version,
+                exc,
+            )
+            logger.error(
+                "Operator hint: container cannot reach MONAI Hub/hosting. "
+                "Set HTTP_PROXY/HTTPS_PROXY/NO_PROXY (and lowercase variants) "
+                "or seed the bundle cache at %s.",
+                cache_root,
+            )
+            raise RuntimeError(
+                "External ROI localizer initialization failed. "
+                "Container cannot reach MONAI Hub/hosting; set proxy env vars "
+                f"or seed cache at {cache_root}."
+            ) from exc
     return _ProstateROILocalizer(
         localizer_run=roi_settings.localizer_run,
         target_spacing=target_spacing,

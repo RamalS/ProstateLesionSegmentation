@@ -42,6 +42,8 @@
 - Docker: `docker compose run --rm -it trainer evaluate --run /outputs/runs/<run_name>`
 - Docker external baseline: `docker compose run --rm trainer evaluate --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
 - Docker external ROI localizer: `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
+- If Docker needs proxy egress for MONAI bundle download, export `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase variants). `compose.yml` passes them through to `trainer`.
+- Proxy-enabled Docker external ROI localizer example: `HTTP_PROXY=http://proxy.example:3128 HTTPS_PROXY=http://proxy.example:3128 NO_PROXY=localhost,127.0.0.1 docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
 - Local: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name>`
 - Local external baseline: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
 - Local external ROI localizer: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`

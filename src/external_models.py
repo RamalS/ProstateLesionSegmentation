@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 import time
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import numpy as np
 import torch
@@ -13,6 +16,26 @@ from roi import keep_largest_component
 
 
 logger = logging.getLogger(__name__)
+
+_PROXY_ENV_VARS: tuple[str, ...] = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+_DEFAULT_BUNDLE_PREFLIGHT_TIMEOUT_SEC = 3.0
+_BUNDLE_PROBE_URLS_BY_SOURCE: dict[str, tuple[str, ...]] = {
+    "monaihosting": (
+        "https://api.ngc.nvidia.com/v2/models/nvidia/monaihosting",
+        "https://huggingface.co",
+    ),
+    "huggingface_hub": ("https://huggingface.co",),
+    "github": ("https://github.com",),
+    "ngc": ("https://api.ngc.nvidia.com",),
+    "ngc_private": ("https://api.ngc.nvidia.com",),
+}
 
 
 @dataclass(frozen=True)
@@ -181,6 +204,22 @@ class MonaiBundleProstateMaskAdapter:
             ) from exc
 
         self.cache_root.mkdir(parents=True, exist_ok=True)
+        cache_hit, cache_path, checked_paths = self._resolve_cached_bundle_dir()
+        checked_paths_desc = ", ".join(str(path) for path in checked_paths)
+        if cache_hit:
+            logger.info(
+                "External MONAI bundle cache hit: %s (checked: %s).",
+                cache_path,
+                checked_paths_desc,
+            )
+        else:
+            logger.info(
+                "External MONAI bundle cache miss for %s@%s (checked: %s).",
+                self.spec.bundle_name,
+                self.spec.bundle_version,
+                checked_paths_desc,
+            )
+            self._preflight_bundle_connectivity(checked_paths)
         logger.info(
             "Preparing external MONAI bundle %s@%s in %s. "
             "First-time download can take several minutes and may appear quiet.",
@@ -189,15 +228,25 @@ class MonaiBundleProstateMaskAdapter:
             self.cache_root,
         )
         started = time.monotonic()
-        model = load_bundle(
-            name=self.spec.bundle_name,
-            version=self.spec.bundle_version,
-            workflow_type="inference",
-            bundle_dir=str(self.cache_root),
-            source=self.spec.bundle_source,
-            repo=self.spec.repo,
-            device=self.device,
-        )
+        try:
+            model = load_bundle(
+                name=self.spec.bundle_name,
+                version=self.spec.bundle_version,
+                workflow_type="inference",
+                bundle_dir=str(self.cache_root),
+                source=self.spec.bundle_source,
+                repo=self.spec.repo,
+                device=self.device,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to load external MONAI bundle "
+                f"{self.spec.bundle_name}@{self.spec.bundle_version}. "
+                f"Reason: {exc.__class__.__name__}: {exc}. "
+                f"Proxy env: {self._proxy_env_status()}. "
+                f"Bundle cache root: {self.cache_root}. "
+                f"Checked cache path(s): {', '.join(str(path) for path in checked_paths)}."
+            ) from exc
         elapsed = time.monotonic() - started
         if not isinstance(model, torch.nn.Module):
             raise TypeError(
@@ -210,6 +259,108 @@ class MonaiBundleProstateMaskAdapter:
             elapsed,
         )
         return model.to(self.device)
+
+    def _bundle_cache_candidates(self) -> tuple[Path, ...]:
+        return (
+            self.cache_root / self.spec.bundle_name,
+            self.cache_root / f"{self.spec.bundle_name}_{self.spec.bundle_version}",
+            self.cache_root / f"{self.spec.bundle_name}_v{self.spec.bundle_version}",
+            self.cache_root / self.spec.bundle_name / self.spec.bundle_version,
+        )
+
+    @staticmethod
+    def _looks_like_bundle_dir(path: Path) -> bool:
+        return (
+            path.is_dir()
+            and (path / "configs" / "metadata.json").is_file()
+            and (path / "models").is_dir()
+        )
+
+    def _resolve_cached_bundle_dir(self) -> tuple[bool, Path, list[Path]]:
+        checked_paths: list[Path] = []
+        seen: set[Path] = set()
+
+        def _track(path: Path) -> None:
+            if path not in seen:
+                seen.add(path)
+                checked_paths.append(path)
+
+        for candidate in self._bundle_cache_candidates():
+            _track(candidate)
+            if self._looks_like_bundle_dir(candidate):
+                return True, candidate, checked_paths
+
+        if self.cache_root.exists():
+            for metadata_path in self.cache_root.rglob("metadata.json"):
+                if metadata_path.parent.name != "configs":
+                    continue
+                bundle_dir = metadata_path.parent.parent
+                if self.spec.bundle_name not in bundle_dir.name:
+                    continue
+                _track(bundle_dir)
+                if self._looks_like_bundle_dir(bundle_dir):
+                    return True, bundle_dir, checked_paths
+
+        return False, self.cache_root / self.spec.bundle_name, checked_paths
+
+    @staticmethod
+    def _proxy_env_status() -> str:
+        return ", ".join(
+            f"{key}={'set' if os.getenv(key) else 'unset'}" for key in _PROXY_ENV_VARS
+        )
+
+    def _bundle_probe_urls(self) -> tuple[str, ...]:
+        return _BUNDLE_PROBE_URLS_BY_SOURCE.get(
+            self.spec.bundle_source,
+            ("https://huggingface.co",),
+        )
+
+    @staticmethod
+    def _check_url_reachable(url: str, timeout_sec: float) -> None:
+        try:
+            request = Request(url=url, method="HEAD")
+            with urlopen(request, timeout=timeout_sec):
+                return
+        except HTTPError as exc:
+            if exc.code == 407:
+                raise RuntimeError(
+                    "Proxy authentication failed (HTTP 407) while checking connectivity."
+                ) from exc
+            return
+        except URLError as exc:
+            raise RuntimeError(str(exc.reason or exc)) from exc
+        except TimeoutError as exc:
+            raise RuntimeError("connection timed out") from exc
+
+    def _preflight_bundle_connectivity(self, checked_paths: list[Path]) -> None:
+        timeout_sec = float(
+            os.getenv(
+                "MONAI_BUNDLE_PREFLIGHT_TIMEOUT_SEC",
+                str(_DEFAULT_BUNDLE_PREFLIGHT_TIMEOUT_SEC),
+            )
+        )
+        failures: list[tuple[str, str]] = []
+        for url in self._bundle_probe_urls():
+            try:
+                self._check_url_reachable(url, timeout_sec=timeout_sec)
+                logger.info(
+                    "External bundle connectivity preflight succeeded via %s (timeout %.1fs).",
+                    url,
+                    timeout_sec,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                failures.append((url, f"{exc.__class__.__name__}: {exc}"))
+
+        failure_details = "; ".join(f"{url} -> {msg}" for url, msg in failures)
+        raise RuntimeError(
+            "External MONAI bundle download preflight failed before load_bundle(). "
+            f"Unable to reach hosting endpoints for source={self.spec.bundle_source!r}. "
+            f"Failure(s): {failure_details}. "
+            f"Proxy env: {self._proxy_env_status()}. "
+            f"Bundle cache root: {self.cache_root}. "
+            f"Checked cache path(s): {', '.join(str(path) for path in checked_paths)}."
+        )
 
     @staticmethod
     def _normalize_t2w(images: torch.Tensor) -> torch.Tensor:

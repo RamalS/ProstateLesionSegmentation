@@ -405,6 +405,7 @@ The evaluator also supports one curated external baseline: `monai:prostate_mri_a
 - Bundle downloads are cached under `/cache/monai_bundles` in Docker and `cache/monai_bundles/` when running locally.
 - The same bundle can also be used as a `roi.mode=predicted_mask` localizer for lesion-segmentation evaluation and selector batch mode.
 - Docker note: MONAI bundle download depends on `huggingface_hub`, so rebuild the image after dependency updates before using the external baseline or external ROI localizer.
+- Docker proxy note: `compose.yml` now forwards `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and lowercase variants into `trainer`. Set these in your shell before `docker compose run ... evaluate ...` when outbound egress requires a proxy.
 
 Examples:
 
@@ -416,6 +417,17 @@ docker compose run --rm trainer evaluate \
 
 PYTHONPATH=. python scripts/evaluate_checkpoint.py \
   --external-model monai:prostate_mri_anatomy@0.3.5 \
+  --dataset-type prostate158 \
+  --prostate158-prostate-label-col t2_prostate_reader1
+
+# Proxy-enabled Docker example (if direct egress is blocked)
+HTTP_PROXY=http://proxy.example:3128 \
+HTTPS_PROXY=http://proxy.example:3128 \
+NO_PROXY=localhost,127.0.0.1 \
+docker compose run --rm trainer evaluate \
+  --run /outputs/runs/<run_name> \
+  --roi-mode predicted_mask \
+  --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 \
   --dataset-type prostate158 \
   --prostate158-prostate-label-col t2_prostate_reader1
 ```

@@ -385,8 +385,9 @@ def _load_model_inputs(
         adc = _maybe_autodetect_modality("adc", adc_path, t2w_path, case_id)
         if adc is None:
             raise FileNotFoundError(
-                "ADC required by model config (use_adc=true) but no file found. "
-                "Pass --adc or place '<case_id>_adc.mha' next to --t2w."
+                "ADC is required by model config modalities but no file was found. "
+                "Pass --adc or place '<case_id>_adc.mha' next to --t2w. "
+                "(Legacy note: old configs may express this via use_adc=true.)"
             )
         used_paths["adc"] = adc
 
@@ -394,13 +395,15 @@ def _load_model_inputs(
         hbv = _maybe_autodetect_modality("hbv", hbv_path, t2w_path, case_id)
         if hbv is None:
             raise FileNotFoundError(
-                "HBV required by model config (use_hbv=true) but no file found. "
-                "Pass --hbv or place '<case_id>_hbv.mha' next to --t2w."
+                "HBV is required by model config modalities but no file was found. "
+                "Pass --hbv or place '<case_id>_hbv.mha' next to --t2w. "
+                "(Legacy note: old configs may express this via use_hbv=true.)"
             )
         used_paths["hbv"] = hbv
 
     # PiCaiDataset always expects "t2w" in the case dict because T2w is used
-    # internally as registration + label-grid reference even when use_t2w=false.
+    # internally as registration + label-grid reference even when t2w is not
+    # part of the model input modalities.
     case: dict[str, str | Path | None] = {
         "case_id": case_id,
         "t2w": t2w_path,

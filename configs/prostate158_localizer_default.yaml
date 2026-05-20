@@ -43,9 +43,7 @@ num_samples: 1
 
 # Model
 model: deconver
-use_t2w: true
-use_adc: false
-use_hbv: false
+modalities: [t2w]
 out_channels: 1
 features: [32, 64, 128, 256]
 deep_supervision: true

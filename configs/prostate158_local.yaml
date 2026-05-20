@@ -43,9 +43,7 @@ num_samples: 1
 
 # Model
 model: unet3d
-use_t2w: true
-use_adc: true
-use_hbv: true
+modalities: [t2w, adc, hbv]
 out_channels: 1
 features: [32, 64, 128, 256]
 deep_supervision: false

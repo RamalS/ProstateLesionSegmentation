@@ -6,7 +6,7 @@ What this tests (no real data required):
   2. Optional dependency imports (SimpleITK, MONAI, nibabel, scipy)
   3. UNet3D: instantiation, parameter count, forward pass shape
    3b. AttentionUNet3D: instantiation, parameter count, forward pass, build_model factory
-   3c. Modality flag selection: build_model derives in_channels from use_t2w/use_adc/use_hbv
+   3c. Modality config selection: build_model derives in_channels from modalities and legacy use_*
    3d. Deep supervision: list output, auxiliary shapes, build_model DS, DeepSupervisionWrapper
    3e. Deconver: instantiation, forward pass, build_model factory, deep supervision (num_deep_supr),
        and stride wiring regression guard
@@ -257,9 +257,9 @@ except Exception as exc:
     fail("AttentionUNet3D / build_model test failed", exc)
 
 # ---------------------------------------------------------------------------
-# 3c. Modality flag selection: build_model derives in_channels from flags
+# 3c. Modality config selection: build_model derives in_channels
 # ---------------------------------------------------------------------------
-section("3c. Modality flag selection (use_t2w / use_adc / use_hbv)")
+section("3c. Modality config selection (modalities + legacy use_*)")
 
 try:
     from models import build_model as _bm
@@ -273,6 +273,32 @@ try:
         ok("all flags True  → model in_channels = 3")
     else:
         fail(f"all flags True: expected in_channels=3, first Conv3d has {_c3}")
+
+    # --- Ordered modalities list (preferred config) --------------------------
+    m_modalities = _bm({"modalities": ["adc", "t2w"], "out_channels": 1, "features": [16, 32]})
+    _enc0_m = list(m_modalities.encoders.children())[0] if hasattr(m_modalities, "encoders") else None
+    _cm = _enc0_m[0].in_channels if _enc0_m is not None else None
+    if _cm == 2:
+        ok("modalities=[adc,t2w] → model in_channels = 2")
+    else:
+        fail(f"modalities=[adc,t2w]: expected in_channels=2, first Conv3d has {_cm}")
+
+    m_precedence = _bm(
+        {
+            "modalities": ["hbv"],
+            "use_t2w": True,
+            "use_adc": True,
+            "use_hbv": True,
+            "out_channels": 1,
+            "features": [16, 32],
+        }
+    )
+    _enc0_p = list(m_precedence.encoders.children())[0] if hasattr(m_precedence, "encoders") else None
+    _cp = _enc0_p[0].in_channels if _enc0_p is not None else None
+    if _cp == 1:
+        ok("modalities wins when both schemas are set (in_channels = 1)")
+    else:
+        fail(f"modalities precedence: expected in_channels=1, first Conv3d has {_cp}")
 
     # --- T2w + ADC only (HBV disabled) → in_channels = 2 --------------------
     m2 = _bm({"use_t2w": True, "use_adc": True, "use_hbv": False,

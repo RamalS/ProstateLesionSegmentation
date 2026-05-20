@@ -952,6 +952,34 @@ def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
+def _resolve_modalities_for_report(cfg: dict[str, Any]) -> list[str]:
+    # Prefer the shared resolver when dependencies are available.
+    try:
+        from src.config import resolve_active_modalities
+
+        return list(resolve_active_modalities(cfg))
+    except Exception:
+        pass
+
+    raw_modalities = cfg.get("modalities")
+    if isinstance(raw_modalities, (list, tuple)):
+        parsed: list[str] = []
+        for raw in raw_modalities:
+            if not isinstance(raw, str):
+                continue
+            token = raw.strip().lower()
+            if token in {"t2w", "adc", "hbv"} and token not in parsed:
+                parsed.append(token)
+        if parsed:
+            return parsed
+
+    return [
+        key
+        for key in ("t2w", "adc", "hbv")
+        if bool(cfg.get(f"use_{key}", True))
+    ]
+
+
 def _config_highlights(cfg: dict[str, Any], report: RunReport) -> list[str]:
     lines: list[str] = []
 
@@ -981,12 +1009,11 @@ def _config_highlights(cfg: dict[str, Any], report: RunReport) -> list[str]:
 
     lines.append(f"- patch_size: `{cfg.get('patch_size', 'n/a')}`")
     lines.append(f"- target_spacing: `{cfg.get('target_spacing', 'n/a')}`")
-    lines.append(
-        "- modalities: "
-        f"use_t2w={cfg.get('use_t2w', 'n/a')}, "
-        f"use_adc={cfg.get('use_adc', 'n/a')}, "
-        f"use_hbv={cfg.get('use_hbv', 'n/a')}"
-    )
+    try:
+        active_modalities = _resolve_modalities_for_report(cfg)
+        lines.append(f"- modalities: `{active_modalities}`")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"- modalities: `invalid ({exc})`")
     lines.append(
         "- optimizer/schedule: "
         f"lr={cfg.get('learning_rate', 'n/a')}, "

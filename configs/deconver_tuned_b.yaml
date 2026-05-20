@@ -24,9 +24,7 @@ num_samples: 2                     # patches extracted per volume per __getitem_
 
 # Model
 model: deconver                    # options: unet3d, attention_unet3d, fct, deconver
-use_t2w: true                      # include T2w channel
-use_adc: true                      # include ADC channel — most discriminative for csPCa
-use_hbv: true                      # include HBV channel — complementary DWI information
+modalities: [t2w, adc, hbv]        # ordered model input channels
 out_channels: 1                    # binary segmentation
 features: [32, 64, 128, 256]       # encoder feature map sizes (unet3d / attention_unet3d / fct only)
 deep_supervision: true             # auxiliary losses at each decoder level (nnU-Net style)

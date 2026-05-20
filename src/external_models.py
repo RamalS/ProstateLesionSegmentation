@@ -151,15 +151,19 @@ def build_external_eval_config(
     prostate158_root: str = "",
     prostate158_label_reader: str = "",
 ) -> dict[str, Any]:
+    modalities = [str(key) for key in spec.required_modalities]
     return {
         "model_source": spec.model_source,
         "external_model_id": spec.model_id,
         "external_model_version": spec.bundle_version,
         "dataset_type": spec.dataset_type,
         "task": spec.task,
-        "use_t2w": "t2w" in spec.required_modalities,
-        "use_adc": "adc" in spec.required_modalities,
-        "use_hbv": "hbv" in spec.required_modalities,
+        "modalities": modalities,
+        # Transition compatibility for unchanged callsites that still inspect
+        # legacy modality flags.
+        "use_t2w": "t2w" in modalities,
+        "use_adc": "adc" in modalities,
+        "use_hbv": "hbv" in modalities,
         "target_spacing": list(spec.target_spacing),
         "patch_size": list(spec.patch_size),
         "sw_overlap": spec.sw_overlap,

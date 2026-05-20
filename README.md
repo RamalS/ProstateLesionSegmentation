@@ -92,7 +92,7 @@ configs/
 - Creator attribution: **Pooya Ashtari et al.**, *Deconver: A Deconvolutional Network for Medical Image Segmentation* ([arXiv:2504.00302](https://arxiv.org/abs/2504.00302)); upstream project: [pashtari/deconver](https://github.com/pashtari/deconver)
 - Selected at runtime via the `model` config key (`unet3d`, `attention_unet3d`, `fct`, or `deconver`)
 
-UNet3D/AttentionUNet3D/FCT default configuration uses feature sizes `[32, 64, 128, 256]`, up to 3 input channels (T2w + ADC + HBV, controlled by `use_t2w/use_adc/use_hbv` flags), and 1 output channel (binary segmentation).
+UNet3D/AttentionUNet3D/FCT default configuration uses feature sizes `[32, 64, 128, 256]`, up to 3 input channels (T2w + ADC + HBV, controlled by ordered `modalities`, e.g. `[t2w, adc, hbv]`), and 1 output channel (binary segmentation).
 
 To run with Deconver, set `model: deconver` and define Deconver-specific keys:
 
@@ -351,7 +351,7 @@ All hyperparameters and paths are defined in YAML config files. Key parameters:
 | `target_spacing` | `[3.0, 0.5, 0.5]` | `[3.0, 0.5, 0.5]` | Voxel spacing (z, y, x) in mm after resampling |
 | `val_fraction` | 0.2 | 0.2 | Fraction of data held out for validation |
 | `model` | `attention_unet3d` | `unet3d` | Model architecture (`unet3d`, `attention_unet3d`, `fct`, or `deconver`) |
-| `use_t2w / use_adc / use_hbv` | `true` | `true` | Modality flags (control number of input channels) |
+| `modalities` | `[t2w, adc, hbv]` | `[t2w, adc, hbv]` | Ordered active input channels (legacy `use_t2w/use_adc/use_hbv` is still accepted for old run configs) |
 | `features` | `[32, 64, 128, 256]` | `[32, 64, 128, 256]` | Encoder feature map sizes |
 | `deep_supervision` | `false` | `false` | Auxiliary losses at each decoder level |
 | `loss_fn` | `tversky_bce` | `dice_bce` | Loss function (`dice_bce` or `tversky_bce`) |

@@ -26,9 +26,7 @@ full_l1_weight: 0.1
 
 # Model
 model: attention_unet3d
-use_t2w: true
-use_adc: true
-use_hbv: true
+modalities: [t2w, adc, hbv]
 features: [32, 64, 128, 256]
 deep_supervision: false
 

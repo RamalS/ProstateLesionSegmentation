@@ -36,7 +36,11 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from src.config import load_config, resolve_dataset_cache_config
+from src.config import (
+    load_config,
+    resolve_active_modalities,
+    resolve_dataset_cache_config,
+)
 from src.models import build_model
 
 # ---------------------------------------------------------------------------
@@ -459,13 +463,9 @@ def estimate(config_path: str, gpu_vram_gb: float = 12.0) -> None:
     deep_supervision: bool      = cfg.get("deep_supervision", False)
     val_fraction:     float     = cfg.get("val_fraction", 0.2)
 
-    use_t2w: bool = cfg.get("use_t2w", True)
-    use_adc: bool = cfg.get("use_adc", True)
-    use_hbv: bool = cfg.get("use_hbv", True)
-    in_channels  = int(use_t2w) + int(use_adc) + int(use_hbv)
-    modality_str = " + ".join(
-        k for k, v in [("t2w", use_t2w), ("adc", use_adc), ("hbv", use_hbv)] if v
-    )
+    active_modalities = resolve_active_modalities(cfg)
+    in_channels = len(active_modalities)
+    modality_str = " + ".join(active_modalities)
 
     param_bytes: int
     if use_amp:

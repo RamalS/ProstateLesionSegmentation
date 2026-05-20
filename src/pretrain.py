@@ -14,11 +14,15 @@ import argparse
 import json
 import logging
 import math
+import os
 import random
 import shutil
 from pathlib import Path
 
 import numpy as np
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader

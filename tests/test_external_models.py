@@ -16,10 +16,22 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from external_models import MonaiBundleProstateMaskAdapter, resolve_external_model_request
+from external_models import (
+    MonaiBundleProstateMaskAdapter,
+    build_external_eval_config,
+    resolve_external_model_request,
+)
 
 
 class MonaiBundleAdapterTests(unittest.TestCase):
+    def test_external_eval_config_emits_modalities_and_legacy_flags(self) -> None:
+        spec = resolve_external_model_request("monai:prostate_mri_anatomy@0.3.5")
+        cfg = build_external_eval_config(spec)
+        self.assertEqual(cfg["modalities"], ["t2w"])
+        self.assertTrue(cfg["use_t2w"])
+        self.assertFalse(cfg["use_adc"])
+        self.assertFalse(cfg["use_hbv"])
+
     def _fake_runtime_modules(self, load_fn) -> dict[str, types.ModuleType]:
         monai_mod = types.ModuleType("monai")
         monai_bundle_mod = types.ModuleType("monai.bundle")

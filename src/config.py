@@ -10,6 +10,8 @@ import yaml
 
 
 _CACHE_MODES: set[str] = {"none", "ram", "storage"}
+SUPPORTED_MODALITIES: tuple[str, str, str] = ("t2w", "adc", "hbv")
+_LEGACY_MODALITY_KEYS: tuple[str, str, str] = ("use_t2w", "use_adc", "use_hbv")
 
 
 def load_config(path: str) -> dict:
@@ -56,6 +58,114 @@ def _warn(msg: str, logger: logging.Logger | None) -> None:
         logger.warning(msg)
         return
     warnings.warn(msg, stacklevel=3)
+
+
+def resolve_active_modalities(
+    cfg: Mapping[str, Any],
+    logger: logging.Logger | None = None,
+) -> tuple[str, ...]:
+    """
+    Resolve active input modalities in channel order.
+
+    Preferred config:
+      - ``modalities``: ordered list subset of ``["t2w", "adc", "hbv"]``
+
+    Backward-compatible legacy config:
+      - ``use_t2w``, ``use_adc``, ``use_hbv`` boolean flags
+      - when ``modalities`` is absent, legacy flags are read in canonical order
+        and default to ``True`` when omitted
+
+    Precedence:
+      - when both ``modalities`` and legacy flags are present, ``modalities``
+        wins and a warning is emitted.
+    """
+    modalities_raw = cfg.get("modalities", None)
+    has_legacy = any(key in cfg for key in _LEGACY_MODALITY_KEYS)
+
+    if modalities_raw is not None:
+        if not isinstance(modalities_raw, (list, tuple)):
+            raise ValueError(
+                "Config key 'modalities' must be a list like ['t2w', 'adc', 'hbv']."
+            )
+
+        parsed: list[str] = []
+        seen: set[str] = set()
+        for raw in modalities_raw:
+            if not isinstance(raw, str):
+                raise ValueError(
+                    "Config key 'modalities' must contain strings only "
+                    "(allowed: t2w, adc, hbv)."
+                )
+            token = raw.strip().lower()
+            if not token:
+                raise ValueError(
+                    "Config key 'modalities' contains an empty entry."
+                )
+            if token not in SUPPORTED_MODALITIES:
+                supported = ", ".join(SUPPORTED_MODALITIES)
+                raise ValueError(
+                    f"Unknown modality '{raw}'. "
+                    f"Supported modalities: {supported}."
+                )
+            if token in seen:
+                raise ValueError(
+                    f"Duplicate modality '{token}' in config key 'modalities'."
+                )
+            seen.add(token)
+            parsed.append(token)
+
+        if not parsed:
+            raise ValueError(
+                "Config key 'modalities' must not be empty. "
+                "Choose at least one modality from: t2w, adc, hbv."
+            )
+
+        if has_legacy:
+            _warn(
+                "Both 'modalities' and deprecated legacy flags "
+                "('use_t2w'/'use_adc'/'use_hbv') are set; "
+                "ignoring legacy flags and using 'modalities'.",
+                logger,
+            )
+        return tuple(parsed)
+
+    active = tuple(
+        key
+        for key in SUPPORTED_MODALITIES
+        if _coerce_bool(cfg.get(f"use_{key}", True))
+    )
+    if not active:
+        raise ValueError(
+            "No modalities enabled. Set config key 'modalities' to a non-empty "
+            "ordered subset of ['t2w', 'adc', 'hbv']. "
+            "Legacy flags 'use_t2w/use_adc/use_hbv' are still accepted but deprecated."
+        )
+    if has_legacy:
+        _warn(
+            "Config keys 'use_t2w'/'use_adc'/'use_hbv' are deprecated. "
+            "Use 'modalities: [t2w, adc, hbv]' instead.",
+            logger,
+        )
+    return active
+
+
+def resolve_active_modality_pairs(
+    cfg: Mapping[str, Any],
+    suffix_by_modality: Mapping[str, str],
+    logger: logging.Logger | None = None,
+) -> list[tuple[str, str]]:
+    """
+    Resolve ordered ``(modality, suffix)`` pairs from ``cfg``.
+
+    ``suffix_by_modality`` must include mappings for all supported modalities.
+    """
+    missing = [k for k in SUPPORTED_MODALITIES if k not in suffix_by_modality]
+    if missing:
+        raise ValueError(
+            f"suffix_by_modality is missing required key(s): {missing}."
+        )
+    active = resolve_active_modalities(cfg, logger=logger)
+    return [(key, suffix_by_modality[key]) for key in active]
 
 
 def resolve_dataset_cache_config(

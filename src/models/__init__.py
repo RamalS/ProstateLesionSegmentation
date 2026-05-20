@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
+from src.config import resolve_active_modalities
 from src.models.attention_unet3d import AttentionUNet3D
 from src.models.fct import FCT
 from src.models.unet3d import UNet3D
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Deconver vendored package — add its parent to sys.path so the inner
@@ -101,10 +106,9 @@ def build_model(cfg: dict) -> nn.Module:
     ``"unet3d"`` when the key is absent so that existing configs without the
     key continue to work.
 
-    The number of input channels is derived from the modality flags
-    ``use_t2w``, ``use_adc``, and ``use_hbv`` (each defaults to ``True``).
-    One channel is allocated per enabled modality in canonical order:
-    ``[T2w, ADC, HBV]``.
+    The number of input channels is derived from the resolved active
+    modalities (preferred config key: ``modalities``). One channel is
+    allocated per active modality.
 
     Parameters
     ----------
@@ -112,9 +116,10 @@ def build_model(cfg: dict) -> nn.Module:
         Training configuration dict.  Relevant keys (common):
 
         ``model``            — architecture name (see ``_MODEL_REGISTRY``).
-        ``use_t2w``          — include T2w channel (default ``True``).
-        ``use_adc``          — include ADC channel (default ``True``).
-        ``use_hbv``          — include HBV channel (default ``True``).
+        ``modalities``       — ordered active modalities, e.g.
+                               ``["t2w", "adc", "hbv"]``.
+                               Legacy ``use_t2w/use_adc/use_hbv`` keys are
+                               still accepted for backward compatibility.
         ``out_channels``     — number of segmentation output channels (default 1).
         ``features``         — encoder feature sizes as a list (default [32,64,128,256]).
                                Used by ``unet3d``, ``attention_unet3d``, and ``fct``.
@@ -156,7 +161,7 @@ def build_model(cfg: dict) -> nn.Module:
     ------
     ValueError
         If ``cfg["model"]`` is not present in ``_MODEL_REGISTRY``, or if
-        all three modality flags are ``False`` (no input channels), or if
+        no modalities are active (no input channels), or if
         ``model: deconver`` is requested but the package failed to import.
     """
     name = cfg.get("model", "unet3d").lower()
@@ -175,15 +180,11 @@ def build_model(cfg: dict) -> nn.Module:
             f"Available architectures: {available}"
         )
 
-    in_channels = sum([
-        cfg.get("use_t2w", True),
-        cfg.get("use_adc", True),
-        cfg.get("use_hbv", True),
-    ])
+    in_channels = len(resolve_active_modalities(cfg, logger=logger))
     if in_channels == 0:
         raise ValueError(
-            "No modalities enabled. At least one of use_t2w, use_adc, "
-            "use_hbv must be true in the config."
+            "No modalities enabled. Set config key 'modalities' to a non-empty "
+            "ordered subset of ['t2w', 'adc', 'hbv']."
         )
 
     # -----------------------------------------------------------------------

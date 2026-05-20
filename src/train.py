@@ -23,6 +23,7 @@ import csv
 import gc
 import logging
 import math
+import os
 import random
 import re
 import shutil
@@ -32,6 +33,9 @@ from typing import Any, Mapping
 
 import monai.data.utils
 import numpy as np
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from monai.inferers import sliding_window_inference
 from torch.utils.data import DataLoader, WeightedRandomSampler

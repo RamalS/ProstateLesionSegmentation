@@ -60,7 +60,12 @@ import torch
 from monai.inferers import sliding_window_inference
 from torch.utils.data import Dataset
 
-from src.config import load_config
+from src.config import (
+    SUPPORTED_MODALITIES,
+    load_config,
+    resolve_active_modalities,
+    resolve_active_modality_pairs,
+)
 from src.models import build_model
 from src.roi import (
     ROISettings,
@@ -79,50 +84,64 @@ from src.utils import load_checkpoint
 
 logger = logging.getLogger(__name__)
 
-# PI-CAI modality suffixes in channel order [T2w, ADC, HBV]
-MODALITY_SUFFIXES = ("_t2w.mha", "_adc.mha", "_hbv.mha")
-MODALITY_KEYS = ("t2w", "adc", "hbv")
+# PI-CAI modality suffixes keyed by modality name.
+MODALITY_KEYS = SUPPORTED_MODALITIES
+MODALITY_SUFFIX_BY_KEY: dict[str, str] = {
+    "t2w": "_t2w.mha",
+    "adc": "_adc.mha",
+    "hbv": "_hbv.mha",
+}
 LABEL_SUFFIX = ".nii.gz"
 SPLIT_MANIFEST_VERSION = 1
 
 
 def active_modality_pairs(cfg: dict) -> list[tuple[str, str]]:
     """
-    Return ``(key, suffix)`` pairs for the modalities enabled in *cfg*.
-
-    Reads the ``use_t2w``, ``use_adc``, and ``use_hbv`` boolean flags
-    (all default to ``True`` when absent so that existing configs without
-    the flags continue to behave as before).  Pairs are returned in the
-    canonical channel order ``[T2w, ADC, HBV]``.
-
-    Parameters
-    ----------
-    cfg : dict
-        Training configuration dict with optional keys
-        ``use_t2w``, ``use_adc``, ``use_hbv``.
-
-    Returns
-    -------
-    list[tuple[str, str]]
-        Each element is ``(modality_key, file_suffix)``, e.g.
-        ``[("t2w", "_t2w.mha"), ("adc", "_adc.mha")]``.
-
-    Raises
-    ------
-    ValueError
-        If all three flags are ``False`` (no modality would be loaded).
+    Backward-compatible wrapper for ordered ``(key, suffix)`` modality pairs.
     """
-    pairs = [
-        (key, suffix)
-        for key, suffix in zip(MODALITY_KEYS, MODALITY_SUFFIXES)
-        if cfg.get(f"use_{key}", True)
-    ]
-    if not pairs:
+    return resolve_active_modality_pairs(
+        cfg,
+        suffix_by_modality=MODALITY_SUFFIX_BY_KEY,
+        logger=logger,
+    )
+
+
+def _normalize_active_modalities(
+    active_modalities: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if active_modalities is None:
+        return MODALITY_KEYS
+
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for raw in active_modalities:
+        if not isinstance(raw, str):
+            raise ValueError(
+                "active_modalities must contain strings only "
+                "(allowed: t2w, adc, hbv)."
+            )
+        token = raw.strip().lower()
+        if not token:
+            raise ValueError("active_modalities contains an empty entry.")
+        if token not in MODALITY_KEYS:
+            supported = ", ".join(MODALITY_KEYS)
+            raise ValueError(
+                f"Unknown modality '{raw}' in active_modalities. "
+                f"Supported modalities: {supported}."
+            )
+        if token in seen:
+            raise ValueError(
+                f"Duplicate modality '{token}' in active_modalities."
+            )
+        seen.add(token)
+        parsed.append(token)
+
+    if not parsed:
         raise ValueError(
-            "No modalities enabled. At least one of use_t2w, use_adc, "
-            "use_hbv must be true in the config."
+            "active_modalities must not be empty. "
+            "Choose at least one modality from: t2w, adc, hbv."
         )
-    return pairs
+    return tuple(parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +295,7 @@ def _discover_cases_flat(
     frame).  ADC and HBV files are only required when their respective
     keys appear in *active_keys*.
     """
-    t2w_suffix = MODALITY_SUFFIXES[0]  # "_t2w.mha"
+    t2w_suffix = MODALITY_SUFFIX_BY_KEY["t2w"]
     cases: list[dict] = []
 
     for t2w_path in sorted(images_dir.glob(f"*{t2w_suffix}")):
@@ -286,9 +305,10 @@ def _discover_cases_flat(
         paths: dict = {"case_id": case_id, "t2w": t2w_path}
         complete = True
 
-        for key, suffix in zip(MODALITY_KEYS[1:], MODALITY_SUFFIXES[1:]):
+        for key in tuple(k for k in MODALITY_KEYS if k != "t2w"):
             if key not in active_keys:
                 continue  # modality disabled — skip existence check
+            suffix = MODALITY_SUFFIX_BY_KEY[key]
             p = images_dir / f"{case_id}{suffix}"
             if not p.exists():
                 logger.warning("Case %s: missing modality '%s' (%s)", case_id, key, p)
@@ -342,9 +362,10 @@ def _discover_cases_nested(
             paths: dict = {"case_id": case_id}
             complete = True
 
-            for key, suffix in zip(MODALITY_KEYS, MODALITY_SUFFIXES):
+            for key in MODALITY_KEYS:
                 if key != "t2w" and key not in active_keys:
                     continue  # modality disabled — skip existence check
+                suffix = MODALITY_SUFFIX_BY_KEY[key]
                 p = study_dir / f"{case_id}{suffix}"
                 if not p.exists():
                     logger.warning("Case %s: missing modality '%s' (%s)", case_id, key, p)
@@ -1100,9 +1121,7 @@ class _ProstateROILocalizer:
         self.target_spacing = target_spacing
         self.patch_size = tuple(int(v) for v in self.cfg.get("patch_size", [16, 128, 128]))
         self.sw_overlap = float(self.cfg.get("sw_overlap", 0.5))
-        self.active_modalities = tuple(
-            k for k in MODALITY_KEYS if self.cfg.get(f"use_{k}", True)
-        )
+        self.active_modalities = resolve_active_modalities(self.cfg, logger=logger)
         if not self.active_modalities:
             raise ValueError("ROI localizer config disables all modalities.")
         dwi_hbv_preprocess = self.cfg.get("dwi_hbv_preprocess", {}) or {}
@@ -1173,9 +1192,7 @@ def _prepare_case_image_tensor(
     t2w_sitk = _resample(t2w_sitk, target_spacing, sitk.sitkLinear)
 
     arrays: list[np.ndarray] = []
-    for key in MODALITY_KEYS:
-        if key not in active_modalities:
-            continue
+    for key in active_modalities:
         if key == "t2w":
             arrays.append(_zscore_normalize(_to_numpy(t2w_sitk)))
         else:
@@ -1208,8 +1225,8 @@ class PiCaiDataset(Dataset):
       3. All active modalities are resampled to *target_spacing*.
       4. Each modality is z-score normalised independently.
       5. Active modalities are stacked into a ``(C, D, H, W)`` image tensor
-         in canonical order ``[T2w, ADC, HBV]``, where ``C`` equals the
-         number of enabled modalities.
+         in ``active_modalities`` order, where ``C`` equals the number of
+         enabled modalities.
       6. The label mask (.nii.gz) is resampled with nearest-neighbour
          interpolation and binarised (any grade > 0 → 1).
 
@@ -1264,9 +1281,8 @@ class PiCaiDataset(Dataset):
         active_modalities Ordered sequence of modality keys to include in the
                            output image tensor.  Must be a subset of
                            ``("t2w", "adc", "hbv")``.  Defaults to all three
-                           when ``None``.  The canonical channel order
-                           ``[T2w, ADC, HBV]`` is always preserved regardless
-                           of the order supplied here.
+                           when ``None``.  Order is preserved and defines model
+                           input-channel order end-to-end.
         dwi_hbv_preprocess Optional configuration for DWI-as-HBV preprocessing
                            when a case sets ``hbv_source="dwi"``.
                            Supported keys: ``enabled`` (bool),
@@ -1338,12 +1354,7 @@ class PiCaiDataset(Dataset):
                 self.roi_cache_dir = Path("cache") / "roi_cache"
             self.roi_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Resolve active modalities: preserve canonical order, default to all.
-        self.active_modalities: tuple[str, ...] = (
-            tuple(k for k in MODALITY_KEYS if k in active_modalities)
-            if active_modalities is not None
-            else MODALITY_KEYS
-        )
+        self.active_modalities = _normalize_active_modalities(active_modalities)
         self.requires_prostate_label = (
             self.task == TASK_PROSTATE_LOCALIZATION
             or self.roi_settings.mode == "gt_mask"

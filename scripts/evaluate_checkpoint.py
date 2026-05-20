@@ -20,6 +20,12 @@ python scripts/evaluate_checkpoint.py \\
     --dataset-type prostate158 \\
     --prostate158-prostate-label-col t2_prostate_reader1
 
+python scripts/evaluate_checkpoint.py \\
+    --run outputs/runs/<run> \\
+    --dataset-type picai \\
+    --roi-mode gt_mask \\
+    --picai-prostate-labels-dir data/prostate_labels
+
 The run directory must contain:
   config.yaml       — the YAML config the model was trained with
   checkpoints/      — one or more .pt checkpoint files
@@ -180,6 +186,7 @@ class BatchEvalJob:
 
 
 _ROI_BOUNDS_CACHE_VERSION = 1
+_PICAI_GT_MASK_SENTINEL_PROSTATE_COL = "__picai_gt_mask__"
 
 
 # ---------------------------------------------------------------------------
@@ -1412,8 +1419,8 @@ def _select_roi_variants_for_batch(
         ROIVariant(label="Disabled ROI", mode="disabled"),
         ROIVariant(
             label=(
-                "GT prostate ROI (roi.mode=gt_mask, requires dataset=prostate158 "
-                "+ prostate label column)"
+                "GT prostate ROI (roi.mode=gt_mask; Prostate158 needs prostate "
+                "label column, PI-CAI needs --picai-prostate-labels-dir)"
             ),
             mode="gt_mask",
         ),
@@ -1477,6 +1484,7 @@ def _build_batch_jobs(
     prostate158_prostate_label_col: str,
     prostate158_root_override: str,
     visualization_enabled: bool,
+    picai_prostate_labels_dir: str = "",
 ) -> list[BatchEvalJob]:
     """Create the cross-product jobs for selected datasets/models/ROI variants."""
     jobs: list[BatchEvalJob] = []
@@ -1513,20 +1521,25 @@ def _build_batch_jobs(
                 )
                 continue
             for roi in roi_variants:
-                cfg_for_combo = _apply_roi_overrides(
-                    base_cfg,
-                    roi.mode,
-                    roi.localizer_run,
-                    roi.localizer_external_model_id,
-                    roi.localizer_external_model_version,
-                )
-                cfg_for_combo, _ = _ensure_prostate_label_col(
-                    cfg_for_combo,
-                    dataset_type=dataset_type,
-                    explicit_col=prostate158_prostate_label_col,
-                    prostate158_root_override=prostate158_root_override,
-                )
                 try:
+                    cfg_for_combo = _apply_roi_overrides(
+                        base_cfg,
+                        roi.mode,
+                        roi.localizer_run,
+                        roi.localizer_external_model_id,
+                        roi.localizer_external_model_version,
+                    )
+                    cfg_for_combo, _ = _ensure_prostate_label_col(
+                        cfg_for_combo,
+                        dataset_type=dataset_type,
+                        explicit_col=prostate158_prostate_label_col,
+                        prostate158_root_override=prostate158_root_override,
+                    )
+                    cfg_for_combo, _ = _ensure_picai_gt_roi_config(
+                        cfg_for_combo,
+                        dataset_type=dataset_type,
+                        picai_prostate_labels_dir=picai_prostate_labels_dir,
+                    )
                     _ = validate_task_and_roi_config(cfg_for_combo, dataset_type)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
@@ -1631,6 +1644,11 @@ def _batch_command_for_job(job: BatchEvalJob, args: argparse.Namespace) -> list[
         cmd.extend(["--prostate158-label-reader", args.prostate158_label_reader])
     if args.prostate158_prostate_label_col:
         cmd.extend(["--prostate158-prostate-label-col", args.prostate158_prostate_label_col])
+    picai_prostate_labels_dir = str(
+        getattr(args, "picai_prostate_labels_dir", "")
+    ).strip()
+    if picai_prostate_labels_dir:
+        cmd.extend(["--picai-prostate-labels-dir", picai_prostate_labels_dir])
     if args.device:
         cmd.extend(["--device", args.device])
     if args.sw_batch_size is not None:
@@ -1692,6 +1710,7 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         repo_root=repo_root,
         prostate158_prostate_label_col=args.prostate158_prostate_label_col,
         prostate158_root_override=args.prostate158_root,
+        picai_prostate_labels_dir=args.picai_prostate_labels_dir,
         visualization_enabled=bool(args.visualize),
     )
     if not jobs:
@@ -1699,7 +1718,8 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         logger.error(
             "Hint: roi.mode='gt_mask' needs dataset_type='prostate158' and "
             "'prostate158_prostate_label_col' (from config or --prostate158-prostate-label-col). "
-            "For PI-CAI use ROI 'config' or 'disabled'."
+            "For PI-CAI gt_mask, defaults are /data/prostate_labels or data/prostate_labels "
+            "(or pass --picai-prostate-labels-dir)."
         )
         sys.exit(1)
 
@@ -1967,6 +1987,116 @@ def _ensure_prostate_label_col(
     return merged, True
 
 
+def _resolve_picai_prostate_labels_dir(
+    explicit_dir: str,
+    cfg: Mapping[str, Any],
+) -> Path | None:
+    explicit_raw = str(explicit_dir).strip()
+    if explicit_raw:
+        return Path(explicit_raw).expanduser().resolve()
+
+    cfg_raw = str(cfg.get("picai_prostate_labels_dir", "")).strip()
+    if cfg_raw:
+        return Path(cfg_raw).expanduser().resolve()
+
+    # Zero-flag defaults aligned with scripts/download_dataset.sh output.
+    for candidate in (Path("/data/prostate_labels"), Path("data/prostate_labels")):
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    return None
+
+
+def _ensure_picai_gt_roi_config(
+    cfg: dict[str, Any],
+    dataset_type: str,
+    picai_prostate_labels_dir: str,
+) -> tuple[dict[str, Any], Path | None]:
+    """
+    Enable PI-CAI GT prostate ROI mode when a prostate-label directory is available.
+
+    The shared ROI validator currently also checks for
+    ``prostate158_prostate_label_col`` in gt_mask mode; for PI-CAI we provide a
+    sentinel value because this field is not used to discover PI-CAI labels.
+    """
+    merged = deepcopy(cfg)
+    dataset_norm = str(dataset_type).strip().lower()
+    roi_cfg = dict(merged.get("roi", {}) or {})
+    roi_mode = str(roi_cfg.get("mode", "disabled")).strip().lower()
+    picai_labels_dir = _resolve_picai_prostate_labels_dir(picai_prostate_labels_dir, merged)
+
+    if dataset_norm != "picai" or roi_mode != "gt_mask":
+        return merged, picai_labels_dir
+
+    if picai_labels_dir is None:
+        raise ValueError(
+            "roi.mode='gt_mask' with dataset_type='picai' requires PI-CAI prostate labels. "
+            "Looked for defaults in /data/prostate_labels and data/prostate_labels. "
+            "Pass --picai-prostate-labels-dir or set picai_prostate_labels_dir in config."
+        )
+    if not picai_labels_dir.is_dir():
+        raise NotADirectoryError(
+            f"PI-CAI prostate labels directory not found: {picai_labels_dir}"
+        )
+
+    gt_dataset_types = [
+        str(v).strip().lower()
+        for v in roi_cfg.get("gt_dataset_types", ["prostate158"])
+    ]
+    if "picai" not in gt_dataset_types:
+        gt_dataset_types.append("picai")
+    roi_cfg["gt_dataset_types"] = gt_dataset_types
+    merged["roi"] = roi_cfg
+
+    if not str(merged.get("prostate158_prostate_label_col", "")).strip():
+        merged["prostate158_prostate_label_col"] = _PICAI_GT_MASK_SENTINEL_PROSTATE_COL
+
+    return merged, picai_labels_dir
+
+
+def _resolve_picai_prostate_label_path(
+    prostate_labels_dir: Path,
+    case_id: str,
+) -> Path | None:
+    candidates = [
+        prostate_labels_dir / f"{case_id}.nii.gz",
+        prostate_labels_dir / f"{case_id}_prostate.nii.gz",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _attach_picai_prostate_labels(
+    cases: list[dict[str, Any]],
+    prostate_labels_dir: Path,
+    *,
+    require_all: bool,
+) -> None:
+    if not prostate_labels_dir.is_dir():
+        raise NotADirectoryError(
+            f"PI-CAI prostate labels directory not found: {prostate_labels_dir}"
+        )
+    missing: list[str] = []
+    for case in cases:
+        case_id = str(case["case_id"])
+        prostate_path = _resolve_picai_prostate_label_path(prostate_labels_dir, case_id)
+        if prostate_path is None:
+            if require_all:
+                missing.append(case_id)
+            continue
+        case["prostate_label"] = prostate_path
+
+    if require_all and missing:
+        preview = ", ".join(missing[:8])
+        suffix = " ..." if len(missing) > 8 else ""
+        raise FileNotFoundError(
+            f"Missing PI-CAI prostate labels for {len(missing)} case(s) in {prostate_labels_dir}: "
+            f"{preview}{suffix}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2117,6 +2247,18 @@ def main() -> None:
             "Prostate158 prostate-mask column (e.g. t2_prostate_reader1). "
             "Needed for roi.mode=gt_mask or task=prostate_localization "
             "when missing in run config."
+        ),
+    )
+    parser.add_argument(
+        "--picai-prostate-labels-dir",
+        type=str,
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory containing PI-CAI whole-prostate masks used as GT ROI "
+            "for roi.mode=gt_mask (expected files: <case_id>.nii.gz or "
+            "<case_id>_prostate.nii.gz). If omitted, defaults to "
+            "/data/prostate_labels then data/prostate_labels when present."
         ),
     )
     parser.add_argument(
@@ -2277,6 +2419,11 @@ def main() -> None:
             "Prostate label column override from CLI: prostate158_prostate_label_col=%s",
             args.prostate158_prostate_label_col,
         )
+    if args.picai_prostate_labels_dir:
+        logger.info(
+            "PI-CAI prostate labels directory override from CLI: %s",
+            Path(args.picai_prostate_labels_dir).expanduser().resolve(),
+        )
     pred_threshold: float = float(cfg.get("pred_threshold", 0.5))
     postprocess_enabled: bool = bool(cfg.get("postprocess_enabled", False))
     postprocess_min_component_volume_mm3: float = float(
@@ -2344,6 +2491,19 @@ def main() -> None:
             cfg.get("prostate158_label_reader", 1),
         )
     try:
+        cfg, picai_prostate_labels_dir = _ensure_picai_gt_roi_config(
+            cfg,
+            dataset_type=dataset_type,
+            picai_prostate_labels_dir=args.picai_prostate_labels_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Invalid PI-CAI GT ROI configuration: %s", exc)
+        sys.exit(1)
+
+    if picai_prostate_labels_dir is not None:
+        logger.info("PI-CAI prostate labels directory: %s", picai_prostate_labels_dir)
+
+    try:
         task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
     except Exception as exc:  # noqa: BLE001
         logger.error("Invalid evaluation configuration: %s", exc)
@@ -2376,6 +2536,21 @@ def main() -> None:
         labels_dir = Path(args.labels_dir)
         logger.info("Discovering cases in %s ...", images_dir)
         test_cases = discover_cases(images_dir, labels_dir, active_keys=active_modalities)
+        if task == "prostate_localization" or roi_settings.mode == "gt_mask":
+            if picai_prostate_labels_dir is None:
+                logger.error(
+                    "PI-CAI prostate labels are required for task=%s / roi.mode=%s. "
+                    "Defaults are /data/prostate_labels or data/prostate_labels; "
+                    "otherwise pass --picai-prostate-labels-dir or set picai_prostate_labels_dir in config.",
+                    task,
+                    roi_settings.mode,
+                )
+                sys.exit(1)
+            _attach_picai_prostate_labels(
+                test_cases,
+                picai_prostate_labels_dir,
+                require_all=True,
+            )
     else:
         logger.error("Unsupported dataset_type: %s", dataset_type)
         sys.exit(1)
@@ -2454,6 +2629,8 @@ def main() -> None:
             "  ROI source  : "
             f"{_roi_variant_desc('predicted_mask', roi_settings.localizer_run)}"
         )
+    if dataset_type == "picai" and picai_prostate_labels_dir is not None:
+        print(f"  PI-CAI prostate labels: {picai_prostate_labels_dir}")
     if roi_precompute["enabled"]:
         print(
             "  ROI cache   : "
@@ -2663,6 +2840,11 @@ def main() -> None:
             "dataset_type": dataset_type,
             "images_dir": str(images_dir),
             "labels_dir": str(labels_dir),
+            "picai_prostate_labels_dir": (
+                str(picai_prostate_labels_dir)
+                if dataset_type == "picai" and picai_prostate_labels_dir is not None
+                else None
+            ),
             "total_cases": len(per_case),
             "positive_cases": len(pos_rows),
             "negative_cases": len(neg_rows),

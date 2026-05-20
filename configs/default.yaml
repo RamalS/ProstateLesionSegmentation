@@ -14,6 +14,7 @@ task: lesion_segmentation
 dataset_type: picai
 images_dir: /data/images
 labels_dir: /data/labels
+# picai_prostate_labels_dir: /data/prostate_labels  # needed for roi.mode=gt_mask on PI-CAI
 target_spacing: [3.0, 0.5, 0.5]   # (z, y, x) in mm — preserves T2w in-plane res
 val_fraction: 0.2
 

@@ -437,7 +437,9 @@ docker compose run --rm trainer evaluate \
 The `roi` block supports three modes:
 
 - `disabled`: no cropping.
-- `gt_mask`: crop from the ground-truth prostate mask. This requires a prostate label column and is currently intended for `dataset_type: prostate158`.
+- `gt_mask`: crop from the ground-truth prostate mask.
+  - `dataset_type: prostate158` requires `prostate158_prostate_label_col` (auto-inferred from CSV when omitted).
+  - `dataset_type: picai` requires `picai_prostate_labels_dir` (files `<case_id>.nii.gz` or `<case_id>_prostate.nii.gz`).
 - `predicted_mask`: crop from a trained localizer prediction. This requires `roi.localizer_run`.
 
 Important ROI keys:
@@ -458,6 +460,19 @@ Ground-truth ROI example:
 task: lesion_segmentation
 dataset_type: prostate158
 prostate158_prostate_label_col: t2_prostate_reader1
+
+roi:
+  mode: gt_mask
+  margin_mm: [6.0, 12.0, 12.0]
+  min_size_vox: [16, 128, 128]
+```
+
+PI-CAI GT ROI example:
+
+```yaml
+task: lesion_segmentation
+dataset_type: picai
+picai_prostate_labels_dir: /data/prostate_labels
 
 roi:
   mode: gt_mask

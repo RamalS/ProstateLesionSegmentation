@@ -1452,6 +1452,9 @@ else:
             resolve_roi_settings,
             validate_task_and_roi_config,
         )
+        from train import _attach_picai_prostate_labels as _attach_picai_prostate_labels_train
+        from train import _ensure_picai_gt_roi_config as _ensure_picai_gt_roi_config_train
+        from train import _ensure_prostate_label_col as _ensure_prostate_label_col_train
         from transforms import get_train_transforms
 
         try:
@@ -1459,13 +1462,27 @@ else:
                 {
                     "task": "lesion_segmentation",
                     "roi": {"mode": "gt_mask"},
-                    "prostate158_prostate_label_col": "t2_prostate_reader1",
                 },
                 "picai",
             )
-            fail("gt_mask ROI should fail fast on dataset_type='picai'")
+            fail("PI-CAI gt_mask without prostate label directory should fail fast")
         except ValueError:
-            ok("gt_mask ROI fails fast on non-prostate158 datasets")
+            ok("PI-CAI gt_mask requires picai_prostate_labels_dir")
+
+        with tempfile.TemporaryDirectory() as _tmp_picai_roi:
+            _picai_roi_dir = Path(_tmp_picai_roi)
+            validate_task_and_roi_config(
+                {
+                    "task": "lesion_segmentation",
+                    "roi": {
+                        "mode": "gt_mask",
+                        "gt_dataset_types": ["prostate158", "picai"],
+                    },
+                    "picai_prostate_labels_dir": str(_picai_roi_dir),
+                },
+                "picai",
+            )
+            ok("PI-CAI gt_mask config validates when prostate-label directory is provided")
 
         default_roi_settings = resolve_roi_settings(
             {
@@ -1554,6 +1571,83 @@ else:
                 "prostate_label": prostate_path,
             }
 
+            prostate_train_root = root / "prostate158_train"
+            prostate_train_root.mkdir(parents=True, exist_ok=True)
+            (prostate_train_root / "train.csv").write_text(
+                "\n".join(
+                    [
+                        "case_id,t2,t2_prostate_reader1,adc_tumor_reader1",
+                        "case_a,train/case_a/t2.nii.gz,train/case_a/prostate.nii.gz,train/case_a/tumor.nii.gz",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            auto_cfg, auto_filled = _ensure_prostate_label_col_train(
+                {
+                    "task": "lesion_segmentation",
+                    "roi": {"mode": "gt_mask"},
+                    "prostate158_train_dir": str(prostate_train_root),
+                    "prostate158_train_split": "train",
+                    "prostate158_label_reader": 1,
+                },
+                dataset_type="prostate158",
+            )
+            if auto_filled and auto_cfg.get("prostate158_prostate_label_col") == "t2_prostate_reader1":
+                ok("Training auto-fills prostate158_prostate_label_col for gt_mask ROI")
+            else:
+                fail(
+                    "Training prostate label auto-fill mismatch: "
+                    f"filled={auto_filled}, value={auto_cfg.get('prostate158_prostate_label_col')}"
+                )
+
+            picai_label_root = root / "picai_prostate_labels"
+            picai_label_root.mkdir(parents=True, exist_ok=True)
+            _write_image(picai_label_root / f"{case_id}.nii.gz", prostate_arr, (0.5, 0.5, 3.0))
+            picai_cfg, resolved_picai_dir = _ensure_picai_gt_roi_config_train(
+                {
+                    "task": "lesion_segmentation",
+                    "dataset_type": "picai",
+                    "roi": {"mode": "gt_mask", "gt_dataset_types": ["prostate158"]},
+                },
+                dataset_type="picai",
+                picai_prostate_labels_dir=str(picai_label_root),
+            )
+            if (
+                resolved_picai_dir == picai_label_root.resolve()
+                and picai_cfg.get("picai_prostate_labels_dir") == str(picai_label_root.resolve())
+                and "picai" in picai_cfg.get("roi", {}).get("gt_dataset_types", [])
+            ):
+                ok("Training PI-CAI GT ROI config resolves label dir and enables picai gt_dataset_types")
+            else:
+                fail(
+                    "Training PI-CAI GT ROI config resolution mismatch: "
+                    f"dir={resolved_picai_dir}, cfg={picai_cfg}"
+                )
+
+            attach_cases = [{"case_id": case_id}, {"case_id": "missing_case"}]
+            try:
+                _attach_picai_prostate_labels_train(
+                    attach_cases,
+                    picai_label_root,
+                    require_all=True,
+                )
+                fail("PI-CAI prostate-label attachment should fail when any case is missing")
+            except FileNotFoundError:
+                ok("PI-CAI prostate-label attachment fails fast when labels are missing")
+            _attach_picai_prostate_labels_train(
+                attach_cases,
+                picai_label_root,
+                require_all=False,
+            )
+            if str(attach_cases[0].get("prostate_label", "")).endswith(f"{case_id}.nii.gz"):
+                ok("PI-CAI prostate-label attachment matches <case_id>.nii.gz files")
+            else:
+                fail(
+                    "PI-CAI prostate-label attachment path mismatch: "
+                    f"{attach_cases[0].get('prostate_label')}"
+                )
+
             roi_cfg = {
                 "task": "lesion_segmentation",
                 "roi": {
@@ -1584,6 +1678,44 @@ else:
                 fail(
                     "gt_mask ROI sample shapes mismatch: "
                     f"crop={tuple(sample_gt['image'].shape)}, full={tuple(sample_gt['full_label'].shape)}"
+                )
+
+            _, picai_roi_settings = validate_task_and_roi_config(
+                {
+                    "task": "lesion_segmentation",
+                    "picai_prostate_labels_dir": str(labels_dir),
+                    "roi": {
+                        "mode": "gt_mask",
+                        "margin_mm": [0.0, 0.0, 0.0],
+                        "min_size_vox": [4, 32, 32],
+                        "fallback_to_full_volume": True,
+                        "gt_dataset_types": ["prostate158", "picai"],
+                    },
+                },
+                "picai",
+            )
+            ds_picai_gt = PiCaiDataset(
+                images_dir=images_dir,
+                labels_dir=labels_dir,
+                target_spacing=(3.0, 0.5, 0.5),
+                transform=None,
+                cases=[dict(case)],
+                active_modalities=["t2w"],
+                task="lesion_segmentation",
+                roi_settings=picai_roi_settings,
+                include_full_resampled=True,
+            )
+            sample_picai_gt = ds_picai_gt[0]
+            if (
+                sample_picai_gt["image"].shape[1:] == (8, 44, 44)
+                and sample_picai_gt["full_label"].shape[1:] == (20, 96, 96)
+            ):
+                ok("PI-CAI gt_mask ROI crops lesion sample when prostate labels are configured")
+            else:
+                fail(
+                    "PI-CAI gt_mask ROI sample shapes mismatch: "
+                    f"crop={tuple(sample_picai_gt['image'].shape)}, "
+                    f"full={tuple(sample_picai_gt['full_label'].shape)}"
                 )
 
             ds_loc = PiCaiDataset(

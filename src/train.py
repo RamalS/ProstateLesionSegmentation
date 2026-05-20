@@ -19,10 +19,12 @@ Pipeline
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import logging
 import math
 import random
+import re
 import shutil
 import warnings
 from pathlib import Path
@@ -171,6 +173,218 @@ def _log_cuda_memory(stage: str, device: torch.device) -> None:
         peak_alloc_gib,
         peak_reserv_gib,
     )
+
+
+def _default_prostate_label_col(label_reader: object) -> str:
+    """Build fallback Prostate158 prostate-label column from label-reader id."""
+    text = str(label_reader).strip()
+    if not text:
+        return "t2_anatomy_reader1"
+    match = re.search(r"\d+", text)
+    suffix = match.group(0) if match else "1"
+    return f"t2_anatomy_reader{suffix}"
+
+
+def _resolve_prostate158_csv_path(root_dir: Path, split: str) -> Path:
+    root_dir = root_dir.expanduser().resolve()
+    csv_path = root_dir / f"{split}.csv"
+    if csv_path.exists():
+        return csv_path
+    nested = root_dir / root_dir.name / f"{split}.csv"
+    if nested.exists():
+        return nested
+    raise FileNotFoundError(
+        f"Prostate158 {split}.csv not found under {root_dir} "
+        f"(checked {csv_path} and {nested})."
+    )
+
+
+def _read_csv_columns(path: Path) -> list[str]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        return list(reader.fieldnames or [])
+
+
+def _infer_prostate_label_col(columns: list[str], label_reader: object) -> str | None:
+    text = str(label_reader).strip()
+    match = re.search(r"\d+", text)
+    suffix = match.group(0) if match else "1"
+
+    preferred = [
+        f"t2_prostate_reader{suffix}",
+        f"t2_anatomy_reader{suffix}",
+    ]
+    for col in preferred:
+        if col in columns:
+            return col
+
+    prostate_like = [
+        col
+        for col in columns
+        if col.startswith("t2_")
+        and "reader" in col
+        and ("anatomy" in col or "prostate" in col)
+        and "tumor" not in col
+    ]
+    with_reader = [col for col in prostate_like if col.endswith(f"reader{suffix}")]
+    if with_reader:
+        return sorted(with_reader)[0]
+    if prostate_like:
+        return sorted(prostate_like)[0]
+    return None
+
+
+def _ensure_prostate_label_col(
+    cfg: dict,
+    dataset_type: str,
+) -> tuple[dict, bool]:
+    """
+    Ensure prostate158_prostate_label_col exists when ROI/task requires it.
+
+    Returns
+    -------
+    (cfg, was_auto_filled)
+    """
+    merged = dict(cfg)
+    dataset_norm = str(dataset_type).strip().lower()
+    task = str(merged.get("task", "lesion_segmentation")).strip().lower()
+    roi_mode = str((merged.get("roi", {}) or {}).get("mode", "disabled")).strip().lower()
+
+    needs_col = (
+        dataset_norm == "prostate158"
+        and (task == "prostate_localization" or roi_mode == "gt_mask")
+    )
+    if not needs_col:
+        return merged, False
+
+    chosen = str(merged.get("prostate158_prostate_label_col", "")).strip()
+    if chosen:
+        return merged, False
+
+    root_dir = Path(
+        merged.get("prostate158_train_dir", merged.get("images_dir", "/data/prostate158_train"))
+    ).expanduser()
+    split = str(merged.get("prostate158_train_split", "train")).strip().lower() or "train"
+
+    columns: list[str] = []
+    try:
+        csv_path = _resolve_prostate158_csv_path(root_dir, split)
+        columns = _read_csv_columns(csv_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not inspect Prostate158 CSV headers for prostate-label inference "
+            "(root=%s split=%s): %s",
+            root_dir,
+            split,
+            exc,
+        )
+
+    inferred = _infer_prostate_label_col(columns, merged.get("prostate158_label_reader", 1))
+    if inferred:
+        merged["prostate158_prostate_label_col"] = inferred
+        return merged, True
+
+    merged["prostate158_prostate_label_col"] = _default_prostate_label_col(
+        merged.get("prostate158_label_reader", 1)
+    )
+    return merged, True
+
+
+def _resolve_picai_prostate_labels_dir(explicit_dir: str, cfg: dict) -> Path | None:
+    explicit_raw = str(explicit_dir).strip()
+    if explicit_raw:
+        return Path(explicit_raw).expanduser().resolve()
+
+    cfg_raw = str(cfg.get("picai_prostate_labels_dir", "")).strip()
+    if cfg_raw:
+        return Path(cfg_raw).expanduser().resolve()
+
+    for candidate in (Path("/data/prostate_labels"), Path("data/prostate_labels")):
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    return None
+
+
+def _ensure_picai_gt_roi_config(
+    cfg: dict,
+    dataset_type: str,
+    picai_prostate_labels_dir: str,
+) -> tuple[dict, Path | None]:
+    merged = dict(cfg)
+    dataset_norm = str(dataset_type).strip().lower()
+    roi_cfg = dict(merged.get("roi", {}) or {})
+    roi_mode = str(roi_cfg.get("mode", "disabled")).strip().lower()
+    picai_labels_dir = _resolve_picai_prostate_labels_dir(picai_prostate_labels_dir, merged)
+
+    if dataset_norm != "picai" or roi_mode != "gt_mask":
+        return merged, picai_labels_dir
+
+    if picai_labels_dir is None:
+        raise ValueError(
+            "roi.mode='gt_mask' with dataset_type='picai' requires PI-CAI prostate labels. "
+            "Looked for defaults in /data/prostate_labels and data/prostate_labels. "
+            "Pass --picai-prostate-labels-dir or set picai_prostate_labels_dir in config."
+        )
+    if not picai_labels_dir.is_dir():
+        raise NotADirectoryError(
+            f"PI-CAI prostate labels directory not found: {picai_labels_dir}"
+        )
+
+    gt_dataset_types = [
+        str(v).strip().lower()
+        for v in roi_cfg.get("gt_dataset_types", ["prostate158"])
+    ]
+    if "picai" not in gt_dataset_types:
+        gt_dataset_types.append("picai")
+    roi_cfg["gt_dataset_types"] = gt_dataset_types
+    merged["roi"] = roi_cfg
+    merged["picai_prostate_labels_dir"] = str(picai_labels_dir)
+
+    return merged, picai_labels_dir
+
+
+def _resolve_picai_prostate_label_path(
+    prostate_labels_dir: Path,
+    case_id: str,
+) -> Path | None:
+    candidates = [
+        prostate_labels_dir / f"{case_id}.nii.gz",
+        prostate_labels_dir / f"{case_id}_prostate.nii.gz",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _attach_picai_prostate_labels(
+    cases: list[dict],
+    prostate_labels_dir: Path,
+    *,
+    require_all: bool,
+) -> None:
+    if not prostate_labels_dir.is_dir():
+        raise NotADirectoryError(
+            f"PI-CAI prostate labels directory not found: {prostate_labels_dir}"
+        )
+    missing: list[str] = []
+    for case in cases:
+        case_id = str(case["case_id"])
+        prostate_path = _resolve_picai_prostate_label_path(prostate_labels_dir, case_id)
+        if prostate_path is None:
+            if require_all:
+                missing.append(case_id)
+            continue
+        case["prostate_label"] = prostate_path
+
+    if require_all and missing:
+        preview = ", ".join(missing[:8])
+        suffix = " ..." if len(missing) > 8 else ""
+        raise FileNotFoundError(
+            f"Missing PI-CAI prostate labels for {len(missing)} case(s) in {prostate_labels_dir}: "
+            f"{preview}{suffix}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +628,18 @@ def main() -> None:
         action="store_true",
         help="Regenerate train/val split manifest before this run.",
     )
+    parser.add_argument(
+        "--picai-prostate-labels-dir",
+        type=str,
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory containing PI-CAI whole-prostate masks used by "
+            "roi.mode=gt_mask (expected files: <case_id>.nii.gz or "
+            "<case_id>_prostate.nii.gz). If omitted, defaults to "
+            "/data/prostate_labels then data/prostate_labels when present."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -458,8 +684,6 @@ def main() -> None:
     tensorboard_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
-    save_metadata(run_dir, cfg)
-    save_config_copy(run_dir, cfg)
     save_latest_pointer(cfg["base_output_dir"], run_dir)
 
     writer = SummaryWriter(log_dir=str(tensorboard_dir))
@@ -478,7 +702,39 @@ def main() -> None:
     _active_keys = [k for k, _ in active_modality_pairs(cfg)]
 
     dataset_type = str(cfg.get("dataset_type", "picai")).strip().lower()
+    cfg, auto_prostate_col = _ensure_prostate_label_col(cfg, dataset_type=dataset_type)
+    if auto_prostate_col:
+        logger.info(
+            "Auto-filled prostate158_prostate_label_col=%s from prostate158_label_reader=%s",
+            cfg.get("prostate158_prostate_label_col"),
+            cfg.get("prostate158_label_reader", 1),
+        )
+    cfg, picai_prostate_labels_dir = _ensure_picai_gt_roi_config(
+        cfg,
+        dataset_type=dataset_type,
+        picai_prostate_labels_dir=args.picai_prostate_labels_dir,
+    )
+    if (
+        picai_prostate_labels_dir is not None
+        and dataset_type == "picai"
+        and (
+            str((cfg.get("roi", {}) or {}).get("mode", "disabled")).strip().lower() == "gt_mask"
+            or bool(str(args.picai_prostate_labels_dir).strip())
+        )
+    ):
+        logger.info("PI-CAI prostate labels directory: %s", picai_prostate_labels_dir)
     task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
+    roi_source = "disabled"
+    if roi_settings.mode == "gt_mask":
+        if dataset_type == "prostate158":
+            roi_source = str(cfg.get("prostate158_prostate_label_col", "")).strip()
+        elif dataset_type == "picai":
+            roi_source = str(cfg.get("picai_prostate_labels_dir", "")).strip()
+    elif roi_settings.mode == "predicted_mask":
+        roi_source = roi_settings.localizer_run
+    logger.info("Resolved ROI configuration: mode=%s, source=%s", roi_settings.mode, roi_source or "-")
+    save_metadata(run_dir, cfg)
+    save_config_copy(run_dir, cfg)
     if dataset_type == "prostate158":
         prostate158_train_dir = Path(
             cfg.get(
@@ -531,6 +787,19 @@ def main() -> None:
             raise RuntimeError(
                 f"No cases found in {cfg['images_dir']}. "
                 "Check that your data is mounted correctly (./data -> /data)."
+            )
+        if roi_settings.mode == "gt_mask":
+            if picai_prostate_labels_dir is None:
+                raise ValueError(
+                    "PI-CAI prostate labels are required for roi.mode='gt_mask'. "
+                    "Defaults are /data/prostate_labels or data/prostate_labels; "
+                    "otherwise pass --picai-prostate-labels-dir or set "
+                    "picai_prostate_labels_dir in config."
+                )
+            _attach_picai_prostate_labels(
+                all_cases,
+                picai_prostate_labels_dir,
+                require_all=True,
             )
 
         split_manifest_raw = cfg.get("split_manifest_path", "")

@@ -132,11 +132,20 @@ def validate_task_and_roi_config(
             raise ValueError(
                 f"roi.mode='gt_mask' requires dataset_type in {{{supported}}}, got '{dataset_type_norm}'."
             )
-        prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
-        if not prostate_label_col:
-            raise ValueError(
-                "roi.mode='gt_mask' requires 'prostate158_prostate_label_col'."
-            )
+        if dataset_type_norm == "prostate158":
+            prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
+            if not prostate_label_col:
+                raise ValueError(
+                    "roi.mode='gt_mask' with dataset_type='prostate158' requires "
+                    "'prostate158_prostate_label_col'."
+                )
+        elif dataset_type_norm == "picai":
+            picai_prostate_labels_dir = str(cfg.get("picai_prostate_labels_dir", "")).strip()
+            if not picai_prostate_labels_dir:
+                raise ValueError(
+                    "roi.mode='gt_mask' with dataset_type='picai' requires "
+                    "'picai_prostate_labels_dir'."
+                )
     elif roi.mode == ROI_PREDICTED_MASK:
         if not roi.localizer_run:
             raise ValueError("roi.mode='predicted_mask' requires roi.localizer_run.")

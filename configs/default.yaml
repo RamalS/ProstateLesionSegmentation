@@ -21,6 +21,11 @@ val_fraction: 0.2
 # Optional ROI localization stage before lesion segmentation.
 roi:
   mode: disabled
+  # Optional stage overrides. When omitted, train/val fall back to roi.mode.
+  # train:
+  #   mode: disabled
+  # val:
+  #   mode: gt_mask
   target: prostate
   margin_mm: [6.0, 12.0, 12.0]
   min_size_vox: [16, 128, 128]
@@ -29,6 +34,9 @@ roi:
   localizer_run: ""
   localizer_threshold: 0.5
   localizer_keep_largest_component: true
+  cache_mode: none                # one of: none | ram | storage (GT ROI cache only in v1)
+  cache_rate: 1.0                # fraction of cases to cache for ROI crops
+  # cache_dir: /cache/roi_cache   # optional override for roi.cache_mode=storage
 
 # Patch sampling
 patch_size: [16, 128, 128]         # (D, H, W) in voxels

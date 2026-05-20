@@ -1075,6 +1075,15 @@ class _PreprocessedCase:
     prostate_label: torch.Tensor | None = None
 
 
+@dataclass
+class _ROICachedCase:
+    image: torch.Tensor
+    lesion_label: torch.Tensor
+    roi: dict[str, Any]
+    full_image: torch.Tensor | None = None
+    full_lesion_label: torch.Tensor | None = None
+
+
 class _ProstateROILocalizer:
     def __init__(
         self,
@@ -1225,6 +1234,9 @@ class PiCaiDataset(Dataset):
         dwi_hbv_preprocess: Optional[dict[str, Any]] = None,
         cache_mode: str | None = None,
         cache_dir: str | Path | None = None,
+        roi_cache_mode: str = "none",
+        roi_cache_rate: float = 1.0,
+        roi_cache_dir: str | Path | None = None,
         task: str = TASK_LESION_SEGMENTATION,
         roi_settings: ROISettings | None = None,
         include_full_resampled: bool = False,
@@ -1273,9 +1285,14 @@ class PiCaiDataset(Dataset):
         self.roi_settings = roi_settings or resolve_roi_settings({})
         self.include_full_resampled = bool(include_full_resampled)
         self.cache_rate = float(cache_rate)
+        self.roi_cache_rate = float(roi_cache_rate)
         if not 0.0 <= self.cache_rate <= 1.0:
             raise ValueError(
                 f"cache_rate must be in [0.0, 1.0], got {self.cache_rate}."
+            )
+        if not 0.0 <= self.roi_cache_rate <= 1.0:
+            raise ValueError(
+                f"roi_cache_rate must be in [0.0, 1.0], got {self.roi_cache_rate}."
             )
 
         if cache_mode is None:
@@ -1302,6 +1319,24 @@ class PiCaiDataset(Dataset):
             if self.cache_dir is None:
                 self.cache_dir = Path("cache") / "dataset_cache"
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.roi_cache_mode = str(roi_cache_mode).strip().lower()
+        if self.roi_cache_mode not in {"none", "ram", "storage"}:
+            raise ValueError(
+                f"Unsupported roi_cache_mode='{roi_cache_mode}'. "
+                "Expected one of: none, ram, storage."
+            )
+        self.roi_cache_supported = (
+            self.task == TASK_LESION_SEGMENTATION and self.roi_settings.mode == "gt_mask"
+        )
+        self.roi_cache_enabled = (
+            self.roi_cache_supported and self.roi_cache_mode in {"ram", "storage"}
+        )
+        self.roi_cache_dir = Path(roi_cache_dir) if roi_cache_dir is not None else None
+        if self.roi_cache_mode == "storage" and self.roi_cache_enabled:
+            if self.roi_cache_dir is None:
+                self.roi_cache_dir = Path("cache") / "roi_cache"
+            self.roi_cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Resolve active modalities: preserve canonical order, default to all.
         self.active_modalities: tuple[str, ...] = (
@@ -1338,17 +1373,28 @@ class PiCaiDataset(Dataset):
         # Determine which indices are eligible for caching.
         n_cache = math.ceil(len(self.cases) * self.cache_rate) if self.cache_enabled else 0
         self._cache_indices: set[int] = set(range(n_cache))
+        n_roi_cache = (
+            math.ceil(len(self.cases) * self.roi_cache_rate) if self.roi_cache_enabled else 0
+        )
+        self._roi_cache_indices: set[int] = set(range(n_roi_cache))
         # Mapping from case index → preprocessed tensors.
         # Used only for cache_mode="ram".  Pre-populated eagerly in the main
         # process so all DataLoader workers inherit a fully-warmed cache via
         # fork() — 100% hit rate from epoch 1.
         self._cache: dict[int, _PreprocessedCase] = {}
+        self._roi_cache: dict[int, _ROICachedCase] = {}
 
         cache_dir_msg = str(self.cache_dir) if self.cache_mode == "storage" else "-"
+        roi_cache_dir_msg = (
+            str(self.roi_cache_dir)
+            if self.roi_cache_mode == "storage" and self.roi_cache_enabled
+            else "-"
+        )
         logger.info(
             "PiCaiDataset ready: %d cases, modalities=%s, spacing=%s, "
             "transform=%s, task=%s, roi_mode=%s, cache_mode=%s "
-            "(%.0f%% = %d cases), cache_dir=%s, dwi_hbv_preprocess=%s",
+            "(%.0f%% = %d cases), cache_dir=%s, roi_cache_mode=%s "
+            "(%.0f%% = %d cases), roi_cache_dir=%s, dwi_hbv_preprocess=%s",
             len(self.cases),
             list(self.active_modalities),
             target_spacing,
@@ -1359,6 +1405,10 @@ class PiCaiDataset(Dataset):
             self.cache_rate * 100,
             n_cache,
             cache_dir_msg,
+            self.roi_cache_mode if self.roi_cache_supported else "disabled",
+            self.roi_cache_rate * 100 if self.roi_cache_supported else 0.0,
+            n_roi_cache,
+            roi_cache_dir_msg,
             "on" if self.dwi_hbv_preprocess_enabled else "off",
         )
 
@@ -1390,6 +1440,28 @@ class PiCaiDataset(Dataset):
 
             logger.info("Cache warmup complete (%d cases loaded).", n_cache)
 
+        if self.roi_cache_mode == "ram" and n_roi_cache > 0:
+            warmup_workers = min(n_roi_cache, os.cpu_count() or 4)
+            logger.info(
+                "Warming ROI cache (%d threads): loading %d/%d cases into RAM …",
+                warmup_workers, n_roi_cache, len(self.cases),
+            )
+
+            def _load_one_roi(i: int) -> tuple[int, _ROICachedCase]:
+                return i, self._prepare_roi_cached_case(i)
+
+            with ThreadPoolExecutor(max_workers=warmup_workers) as pool:
+                for idx, tensors in tqdm(
+                    pool.map(_load_one_roi, range(n_roi_cache)),
+                    total=n_roi_cache,
+                    desc="ROI cache warmup",
+                    unit="case",
+                    disable=not sys.stdout.isatty(),
+                ):
+                    self._roi_cache[idx] = tensors
+
+            logger.info("ROI cache warmup complete (%d cases loaded).", n_roi_cache)
+
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
@@ -1399,6 +1471,24 @@ class PiCaiDataset(Dataset):
         case = self.cases[idx]
         case_id: str = case["case_id"]
         cache_candidate = idx in self._cache_indices
+        roi_cache_candidate = idx in self._roi_cache_indices
+
+        if self.roi_cache_enabled and roi_cache_candidate:
+            if self.roi_cache_mode == "ram" and idx in self._roi_cache:
+                sample = self._sample_from_roi_cache(self._clone_roi_cached(self._roi_cache[idx]))
+                sample["case_id"] = case_id
+                if self.transform is not None:
+                    return self.transform(sample)  # type: ignore[return-value]
+                return sample
+            if self.roi_cache_mode == "storage":
+                cache_path = self._roi_storage_cache_path(case)
+                cached_roi = self._load_roi_from_storage_cache(cache_path)
+                if cached_roi is not None:
+                    sample = self._sample_from_roi_cache(cached_roi)
+                    sample["case_id"] = case_id
+                    if self.transform is not None:
+                        return self.transform(sample)  # type: ignore[return-value]
+                    return sample
 
         # ---------------------------------------------------------------------------
         # Dataset cache lookup
@@ -1424,7 +1514,15 @@ class PiCaiDataset(Dataset):
         else:
             cached = self._load_and_preprocess(case)
 
-        sample = self._build_sample(case, cached)
+        if self.roi_cache_enabled and roi_cache_candidate:
+            roi_cached = self._build_roi_cached_from_preprocessed(case, cached)
+            if self.roi_cache_mode == "ram":
+                self._roi_cache[idx] = self._clone_roi_cached(roi_cached)
+            elif self.roi_cache_mode == "storage":
+                self._save_roi_to_storage_cache(self._roi_storage_cache_path(case), roi_cached)
+            sample = self._sample_from_roi_cache(roi_cached)
+        else:
+            sample = self._build_sample(case, cached)
         sample["case_id"] = case_id
 
         if self.transform is not None:
@@ -1484,6 +1582,54 @@ class PiCaiDataset(Dataset):
             for ch in str(case["case_id"])
         )
         return self.cache_dir / f"{safe_case_id}_{digest}.pt"
+
+    def _roi_storage_cache_path(self, case: dict) -> Path:
+        if self.roi_cache_dir is None:
+            raise RuntimeError("roi_cache_dir is not configured for ROI storage cache mode.")
+
+        cache_meta: dict[str, Any] = {
+            "case_id": str(case["case_id"]),
+            "target_spacing": [float(v) for v in self.target_spacing],
+            "active_modalities": list(self.active_modalities),
+            "task": self.task,
+            "roi_settings": {
+                "mode": self.roi_settings.mode,
+                "target": self.roi_settings.target,
+                "margin_mm": list(self.roi_settings.margin_mm),
+                "min_size_vox": list(self.roi_settings.min_size_vox),
+                "fallback_to_full_volume": self.roi_settings.fallback_to_full_volume,
+            },
+            "include_full_resampled": self.include_full_resampled,
+            "dwi_hbv_preprocess": {
+                "enabled": self.dwi_hbv_preprocess_enabled,
+                "clip_percentiles": list(self.dwi_hbv_clip_percentiles),
+                "log1p": self.dwi_hbv_log1p,
+            },
+            "hbv_source": str(case.get("hbv_source", "hbv")),
+            "paths": {
+                key: str(Path(case[key]).resolve())
+                for key in ("t2w", "adc", "hbv")
+                if key in case and case[key] is not None
+            },
+            "label_path": (
+                str(Path(case["label"]).resolve())
+                if case.get("label") is not None
+                else None
+            ),
+            "prostate_label_path": (
+                str(Path(case["prostate_label"]).resolve())
+                if case.get("prostate_label") is not None
+                else None
+            ),
+        }
+        digest = hashlib.sha1(
+            json.dumps(cache_meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        safe_case_id = "".join(
+            ch if ch.isalnum() or ch in {"_", "-", "."} else "_"
+            for ch in str(case["case_id"])
+        )
+        return self.roi_cache_dir / f"{safe_case_id}_{digest}.pt"
 
     def _load_from_storage_cache(
         self,
@@ -1553,6 +1699,85 @@ class PiCaiDataset(Dataset):
                 else None
             ),
         )
+
+    def _clone_roi_cached(self, payload: _ROICachedCase) -> _ROICachedCase:
+        return _ROICachedCase(
+            image=payload.image.clone(),
+            lesion_label=payload.lesion_label.clone(),
+            roi=dict(payload.roi),
+            full_image=payload.full_image.clone() if payload.full_image is not None else None,
+            full_lesion_label=(
+                payload.full_lesion_label.clone()
+                if payload.full_lesion_label is not None
+                else None
+            ),
+        )
+
+    def _load_roi_from_storage_cache(
+        self,
+        cache_path: Path,
+    ) -> _ROICachedCase | None:
+        if not cache_path.exists():
+            return None
+        try:
+            payload = torch.load(cache_path, map_location="cpu")
+            image = payload.get("image")
+            lesion_label = payload.get("lesion_label")
+            roi = payload.get("roi")
+            full_image = payload.get("full_image")
+            full_lesion_label = payload.get("full_lesion_label")
+            if not isinstance(image, torch.Tensor) or not isinstance(lesion_label, torch.Tensor):
+                raise TypeError("ROI cache payload is missing tensor keys 'image'/'lesion_label'")
+            if not isinstance(roi, dict):
+                raise TypeError("ROI cache payload is missing 'roi' bounds")
+            if full_image is not None and not isinstance(full_image, torch.Tensor):
+                raise TypeError("ROI cache payload 'full_image' must be a Tensor or None")
+            if full_lesion_label is not None and not isinstance(full_lesion_label, torch.Tensor):
+                raise TypeError("ROI cache payload 'full_lesion_label' must be a Tensor or None")
+            return _ROICachedCase(
+                image=image,
+                lesion_label=lesion_label,
+                roi=roi,
+                full_image=full_image,
+                full_lesion_label=full_lesion_label,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not read ROI storage cache entry %s (%s); recomputing.",
+                cache_path,
+                exc,
+            )
+            return None
+
+    def _save_roi_to_storage_cache(
+        self,
+        cache_path: Path,
+        payload: _ROICachedCase,
+    ) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(
+            f"{cache_path.suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
+        )
+        try:
+            torch.save(
+                {
+                    "image": payload.image,
+                    "lesion_label": payload.lesion_label,
+                    "roi": payload.roi,
+                    "full_image": payload.full_image,
+                    "full_lesion_label": payload.full_lesion_label,
+                },
+                tmp_path,
+            )
+            os.replace(tmp_path, cache_path)
+        except Exception as exc:
+            logger.warning("Could not write ROI storage cache entry %s: %s", cache_path, exc)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     def _get_roi_localizer(self) -> _ProstateROILocalizer:
         if self._roi_localizer is None:
@@ -1695,6 +1920,58 @@ class PiCaiDataset(Dataset):
         sample["image"] = crop_tensor(image, bounds)
         sample["label"] = crop_tensor(lesion_label, bounds)
         return sample
+
+    def _sample_from_roi_cache(self, payload: _ROICachedCase) -> dict[str, Any]:
+        sample: dict[str, Any] = {
+            "image": payload.image.clone(),
+            "label": payload.lesion_label.clone(),
+            "roi": dict(payload.roi),
+        }
+        if payload.full_image is not None:
+            sample["full_image"] = payload.full_image.clone()
+        if payload.full_lesion_label is not None:
+            sample["full_label"] = payload.full_lesion_label.clone()
+        return sample
+
+    def _build_roi_cached_from_preprocessed(
+        self,
+        case: dict,
+        payload: _PreprocessedCase,
+    ) -> _ROICachedCase:
+        if self.roi_settings.mode != "gt_mask":
+            raise RuntimeError("ROI cache build is only supported for roi.mode='gt_mask'.")
+        if payload.prostate_label is None:
+            raise ValueError(
+                f"Case '{case['case_id']}' is missing prostate_label required for roi.mode='gt_mask'."
+            )
+        bounds = compute_crop_bounds(
+            mask=payload.prostate_label[0].cpu().numpy(),
+            spacing_zyx=self.target_spacing,
+            margin_mm=self.roi_settings.margin_mm,
+            min_size_vox=self.roi_settings.min_size_vox,
+            fallback_to_full_volume=self.roi_settings.fallback_to_full_volume,
+        ).as_dict()
+        return _ROICachedCase(
+            image=crop_tensor(payload.image, bounds).clone(),
+            lesion_label=crop_tensor(payload.lesion_label, bounds).clone(),
+            roi=bounds,
+            full_image=payload.image.clone() if self.include_full_resampled else None,
+            full_lesion_label=payload.lesion_label.clone() if self.include_full_resampled else None,
+        )
+
+    def _prepare_roi_cached_case(self, idx: int) -> _ROICachedCase:
+        case = self.cases[idx]
+        if self.cache_mode == "ram" and idx in self._cache:
+            payload = self._clone_preprocessed(self._cache[idx])
+        elif self.cache_mode == "storage" and idx in self._cache_indices:
+            cache_path = self._storage_cache_path(case)
+            payload = self._load_from_storage_cache(cache_path)
+            if payload is None:
+                payload = self._load_and_preprocess(case)
+                self._save_to_storage_cache(cache_path, payload)
+        else:
+            payload = self._load_and_preprocess(case)
+        return self._build_roi_cached_from_preprocessed(case, payload)
 
     def _load_and_preprocess(
         self, case: dict

@@ -125,3 +125,49 @@ def resolve_dataset_cache_config(
         )
 
     return cache_mode, cache_rate, cache_dir
+
+
+def resolve_roi_cache_config(
+    cfg: Mapping[str, Any],
+    logger: logging.Logger | None = None,
+) -> tuple[str, float, Path | None]:
+    """
+    Resolve ROI crop-cache settings from ``cfg["roi"]``.
+
+    Supported keys under ``roi``:
+      - ``cache_mode``: ``none`` | ``ram`` | ``storage``
+      - ``cache_rate``: float in [0, 1]
+      - ``cache_dir``: optional directory for ``storage`` mode
+    """
+    roi_cfg = cfg.get("roi", {}) or {}
+    if not isinstance(roi_cfg, Mapping):
+        raise ValueError("Config key 'roi' must be a mapping when provided.")
+
+    cache_mode_raw = roi_cfg.get("cache_mode", "none")
+    cache_mode = str(cache_mode_raw).strip().lower()
+    if cache_mode not in _CACHE_MODES:
+        supported = ", ".join(sorted(_CACHE_MODES))
+        raise ValueError(
+            f"Invalid roi.cache_mode='{cache_mode_raw}'. Expected one of: {supported}."
+        )
+
+    cache_rate = float(roi_cfg.get("cache_rate", 1.0))
+    if not 0.0 <= cache_rate <= 1.0:
+        raise ValueError(f"roi.cache_rate must be in [0.0, 1.0], got {cache_rate}.")
+
+    cache_dir_raw = roi_cfg.get("cache_dir")
+    cache_dir: Path | None = None
+    if cache_mode == "storage":
+        cache_dir = (
+            Path(str(cache_dir_raw))
+            if cache_dir_raw not in (None, "")
+            else default_dataset_cache_dir().parent / "roi_cache"
+        )
+    elif cache_dir_raw not in (None, ""):
+        _warn(
+            "roi.cache_dir is set but roi.cache_mode is not 'storage'; "
+            "the directory setting will be ignored.",
+            logger,
+        )
+
+    return cache_mode, cache_rate, cache_dir

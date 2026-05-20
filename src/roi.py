@@ -12,6 +12,7 @@ ROI_DISABLED = "disabled"
 ROI_GT_MASK = "gt_mask"
 ROI_PREDICTED_MASK = "predicted_mask"
 ROI_MODES = {ROI_DISABLED, ROI_GT_MASK, ROI_PREDICTED_MASK}
+ROI_STAGES = ("train", "val")
 TASK_LESION_SEGMENTATION = "lesion_segmentation"
 TASK_PROSTATE_LOCALIZATION = "prostate_localization"
 TASKS = {TASK_LESION_SEGMENTATION, TASK_PROSTATE_LOCALIZATION}
@@ -58,15 +59,43 @@ def resolve_task(cfg: Mapping[str, Any]) -> str:
     return task
 
 
-def resolve_roi_settings(cfg: Mapping[str, Any]) -> ROISettings:
+def _resolve_roi_config(
+    cfg: Mapping[str, Any],
+    *,
+    stage: str | None = None,
+) -> Mapping[str, Any]:
     roi_cfg = cfg.get("roi", {}) or {}
     if not isinstance(roi_cfg, Mapping):
         raise ValueError("Config key 'roi' must be a mapping when provided.")
+    if stage is None:
+        return roi_cfg
+
+    stage_norm = str(stage).strip().lower()
+    if stage_norm not in ROI_STAGES:
+        supported = ", ".join(ROI_STAGES)
+        raise ValueError(f"Unsupported ROI stage '{stage}'. Expected one of: {supported}.")
+    stage_cfg = roi_cfg.get(stage_norm, {}) or {}
+    if not isinstance(stage_cfg, Mapping):
+        raise ValueError(f"Config key 'roi.{stage_norm}' must be a mapping when provided.")
+    merged = dict(roi_cfg)
+    merged.pop("train", None)
+    merged.pop("val", None)
+    merged.update(stage_cfg)
+    return merged
+
+
+def resolve_roi_settings(
+    cfg: Mapping[str, Any],
+    *,
+    stage: str | None = None,
+) -> ROISettings:
+    roi_cfg = _resolve_roi_config(cfg, stage=stage)
 
     mode = str(roi_cfg.get("mode", ROI_DISABLED)).strip().lower()
     if mode not in ROI_MODES:
         supported = ", ".join(sorted(ROI_MODES))
-        raise ValueError(f"Unsupported roi.mode='{mode}'. Expected one of: {supported}.")
+        key = "roi.mode" if stage is None else f"roi.{stage}.mode"
+        raise ValueError(f"Unsupported {key}='{mode}'. Expected one of: {supported}.")
 
     target = str(roi_cfg.get("target", "prostate")).strip().lower()
     if target != "prostate":
@@ -105,12 +134,19 @@ def resolve_roi_settings(cfg: Mapping[str, Any]) -> ROISettings:
     return settings
 
 
+def resolve_stage_roi_settings(cfg: Mapping[str, Any]) -> dict[str, ROISettings]:
+    return {
+        stage: resolve_roi_settings(cfg, stage=stage)
+        for stage in ROI_STAGES
+    }
+
+
 def validate_task_and_roi_config(
     cfg: Mapping[str, Any],
     dataset_type: str,
-) -> tuple[str, ROISettings]:
+) -> tuple[str, dict[str, ROISettings]]:
     task = resolve_task(cfg)
-    roi = resolve_roi_settings(cfg)
+    roi_by_stage = resolve_stage_roi_settings(cfg)
     dataset_type_norm = str(dataset_type).strip().lower()
 
     if task == TASK_PROSTATE_LOCALIZATION:
@@ -123,34 +159,38 @@ def validate_task_and_roi_config(
             raise ValueError(
                 "task='prostate_localization' requires 'prostate158_prostate_label_col'."
             )
-        if roi.enabled:
+        if any(roi.enabled for roi in roi_by_stage.values()):
             raise ValueError("ROI cropping is only supported for task='lesion_segmentation'.")
 
-    if roi.mode == ROI_GT_MASK:
-        if dataset_type_norm not in set(roi.gt_dataset_types):
-            supported = ", ".join(roi.gt_dataset_types)
-            raise ValueError(
-                f"roi.mode='gt_mask' requires dataset_type in {{{supported}}}, got '{dataset_type_norm}'."
-            )
-        if dataset_type_norm == "prostate158":
-            prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
-            if not prostate_label_col:
+    for stage, roi in roi_by_stage.items():
+        roi_key = f"roi.{stage}.mode"
+        if roi.mode == ROI_GT_MASK:
+            if dataset_type_norm not in set(roi.gt_dataset_types):
+                supported = ", ".join(roi.gt_dataset_types)
                 raise ValueError(
-                    "roi.mode='gt_mask' with dataset_type='prostate158' requires "
-                    "'prostate158_prostate_label_col'."
+                    f"{roi_key}='gt_mask' requires dataset_type in {{{supported}}}, got '{dataset_type_norm}'."
                 )
-        elif dataset_type_norm == "picai":
-            picai_prostate_labels_dir = str(cfg.get("picai_prostate_labels_dir", "")).strip()
-            if not picai_prostate_labels_dir:
+            if dataset_type_norm == "prostate158":
+                prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
+                if not prostate_label_col:
+                    raise ValueError(
+                        f"{roi_key}='gt_mask' with dataset_type='prostate158' requires "
+                        "'prostate158_prostate_label_col'."
+                    )
+            elif dataset_type_norm == "picai":
+                picai_prostate_labels_dir = str(cfg.get("picai_prostate_labels_dir", "")).strip()
+                if not picai_prostate_labels_dir:
+                    raise ValueError(
+                        f"{roi_key}='gt_mask' with dataset_type='picai' requires "
+                        "'picai_prostate_labels_dir'."
+                    )
+        elif roi.mode == ROI_PREDICTED_MASK:
+            if not roi.localizer_run:
                 raise ValueError(
-                    "roi.mode='gt_mask' with dataset_type='picai' requires "
-                    "'picai_prostate_labels_dir'."
+                    f"{roi_key}='predicted_mask' requires roi.localizer_run."
                 )
-    elif roi.mode == ROI_PREDICTED_MASK:
-        if not roi.localizer_run:
-            raise ValueError("roi.mode='predicted_mask' requires roi.localizer_run.")
 
-    return task, roi
+    return task, roi_by_stage
 
 
 def binarize_mask(mask: np.ndarray | torch.Tensor, threshold: float = 0.5) -> np.ndarray:

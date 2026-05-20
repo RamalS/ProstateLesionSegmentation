@@ -38,6 +38,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.config import load_config, resolve_dataset_cache_config
+from src.config import resolve_roi_cache_config
 from src.dataset import (
     PiCaiDataset,
     annotate_cases_with_lesion_flags,
@@ -54,6 +55,7 @@ from src.notify import send_ntfy
 from src.postprocess import postprocess_logits
 from src.roi import (
     restore_from_roi,
+    resolve_roi_settings,
     validate_task_and_roi_config,
 )
 from src.transforms import get_train_transforms, get_val_transforms
@@ -248,11 +250,14 @@ def _ensure_prostate_label_col(
     merged = dict(cfg)
     dataset_norm = str(dataset_type).strip().lower()
     task = str(merged.get("task", "lesion_segmentation")).strip().lower()
-    roi_mode = str((merged.get("roi", {}) or {}).get("mode", "disabled")).strip().lower()
+    roi_modes = {
+        resolve_roi_settings(merged, stage="train").mode,
+        resolve_roi_settings(merged, stage="val").mode,
+    }
 
     needs_col = (
         dataset_norm == "prostate158"
-        and (task == "prostate_localization" or roi_mode == "gt_mask")
+        and (task == "prostate_localization" or "gt_mask" in roi_modes)
     )
     if not needs_col:
         return merged, False
@@ -314,15 +319,18 @@ def _ensure_picai_gt_roi_config(
     merged = dict(cfg)
     dataset_norm = str(dataset_type).strip().lower()
     roi_cfg = dict(merged.get("roi", {}) or {})
-    roi_mode = str(roi_cfg.get("mode", "disabled")).strip().lower()
+    roi_modes = {
+        resolve_roi_settings(merged, stage="train").mode,
+        resolve_roi_settings(merged, stage="val").mode,
+    }
     picai_labels_dir = _resolve_picai_prostate_labels_dir(picai_prostate_labels_dir, merged)
 
-    if dataset_norm != "picai" or roi_mode != "gt_mask":
+    if dataset_norm != "picai" or "gt_mask" not in roi_modes:
         return merged, picai_labels_dir
 
     if picai_labels_dir is None:
         raise ValueError(
-            "roi.mode='gt_mask' with dataset_type='picai' requires PI-CAI prostate labels. "
+            "roi.*.mode='gt_mask' with dataset_type='picai' requires PI-CAI prostate labels. "
             "Looked for defaults in /data/prostate_labels and data/prostate_labels. "
             "Pass --picai-prostate-labels-dir or set picai_prostate_labels_dir in config."
         )
@@ -652,6 +660,7 @@ def main() -> None:
         cfg["current_config_checkpoint"] = resume_path
 
     cache_mode, cache_rate, cache_dir = resolve_dataset_cache_config(cfg, logger=logger)
+    roi_cache_mode, roi_cache_rate, roi_cache_dir = resolve_roi_cache_config(cfg, logger=logger)
 
     # ---- Reproducibility ----
     seed = cfg.get("random_seed", 42)
@@ -692,10 +701,13 @@ def main() -> None:
     patch_size: tuple[int, ...] = tuple(cfg.get("patch_size", [20, 128, 128]))
     target_spacing: tuple[float, ...] = tuple(cfg["target_spacing"])
     logger.info(
-        "Dataset cache: mode=%s, rate=%.2f, dir=%s",
+        "Dataset cache: mode=%s, rate=%.2f, dir=%s | ROI cache: mode=%s, rate=%.2f, dir=%s",
         cache_mode,
         cache_rate,
         cache_dir if cache_dir is not None else "-",
+        roi_cache_mode,
+        roi_cache_rate,
+        roi_cache_dir if roi_cache_dir is not None else "-",
     )
 
     # Resolve active modalities once; used for case discovery and dataset init.
@@ -718,21 +730,31 @@ def main() -> None:
         picai_prostate_labels_dir is not None
         and dataset_type == "picai"
         and (
-            str((cfg.get("roi", {}) or {}).get("mode", "disabled")).strip().lower() == "gt_mask"
+            "gt_mask" in {
+                resolve_roi_settings(cfg, stage="train").mode,
+                resolve_roi_settings(cfg, stage="val").mode,
+            }
             or bool(str(args.picai_prostate_labels_dir).strip())
         )
     ):
         logger.info("PI-CAI prostate labels directory: %s", picai_prostate_labels_dir)
-    task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
-    roi_source = "disabled"
-    if roi_settings.mode == "gt_mask":
-        if dataset_type == "prostate158":
-            roi_source = str(cfg.get("prostate158_prostate_label_col", "")).strip()
-        elif dataset_type == "picai":
-            roi_source = str(cfg.get("picai_prostate_labels_dir", "")).strip()
-    elif roi_settings.mode == "predicted_mask":
-        roi_source = roi_settings.localizer_run
-    logger.info("Resolved ROI configuration: mode=%s, source=%s", roi_settings.mode, roi_source or "-")
+    task, roi_settings_by_stage = validate_task_and_roi_config(cfg, dataset_type)
+    for stage in ("train", "val"):
+        roi_settings = roi_settings_by_stage[stage]
+        roi_source = "disabled"
+        if roi_settings.mode == "gt_mask":
+            if dataset_type == "prostate158":
+                roi_source = str(cfg.get("prostate158_prostate_label_col", "")).strip()
+            elif dataset_type == "picai":
+                roi_source = str(cfg.get("picai_prostate_labels_dir", "")).strip()
+        elif roi_settings.mode == "predicted_mask":
+            roi_source = roi_settings.localizer_run
+        logger.info(
+            "Resolved ROI configuration (%s): mode=%s, source=%s",
+            stage,
+            roi_settings.mode,
+            roi_source or "-",
+        )
     save_metadata(run_dir, cfg)
     save_config_copy(run_dir, cfg)
     if dataset_type == "prostate158":
@@ -747,6 +769,10 @@ def main() -> None:
         label_modality = cfg.get("prostate158_label_modality")
         prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
 
+        needs_prostate_label = (
+            task == "prostate_localization"
+            or any(roi.mode == "gt_mask" for roi in roi_settings_by_stage.values())
+        )
         train_cases = discover_prostate158_cases(
             root_dir=prostate158_train_dir,
             split=str(cfg.get("prostate158_train_split", "train")),
@@ -754,7 +780,7 @@ def main() -> None:
             label_target=label_target,
             label_reader=label_reader,
             label_modality=label_modality,
-            prostate_label_col=prostate_label_col if (prostate_label_col and (task == "prostate_localization" or roi_settings.mode == "gt_mask")) else None,
+            prostate_label_col=prostate_label_col if (prostate_label_col and needs_prostate_label) else None,
         )
         val_cases = discover_prostate158_cases(
             root_dir=prostate158_train_dir,
@@ -763,7 +789,7 @@ def main() -> None:
             label_target=label_target,
             label_reader=label_reader,
             label_modality=label_modality,
-            prostate_label_col=prostate_label_col if (prostate_label_col and (task == "prostate_localization" or roi_settings.mode == "gt_mask")) else None,
+            prostate_label_col=prostate_label_col if (prostate_label_col and needs_prostate_label) else None,
         )
         all_cases = train_cases + val_cases
         lesion_flag_cache_path = (
@@ -788,10 +814,10 @@ def main() -> None:
                 f"No cases found in {cfg['images_dir']}. "
                 "Check that your data is mounted correctly (./data -> /data)."
             )
-        if roi_settings.mode == "gt_mask":
+        if any(roi.mode == "gt_mask" for roi in roi_settings_by_stage.values()):
             if picai_prostate_labels_dir is None:
                 raise ValueError(
-                    "PI-CAI prostate labels are required for roi.mode='gt_mask'. "
+                    "PI-CAI prostate labels are required when any roi.*.mode='gt_mask'. "
                     "Defaults are /data/prostate_labels or data/prostate_labels; "
                     "otherwise pass --picai-prostate-labels-dir or set "
                     "picai_prostate_labels_dir in config."
@@ -880,7 +906,10 @@ def main() -> None:
         active_modalities=_active_keys,
         dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
         task=task,
-        roi_settings=roi_settings,
+        roi_cache_mode=roi_cache_mode,
+        roi_cache_rate=roi_cache_rate,
+        roi_cache_dir=roi_cache_dir,
+        roi_settings=roi_settings_by_stage["train"],
     )
 
     val_ds = PiCaiDataset(
@@ -895,8 +924,11 @@ def main() -> None:
         active_modalities=_active_keys,
         dwi_hbv_preprocess=cfg.get("dwi_hbv_preprocess", {}),
         task=task,
-        roi_settings=roi_settings,
-        include_full_resampled=roi_settings.enabled and task == "lesion_segmentation",
+        roi_cache_mode=roi_cache_mode,
+        roi_cache_rate=roi_cache_rate,
+        roi_cache_dir=roi_cache_dir,
+        roi_settings=roi_settings_by_stage["val"],
+        include_full_resampled=roi_settings_by_stage["val"].enabled and task == "lesion_segmentation",
     )
 
     loader_generator = torch.Generator()

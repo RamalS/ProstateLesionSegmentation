@@ -28,6 +28,7 @@ import re
 import shutil
 import warnings
 from pathlib import Path
+from typing import Any, Mapping
 
 import monai.data.utils
 import numpy as np
@@ -175,6 +176,78 @@ def _log_cuda_memory(stage: str, device: torch.device) -> None:
         peak_alloc_gib,
         peak_reserv_gib,
     )
+
+
+def _roi_triplet_from_collate(value: Any, key: str) -> tuple[int, int, int]:
+    """
+    Parse one ROI triplet field from DataLoader-collated batch payload.
+
+    Supports these common collated forms:
+    - list[tensor([z]), tensor([y]), tensor([x])]
+    - tensor([[z, y, x]]) or tensor([z, y, x])
+    """
+    if isinstance(value, torch.Tensor):
+        arr = value.detach().cpu()
+        if arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[1] == 3:
+            vals = arr[0].tolist()
+            return int(vals[0]), int(vals[1]), int(vals[2])
+        if arr.ndim == 1 and arr.numel() == 3:
+            vals = arr.tolist()
+            return int(vals[0]), int(vals[1]), int(vals[2])
+        raise ValueError(f"Unexpected tensor shape for roi.{key}: {tuple(arr.shape)}")
+
+    if isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError(f"Expected 3 values for roi.{key}, got {len(value)}")
+        out: list[int] = []
+        for item in value:
+            if isinstance(item, torch.Tensor):
+                flat = item.detach().cpu().reshape(-1)
+                if flat.numel() != 1:
+                    raise ValueError(
+                        f"Expected scalar tensor entries for roi.{key}, got {tuple(item.shape)}"
+                    )
+                out.append(int(flat[0].item()))
+            else:
+                out.append(int(item))
+        return out[0], out[1], out[2]
+
+    raise ValueError(f"Unsupported collated type for roi.{key}: {type(value)!r}")
+
+
+def _roi_bool_from_collate(value: Any) -> bool:
+    """Parse boolean ROI field from collated batch payload."""
+    if isinstance(value, torch.Tensor):
+        flat = value.detach().cpu().reshape(-1)
+        if flat.numel() == 0:
+            return False
+        return bool(flat[0].item())
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return False
+        head = value[0]
+        if isinstance(head, torch.Tensor):
+            flat = head.detach().cpu().reshape(-1)
+            return bool(flat[0].item()) if flat.numel() else False
+        return bool(head)
+    return bool(value)
+
+
+def _roi_bounds_from_collated_batch(roi_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize DataLoader-collated ROI metadata to restore_from_roi format."""
+    required = ("start_zyx", "end_zyx", "full_shape_zyx", "used_fallback")
+    missing = [k for k in required if k not in roi_payload]
+    if missing:
+        raise KeyError(f"ROI payload missing required key(s): {missing}")
+
+    return {
+        "start_zyx": _roi_triplet_from_collate(roi_payload["start_zyx"], "start_zyx"),
+        "end_zyx": _roi_triplet_from_collate(roi_payload["end_zyx"], "end_zyx"),
+        "full_shape_zyx": _roi_triplet_from_collate(
+            roi_payload["full_shape_zyx"], "full_shape_zyx"
+        ),
+        "used_fallback": _roi_bool_from_collate(roi_payload["used_fallback"]),
+    }
 
 
 def _default_prostate_label_col(label_reader: object) -> str:
@@ -480,10 +553,7 @@ def validate(
             # transforms and other numpy-backed metric operations).
             logits = logits.float()
             if "roi" in batch:
-                roi_batch = {
-                    key: batch["roi"][key][0]
-                    for key in ("start_zyx", "end_zyx", "full_shape_zyx", "used_fallback")
-                }
+                roi_batch = _roi_bounds_from_collated_batch(batch["roi"])
                 logits = restore_from_roi(logits, roi_batch)
             metric_logits, _ = postprocess_logits(
                 logits=logits,

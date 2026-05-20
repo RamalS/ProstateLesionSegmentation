@@ -13,7 +13,7 @@
 #   --out-dir DIR   Root data directory (default: ./data)
 #   --keep-zip      Keep image .zip files after extraction (default: delete)
 #   --no-images     Skip PI-CAI image download/extraction
-#   --no-labels     Skip label download
+#   --no-labels     Skip PI-CAI label download (lesion + prostate)
 #   --no-unlabeled  Skip Prostate158 train/test download
 #   --images-only   Alias for --no-labels
 #   --labels-only   Alias for --no-images --no-unlabeled
@@ -27,6 +27,13 @@
 #   bash scripts/download_dataset.sh --no-unlabeled
 #   docker compose run --rm trainer download
 # ---------------------------------------------------------------------------
+
+# Prevent shell termination when this file is sourced by mistake.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    echo "[ERROR] Do not source this script. Run it with: bash scripts/download_dataset.sh [N] [OPTIONS]" >&2
+    return 1
+fi
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -70,9 +77,12 @@ PROSTATE158_TRAIN_ZIP_NAME="prostate158_train.zip"
 PROSTATE158_TEST_ZIP_NAME="prostate158_test.zip"
 
 LABELS_REPO="https://github.com/DIAGNijmegen/picai_labels"
-SPARSE_PATHS=(
+LESION_SPARSE_PATHS=(
     "csPCa_lesion_delineations/human_expert/resampled"
     "csPCa_lesion_delineations/human_expert/Pooch25"
+)
+PROSTATE_LABEL_SPARSE_PATHS=(
+    "anatomical_delineations/whole_gland/AI/Bosma22b"
 )
 
 # ---------------------------------------------------------------------------
@@ -106,7 +116,7 @@ Options:
   --out-dir DIR   Root data directory (default: ./data)
   --keep-zip      Keep image .zip files after extraction (default: delete)
   --no-images     Skip PI-CAI image download/extraction
-  --no-labels     Skip label download
+  --no-labels     Skip PI-CAI label download (lesion + prostate)
   --no-unlabeled  Skip Prostate158 train/test download
   --images-only   Alias for --no-labels
   --labels-only   Alias for --no-images --no-unlabeled
@@ -221,7 +231,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DOWNLOAD_IMAGES" == false && "$DOWNLOAD_LABELS" == false && "$DOWNLOAD_UNLABELED" == false ]]; then
-    error "Nothing to do: PI-CAI images, PI-CAI labels, and Prostate158 are all disabled."
+    error "Nothing to do: PI-CAI images, PI-CAI lesion/prostate labels, and Prostate158 are all disabled."
     exit 1
 fi
 
@@ -237,11 +247,13 @@ fi
 IMAGES_DIR="$OUT_DIR/images"
 TEST_IMAGES_DIR="$OUT_DIR/test_images"
 LABELS_DIR="$OUT_DIR/labels"
+PROSTATE_LABELS_DIR="$OUT_DIR/prostate_labels"
 UNLABELED_DIR="$OUT_DIR/unlabeled_images"
 PROSTATE158_TRAIN_DIR="$OUT_DIR/prostate158_train"
 PROSTATE158_TEST_DIR="$OUT_DIR/prostate158_test"
 LABELS_CLONE_DIR="$OUT_DIR/.picai_labels_tmp"
 LABELS_DONE_MARKER="$OUT_DIR/.labels_done"
+PROSTATE_LABELS_DONE_MARKER="$OUT_DIR/.prostate_labels_done"
 PROSTATE158_TRAIN_DONE_MARKER="$OUT_DIR/.prostate158_train_done"
 PROSTATE158_TEST_DONE_MARKER="$OUT_DIR/.prostate158_test_done"
 UNLABELED_DONE_MARKER="$OUT_DIR/.prostate158_unlabeled_done"
@@ -643,34 +655,75 @@ download_unlabeled_images() {
 download_labels() {
     local sp
     local n_labels
+    local n_prostate_labels
+    local need_lesion_copy=true
+    local need_prostate_copy=true
+    local -a active_sparse_paths=()
+    local lesion_paths_py=""
+    local prostate_paths_py=""
 
     echo ""
     echo -e "${BOLD}PI-CAI Labels Download${RESET}"
-    echo "  Source      : $LABELS_REPO"
-    echo "  Subdirs     : ${SPARSE_PATHS[*]}"
-    echo "  Output dir  : $LABELS_DIR"
-    echo "  Dry run     : $DRY_RUN"
+    echo "  Source                 : $LABELS_REPO"
+    echo "  Lesion subdirs         : ${LESION_SPARSE_PATHS[*]}"
+    echo "  Prostate-mask subdirs  : ${PROSTATE_LABEL_SPARSE_PATHS[*]}"
+    echo "  Lesion output dir      : $LABELS_DIR"
+    echo "  Prostate output dir    : $PROSTATE_LABELS_DIR"
+    echo "  Dry run                : $DRY_RUN"
     echo ""
 
     if [[ "$DRY_RUN" == true ]]; then
         info "[dry-run] Would sparse-clone $LABELS_REPO into $LABELS_CLONE_DIR"
-        for sp in "${SPARSE_PATHS[@]}"; do
-            info "[dry-run] Would fetch path: $sp"
+        for sp in "${LESION_SPARSE_PATHS[@]}"; do
+            info "[dry-run] Would fetch lesion path: $sp"
         done
-        info "[dry-run] Would copy all .nii.gz files -> $LABELS_DIR"
+        for sp in "${PROSTATE_LABEL_SPARSE_PATHS[@]}"; do
+            info "[dry-run] Would fetch prostate-mask path: $sp"
+        done
+        info "[dry-run] Would copy lesion .nii.gz files -> $LABELS_DIR"
+        info "[dry-run] Would copy whole-prostate .nii.gz files -> $PROSTATE_LABELS_DIR"
         info "[dry-run] Would remove $LABELS_CLONE_DIR"
         success "Label dry run complete."
         return
     fi
 
     if [[ -f "$LABELS_DONE_MARKER" ]]; then
+        need_lesion_copy=false
+    fi
+    if [[ -f "$PROSTATE_LABELS_DONE_MARKER" ]]; then
+        need_prostate_copy=false
+    fi
+
+    if [[ "$need_lesion_copy" == false && "$need_prostate_copy" == false ]]; then
         n_labels="$(find "$LABELS_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
-        success "Labels already downloaded ($n_labels .nii.gz files in $LABELS_DIR) - skipping."
-        echo "  Delete $LABELS_DONE_MARKER to force a re-download."
+        n_prostate_labels="$(find "$PROSTATE_LABELS_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
+        success "Lesion labels already downloaded ($n_labels .nii.gz files in $LABELS_DIR) - skipping."
+        success "Whole-prostate labels already downloaded ($n_prostate_labels .nii.gz files in $PROSTATE_LABELS_DIR) - skipping."
+        echo "  Delete $LABELS_DONE_MARKER and/or $PROSTATE_LABELS_DONE_MARKER to force a re-download."
         return
     fi
 
-    mkdir -p "$LABELS_DIR"
+    if [[ "$need_lesion_copy" == true ]]; then
+        mkdir -p "$LABELS_DIR"
+        for sp in "${LESION_SPARSE_PATHS[@]}"; do
+            active_sparse_paths+=("$sp")
+            lesion_paths_py+="    \"$sp\","$'\n'
+        done
+    else
+        n_labels="$(find "$LABELS_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
+        success "Lesion labels already downloaded ($n_labels .nii.gz files in $LABELS_DIR) - lesion copy will be skipped."
+    fi
+
+    if [[ "$need_prostate_copy" == true ]]; then
+        mkdir -p "$PROSTATE_LABELS_DIR"
+        for sp in "${PROSTATE_LABEL_SPARSE_PATHS[@]}"; do
+            active_sparse_paths+=("$sp")
+            prostate_paths_py+="    \"$sp\","$'\n'
+        done
+    else
+        n_prostate_labels="$(find "$PROSTATE_LABELS_DIR" -name '*.nii.gz' 2>/dev/null | wc -l | tr -d ' ')"
+        success "Whole-prostate labels already downloaded ($n_prostate_labels .nii.gz files in $PROSTATE_LABELS_DIR) - prostate copy will be skipped."
+    fi
 
     echo -e "${BOLD}------------------------------------------${RESET}"
     info "Sparse-cloning label repository (no blobs yet)..."
@@ -686,63 +739,91 @@ download_labels() {
 
     info "Configuring sparse-checkout..."
     git -C "$LABELS_CLONE_DIR" sparse-checkout init --cone
-    git -C "$LABELS_CLONE_DIR" sparse-checkout set "${SPARSE_PATHS[@]}"
+    git -C "$LABELS_CLONE_DIR" sparse-checkout set "${active_sparse_paths[@]}"
 
     info "Checking out sparse paths (this may take a few minutes)..."
     git -C "$LABELS_CLONE_DIR" checkout
     success "Sparse checkout complete."
 
     echo -e "${BOLD}------------------------------------------${RESET}"
-    info "Copying .nii.gz files -> $LABELS_DIR ..."
+    info "Copying .nii.gz files into label outputs ..."
 
     python3 - <<PYEOF
 import shutil
 from pathlib import Path
 
 clone_dir = Path("$LABELS_CLONE_DIR")
-labels_dir = Path("$LABELS_DIR")
-labels_dir.mkdir(parents=True, exist_ok=True)
+lesion_dir = Path("$LABELS_DIR")
+prostate_dir = Path("$PROSTATE_LABELS_DIR")
+copy_lesion = "$need_lesion_copy" == "true"
+copy_prostate = "$need_prostate_copy" == "true"
 
-sparse_paths = [
-    "csPCa_lesion_delineations/human_expert/resampled",
-    "csPCa_lesion_delineations/human_expert/Pooch25",
-]
+lesion_paths = [
+$lesion_paths_py]
+prostate_paths = [
+$prostate_paths_py]
 
-copied = 0
-duplicates = 0
+lesion_dir.mkdir(parents=True, exist_ok=True)
+prostate_dir.mkdir(parents=True, exist_ok=True)
 
-for rel in sparse_paths:
-    src_dir = clone_dir / rel
-    if not src_dir.is_dir():
-        print(f"  [WARN] Expected directory not found: {src_dir}")
-        continue
-
-    files = sorted(src_dir.glob("*.nii.gz"))
-    print(f"  {len(files):4d} files in {rel}")
-
-    for src in files:
-        dst = labels_dir / src.name
-        if dst.exists():
-            duplicates += 1
+def copy_paths(source_name: str, sparse_paths: list[str], target_dir: Path) -> tuple[int, int]:
+    copied = 0
+    duplicates = 0
+    for rel in sparse_paths:
+        src_dir = clone_dir / rel
+        if not src_dir.is_dir():
+            print(f"  [WARN] Expected directory not found: {src_dir}")
             continue
-        shutil.copy2(src, dst)
-        copied += 1
 
-print(f"\n  Copied    : {copied}")
-if duplicates:
-    print(f"  Duplicates: {duplicates} (earlier source kept)")
-print(f"  Total     : {copied + duplicates}")
+        files = sorted(src_dir.glob("*.nii.gz"))
+        print(f"  {len(files):4d} files in {rel} [{source_name}]")
+
+        for src in files:
+            dst = target_dir / src.name
+            if dst.exists():
+                duplicates += 1
+                continue
+            shutil.copy2(src, dst)
+            copied += 1
+
+    print(f"  [{source_name}] Copied    : {copied}")
+    if duplicates:
+        print(f"  [{source_name}] Duplicates: {duplicates} (earlier source kept)")
+    print(f"  [{source_name}] Total     : {copied + duplicates}")
+    return copied, duplicates
+
+if copy_lesion:
+    copy_paths("lesion", lesion_paths, lesion_dir)
+else:
+    print("  [lesion] Skipped (already marked complete)")
+
+if copy_prostate:
+    copy_paths("prostate", prostate_paths, prostate_dir)
+else:
+    print("  [prostate] Skipped (already marked complete)")
+
+print("")
+print(f"  Lesion output   : {lesion_dir}")
+print(f"  Prostate output : {prostate_dir}")
+print("  Copy complete.")
 PYEOF
 
-    n_labels="$(find "$LABELS_DIR" -name '*.nii.gz' | wc -l | tr -d ' ')"
-    success "Copied $n_labels label files to $LABELS_DIR"
+    if [[ "$need_lesion_copy" == true ]]; then
+        n_labels="$(find "$LABELS_DIR" -name '*.nii.gz' | wc -l | tr -d ' ')"
+        success "Copied $n_labels lesion label files to $LABELS_DIR"
+        touch "$LABELS_DONE_MARKER"
+    fi
+
+    if [[ "$need_prostate_copy" == true ]]; then
+        n_prostate_labels="$(find "$PROSTATE_LABELS_DIR" -name '*.nii.gz' | wc -l | tr -d ' ')"
+        success "Copied $n_prostate_labels whole-prostate label files to $PROSTATE_LABELS_DIR"
+        touch "$PROSTATE_LABELS_DONE_MARKER"
+    fi
 
     echo -e "${BOLD}------------------------------------------${RESET}"
     info "Removing temporary clone ($LABELS_CLONE_DIR)..."
     rm -rf "$LABELS_CLONE_DIR"
     success "Cleanup done."
-
-    touch "$LABELS_DONE_MARKER"
 }
 
 # ---------------------------------------------------------------------------
@@ -755,7 +836,7 @@ echo "  Download images  : $DOWNLOAD_IMAGES"
 if [[ "$DOWNLOAD_IMAGES" == true ]]; then
     echo "  Image folds      : fold0 - fold$((N_FOLDS - 1))  ($N_FOLDS of $TOTAL_FOLDS)"
 fi
-echo "  Download labels  : $DOWNLOAD_LABELS"
+echo "  Download labels  : $DOWNLOAD_LABELS (lesion + prostate)"
 echo "  Download Prostate158: $DOWNLOAD_UNLABELED"
 echo "  Keep zip files   : $KEEP_ZIP"
 echo "  Dry run          : $DRY_RUN"
@@ -769,7 +850,7 @@ fi
 if [[ "$DOWNLOAD_LABELS" == true ]]; then
     download_labels
 else
-    info "Skipping label download."
+    info "Skipping PI-CAI label download (lesion + prostate)."
 fi
 
 if [[ "$DOWNLOAD_UNLABELED" == true ]]; then
@@ -789,7 +870,8 @@ else
         echo "  Test images : $TEST_IMAGES_DIR"
     fi
     if [[ "$DOWNLOAD_LABELS" == true ]]; then
-        echo "  Labels      : $LABELS_DIR"
+        echo "  Lesion labels   : $LABELS_DIR"
+        echo "  Prostate labels : $PROSTATE_LABELS_DIR"
     fi
     if [[ "$DOWNLOAD_UNLABELED" == true ]]; then
         echo "  Prostate158 train : $PROSTATE158_TRAIN_DIR"

@@ -21,6 +21,8 @@ val_fraction: 0.2
 
 roi:
   mode: disabled
+  val:
+    mode: gt_mask
   target: prostate
   margin_mm: [6.0, 12.0, 12.0]
   min_size_vox: [16, 128, 128]
@@ -29,6 +31,9 @@ roi:
   localizer_run: ""
   localizer_threshold: 0.5
   localizer_keep_largest_component: true
+  cache_mode: storage
+  cache_rate: 1.0
+  cache_dir: /cache/roi_cache
 
 # Patch sampling
 patch_size: [16, 128, 128]         # (D, H, W) in voxels

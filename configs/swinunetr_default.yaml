@@ -1,0 +1,112 @@
+experiment_name: swinunetr_default
+epochs: 300
+batch_size: 2
+learning_rate: 1.0e-4
+weight_decay: 1.0e-5
+num_workers: 5
+device: cuda
+base_output_dir: /outputs/runs
+random_seed: 42
+deterministic: false
+task: lesion_segmentation
+
+# Data
+dataset_type: picai
+images_dir: /data/images
+labels_dir: /data/labels
+target_spacing: [3.0, 0.5, 0.5]
+val_fraction: 0.2
+
+roi:
+  mode: gt_mask
+  val:
+    mode: gt_mask
+  target: prostate
+  margin_mm: [9.0, 16.0, 16.0]
+  min_size_vox: [32, 96, 96]
+  fallback_to_full_volume: true
+  gt_dataset_types: [prostate158]
+  localizer_run: ""
+  localizer_threshold: 0.5
+  localizer_keep_largest_component: true
+  cache_mode: storage
+  cache_rate: 1.0
+  cache_dir: /cache/roi_cache
+
+# Patch sampling
+patch_size: [32, 96, 96]
+pos_fraction: 0.70
+num_samples: 1
+
+# Model
+model: swinunetr                   # options: unet3d, attention_unet3d, fct, deconver, dynunet, swinunetr
+modalities: [t2w, adc, hbv]
+out_channels: 1
+features: [32, 64, 128, 256]       # retained for compatibility with shared training defaults
+deep_supervision: false             # SwinUNETR is single-output in this repo pass
+
+# SwinUNETR-specific hyperparameters (used only when model: swinunetr)
+swinunetr_img_size: [32, 96, 96]
+swinunetr_feature_size: 24
+swinunetr_depths: [2, 2, 2, 2]
+swinunetr_num_heads: [3, 6, 12, 24]
+swinunetr_norm_name: "instance"
+swinunetr_drop_rate: 0.0
+swinunetr_attn_drop_rate: 0.0
+swinunetr_dropout_path_rate: 0.0
+swinunetr_use_checkpoint: false
+swinunetr_use_v2: false
+
+# Loss
+loss_fn: tversky_bce
+tversky_alpha: 0.3
+tversky_beta: 0.7
+dice_weight: 1.0
+bce_weight: 1.0
+bce_pos_weight: 10.0
+
+# LR schedule
+warmup_epochs: 10
+
+# Validation (sliding window)
+sw_overlap: 0.50
+sw_batch_size: 2
+val_min_sw_batch_size: 1
+val_compute_hd95_every: 1
+val_every: 2
+val_start_epoch: 1
+
+# Prediction / post-processing
+pred_threshold: 0.5
+postprocess_enabled: false
+postprocess_min_component_volume_mm3: 30.0
+postprocess_connectivity: 26
+
+# Training speed optimizations
+use_amp: true
+amp_dtype: bf16
+use_compile: false
+cache_mode: storage
+cache_rate: 1.0
+
+# Checkpointing
+keep_last_checkpoints: 3
+
+# SSL encoder initialization
+pretrained_encoder_checkpoint: ""
+freeze_encoder_epochs: 0
+
+# Best checkpoint selection (composite score)
+best_ckpt_w_sensitivity: 0.4
+best_ckpt_w_dice: 0.6
+best_ckpt_w_hd95: 0.0
+best_ckpt_hd95_scale: 10.0
+
+# Early stopping
+early_stopping_patience: 50
+early_stopping_min_delta: 0.001
+
+# ntfy push notifications
+ntfy_url: "https://ntfy.sh"
+ntfy_topic: "a9d5ba8d-8e71-4e48-a114-a04a572de12f"
+ntfy_notify_best_model: true

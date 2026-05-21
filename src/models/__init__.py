@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -26,10 +29,12 @@ if str(_DECONVER_ROOT) not in sys.path:
 
 try:
     from deconver.deconver import Deconver as _Deconver
+
     _DECONVER_AVAILABLE = True
 except ImportError:
     _Deconver = None  # type: ignore[assignment,misc]
     _DECONVER_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -43,6 +48,38 @@ _MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "attention_unet3d": AttentionUNet3D,
     "fct": FCT,
 }
+_MONAI_MODEL_NAMES: tuple[str, str] = ("dynunet", "swinunetr")
+_SUPPORTED_MODEL_NAMES: tuple[str, ...] = (
+    "unet3d",
+    "attention_unet3d",
+    "fct",
+    "deconver",
+    "deconver_multitask",
+    *_MONAI_MODEL_NAMES,
+)
+
+
+def _register_monai_models() -> None:
+    """
+    Lazily register MONAI architectures when MONAI is importable.
+
+    MONAI is optional for local unit tests in this repo; loading these models
+    lazily avoids turning every import of ``src.models`` into a hard MONAI
+    dependency.
+    """
+    if "dynunet" in _MODEL_REGISTRY and "swinunetr" in _MODEL_REGISTRY:
+        return
+
+    try:
+        from monai.networks.nets import DynUNet as _DynUNet, SwinUNETR as _SwinUNETR
+    except ImportError:
+        return
+
+    globals()["DynUNet"] = _DynUNet
+    globals()["SwinUNETR"] = _SwinUNETR
+    _MODEL_REGISTRY.setdefault("dynunet", _DynUNet)
+    _MODEL_REGISTRY.setdefault("swinunetr", _SwinUNETR)
+
 
 if _DECONVER_AVAILABLE:
     Deconver = _Deconver  # type: ignore[misc,assignment]
@@ -95,6 +132,366 @@ if _DECONVER_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _coerce_positive_int(value: Any, key: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"Config key '{key}' must be a positive integer, got boolean.")
+    try:
+        out = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Config key '{key}' must be a positive integer.") from exc
+    if out <= 0:
+        raise ValueError(f"Config key '{key}' must be > 0, got {out}.")
+    return out
+
+
+def _coerce_rate(value: Any, key: str) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Config key '{key}' must be a float in [0.0, 1.0].") from exc
+    if not 0.0 <= out <= 1.0:
+        raise ValueError(f"Config key '{key}' must be in [0.0, 1.0], got {out}.")
+    return out
+
+
+def _coerce_sequence(value: Any, key: str, *, min_len: int = 1) -> tuple[Any, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"Config key '{key}' must be a list/tuple.")
+    out = tuple(value)
+    if len(out) < min_len:
+        raise ValueError(
+            f"Config key '{key}' must have at least {min_len} item(s), got {len(out)}."
+        )
+    return out
+
+
+def _coerce_positive_int_sequence(
+    value: Any,
+    key: str,
+    *,
+    min_len: int = 1,
+) -> tuple[int, ...]:
+    seq = _coerce_sequence(value, key, min_len=min_len)
+    return tuple(_coerce_positive_int(v, f"{key}[{i}]") for i, v in enumerate(seq))
+
+
+def _coerce_spatial_block_sequence(
+    value: Any,
+    key: str,
+    *,
+    spatial_dims: int = 3,
+    min_len: int = 1,
+) -> tuple[int | tuple[int, ...], ...]:
+    seq = _coerce_sequence(value, key, min_len=min_len)
+    parsed: list[int | tuple[int, ...]] = []
+    for i, raw in enumerate(seq):
+        item_key = f"{key}[{i}]"
+        if isinstance(raw, bool):
+            raise ValueError(
+                f"Config key '{item_key}' must be a positive integer or "
+                f"{spatial_dims}-tuple of positive integers."
+            )
+        if isinstance(raw, int):
+            parsed.append(_coerce_positive_int(raw, item_key))
+            continue
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            nested = tuple(
+                _coerce_positive_int(v, f"{item_key}[{j}]")
+                for j, v in enumerate(raw)
+            )
+            if len(nested) != spatial_dims:
+                raise ValueError(
+                    f"Config key '{item_key}' must have exactly {spatial_dims} values, "
+                    f"got {len(nested)}."
+                )
+            parsed.append(nested)
+            continue
+        raise ValueError(
+            f"Config key '{item_key}' must be a positive integer or "
+            f"{spatial_dims}-tuple of positive integers."
+        )
+    return tuple(parsed)
+
+
+def _resolve_swinunetr_img_size(cfg: dict) -> tuple[int, int, int]:
+    raw = cfg.get("swinunetr_img_size", cfg.get("patch_size", [16, 128, 128]))
+    values = _coerce_positive_int_sequence(raw, "swinunetr_img_size", min_len=3)
+    if len(values) != 3:
+        raise ValueError(
+            "Config key 'swinunetr_img_size' must contain exactly 3 values (D, H, W)."
+        )
+    return cast(tuple[int, int, int], values)
+
+
+def _build_dynunet(
+    cfg: dict,
+    *,
+    in_channels: int,
+    out_channels: int,
+) -> nn.Module:
+    _register_monai_models()
+    if "dynunet" not in _MODEL_REGISTRY:
+        raise ValueError(
+            "model='dynunet' requested but MONAI is not importable. "
+            "Install the 'monai' package in this runtime."
+        )
+
+    cls = _MODEL_REGISTRY["dynunet"]
+    signature = inspect.signature(cls)
+    sig_params = signature.parameters
+
+    strides = _coerce_spatial_block_sequence(
+        cfg.get("dynunet_strides", [1, 2, 2, 2]),
+        "dynunet_strides",
+        spatial_dims=3,
+        min_len=3,
+    )
+    kernel_size = _coerce_spatial_block_sequence(
+        cfg.get("dynunet_kernel_size", [3] * len(strides)),
+        "dynunet_kernel_size",
+        spatial_dims=3,
+        min_len=len(strides),
+    )
+    if len(kernel_size) != len(strides):
+        raise ValueError(
+            "Config keys 'dynunet_kernel_size' and 'dynunet_strides' must have the "
+            f"same length, got {len(kernel_size)} and {len(strides)}."
+        )
+
+    upsample_default: tuple[int | tuple[int, ...], ...] = tuple(strides[1:])
+    upsample_kernel_size = _coerce_spatial_block_sequence(
+        cfg.get("dynunet_upsample_kernel_size", upsample_default),
+        "dynunet_upsample_kernel_size",
+        spatial_dims=3,
+        min_len=len(strides) - 1,
+    )
+    if len(upsample_kernel_size) != len(strides) - 1:
+        raise ValueError(
+            "Config key 'dynunet_upsample_kernel_size' must have length "
+            f"len(dynunet_strides)-1 ({len(strides) - 1}), got {len(upsample_kernel_size)}."
+        )
+
+    filters: tuple[int, ...] | None = None
+    if "dynunet_filters" in cfg and cfg.get("dynunet_filters") is not None:
+        filters = _coerce_positive_int_sequence(cfg["dynunet_filters"], "dynunet_filters")
+        if len(filters) != len(strides):
+            raise ValueError(
+                "Config key 'dynunet_filters' must match len(dynunet_strides), "
+                f"got {len(filters)} vs {len(strides)}."
+            )
+
+    norm_name = cfg.get("dynunet_norm_name", ("INSTANCE", {"affine": True}))
+    act_name = cfg.get(
+        "dynunet_act_name",
+        ("leakyrelu", {"inplace": True, "negative_slope": 0.01}),
+    )
+    dropout = cfg.get("dynunet_dropout", None)
+    if dropout is not None:
+        dropout = _coerce_rate(dropout, "dynunet_dropout")
+
+    if cfg.get("deep_supervision", False):
+        logger.info(
+            "Config key 'deep_supervision=true' is ignored for model='dynunet' in this repo; "
+            "forcing DynUNet deep_supervision=False."
+        )
+
+    if "deep_supervision" not in sig_params:
+        raise ValueError(
+            "Installed MONAI DynUNet signature does not expose 'deep_supervision'; "
+            "cannot enforce deep_supervision=False for this training loop."
+        )
+
+    kwargs: dict[str, Any] = {
+        "spatial_dims": 3,
+        "in_channels": in_channels,
+        "out_channels": out_channels,
+        "kernel_size": kernel_size,
+        "strides": strides,
+        "upsample_kernel_size": upsample_kernel_size,
+        "deep_supervision": False,
+    }
+
+    if "norm_name" in sig_params:
+        kwargs["norm_name"] = norm_name
+    elif "dynunet_norm_name" in cfg:
+        raise ValueError(
+            "Config key 'dynunet_norm_name' is set but this MONAI DynUNet "
+            "version does not accept 'norm_name'."
+        )
+
+    if "act_name" in sig_params:
+        kwargs["act_name"] = act_name
+    elif "dynunet_act_name" in cfg:
+        raise ValueError(
+            "Config key 'dynunet_act_name' is set but this MONAI DynUNet "
+            "version does not accept 'act_name'."
+        )
+
+    if filters is not None:
+        if "filters" in sig_params:
+            kwargs["filters"] = filters
+        else:
+            raise ValueError(
+                "Config key 'dynunet_filters' is set but this MONAI DynUNet "
+                "version does not accept 'filters'."
+            )
+
+    if dropout is not None:
+        if "dropout" in sig_params:
+            kwargs["dropout"] = dropout
+        else:
+            raise ValueError(
+                "Config key 'dynunet_dropout' is set but this MONAI DynUNet "
+                "version does not accept 'dropout'."
+            )
+
+    return cls(**kwargs)
+
+
+def _build_swinunetr(
+    cfg: dict,
+    *,
+    in_channels: int,
+    out_channels: int,
+) -> nn.Module:
+    _register_monai_models()
+    if "swinunetr" not in _MODEL_REGISTRY:
+        raise ValueError(
+            "model='swinunetr' requested but MONAI is not importable. "
+            "Install the 'monai' package in this runtime."
+        )
+
+    cls = _MODEL_REGISTRY["swinunetr"]
+    signature = inspect.signature(cls)
+    sig_params = signature.parameters
+
+    img_size = _resolve_swinunetr_img_size(cfg)
+    feature_size = _coerce_positive_int(
+        cfg.get("swinunetr_feature_size", 24),
+        "swinunetr_feature_size",
+    )
+    depths = _coerce_positive_int_sequence(
+        cfg.get("swinunetr_depths", [2, 2, 2, 2]),
+        "swinunetr_depths",
+    )
+    num_heads = _coerce_positive_int_sequence(
+        cfg.get("swinunetr_num_heads", [3, 6, 12, 24]),
+        "swinunetr_num_heads",
+    )
+    if len(depths) != len(num_heads):
+        raise ValueError(
+            "Config keys 'swinunetr_depths' and 'swinunetr_num_heads' must have "
+            f"the same length, got {len(depths)} and {len(num_heads)}."
+        )
+
+    norm_name = cfg.get("swinunetr_norm_name", "instance")
+    drop_rate = _coerce_rate(cfg.get("swinunetr_drop_rate", 0.0), "swinunetr_drop_rate")
+    attn_drop_rate = _coerce_rate(
+        cfg.get("swinunetr_attn_drop_rate", 0.0),
+        "swinunetr_attn_drop_rate",
+    )
+    dropout_path_rate = _coerce_rate(
+        cfg.get("swinunetr_dropout_path_rate", 0.0),
+        "swinunetr_dropout_path_rate",
+    )
+    use_checkpoint = bool(cfg.get("swinunetr_use_checkpoint", False))
+    use_v2 = bool(cfg.get("swinunetr_use_v2", False))
+
+    kwargs: dict[str, Any] = {
+        "in_channels": in_channels,
+        "out_channels": out_channels,
+    }
+
+    if "img_size" in sig_params:
+        kwargs["img_size"] = img_size
+    elif "swinunetr_img_size" in cfg:
+        logger.info(
+            "Ignoring config key 'swinunetr_img_size': installed MONAI SwinUNETR "
+            "signature does not accept 'img_size'."
+        )
+
+    if "feature_size" in sig_params:
+        kwargs["feature_size"] = feature_size
+    elif "swinunetr_feature_size" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_feature_size' is set but this MONAI SwinUNETR "
+            "version does not accept 'feature_size'."
+        )
+
+    if "depths" in sig_params:
+        kwargs["depths"] = depths
+    elif "swinunetr_depths" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_depths' is set but this MONAI SwinUNETR "
+            "version does not accept 'depths'."
+        )
+
+    if "num_heads" in sig_params:
+        kwargs["num_heads"] = num_heads
+    elif "swinunetr_num_heads" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_num_heads' is set but this MONAI SwinUNETR "
+            "version does not accept 'num_heads'."
+        )
+
+    if "norm_name" in sig_params:
+        kwargs["norm_name"] = norm_name
+    elif "swinunetr_norm_name" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_norm_name' is set but this MONAI SwinUNETR "
+            "version does not accept 'norm_name'."
+        )
+
+    if "drop_rate" in sig_params:
+        kwargs["drop_rate"] = drop_rate
+    elif "swinunetr_drop_rate" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_drop_rate' is set but this MONAI SwinUNETR "
+            "version does not accept 'drop_rate'."
+        )
+
+    if "attn_drop_rate" in sig_params:
+        kwargs["attn_drop_rate"] = attn_drop_rate
+    elif "swinunetr_attn_drop_rate" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_attn_drop_rate' is set but this MONAI SwinUNETR "
+            "version does not accept 'attn_drop_rate'."
+        )
+
+    if "dropout_path_rate" in sig_params:
+        kwargs["dropout_path_rate"] = dropout_path_rate
+    elif "swinunetr_dropout_path_rate" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_dropout_path_rate' is set but this MONAI SwinUNETR "
+            "version does not accept 'dropout_path_rate'."
+        )
+
+    if "use_checkpoint" in sig_params:
+        kwargs["use_checkpoint"] = use_checkpoint
+    elif "swinunetr_use_checkpoint" in cfg:
+        raise ValueError(
+            "Config key 'swinunetr_use_checkpoint' is set but this MONAI SwinUNETR "
+            "version does not accept 'use_checkpoint'."
+        )
+
+    if "spatial_dims" in sig_params:
+        kwargs["spatial_dims"] = 3
+
+    if "use_v2" in sig_params:
+        kwargs["use_v2"] = use_v2
+    elif use_v2:
+        raise ValueError(
+            "Config key 'swinunetr_use_v2=true' requested, but this MONAI SwinUNETR "
+            "version does not support the 'use_v2' argument."
+        )
+
+    return cls(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -115,7 +512,7 @@ def build_model(cfg: dict) -> nn.Module:
     cfg : dict
         Training configuration dict.  Relevant keys (common):
 
-        ``model``            — architecture name (see ``_MODEL_REGISTRY``).
+        ``model``            — architecture name (see ``_SUPPORTED_MODEL_NAMES``).
         ``modalities``       — ordered active modalities, e.g.
                                ``["t2w", "adc", "hbv"]``.
                                Legacy ``use_t2w/use_adc/use_hbv`` keys are
@@ -152,6 +549,40 @@ def build_model(cfg: dict) -> nn.Module:
         ``deconver_groups``         — NDC groups; -1 = one group per channel (default -1).
         ``deconver_ndc_ratio``      — NDC channel expansion ratio (default 4).
 
+        Additional keys for ``model: dynunet``:
+
+        ``dynunet_kernel_size``          — per-stage kernel sizes (default all 3s).
+        ``dynunet_strides``              — per-stage strides (default [1,2,2,2]).
+        ``dynunet_upsample_kernel_size`` — per-upsample kernels
+                                            (default ``dynunet_strides[1:]``).
+        ``dynunet_filters``              — optional channels per stage
+                                            (len must match ``dynunet_strides``).
+        ``dynunet_norm_name``            — MONAI norm spec
+                                            (default ``("INSTANCE", {"affine": True})``).
+        ``dynunet_act_name``             — MONAI activation spec
+                                            (default ``("leakyrelu", {...})``).
+        ``dynunet_dropout``              — dropout ratio in [0,1] (default disabled).
+        ``deep_supervision``             — ignored for DynUNet in this repo;
+                                            always forced off.
+
+        Additional keys for ``model: swinunetr``:
+
+        ``swinunetr_img_size``           — spatial size for architectures that still
+                                            require ``img_size`` (defaults to ``patch_size``).
+        ``swinunetr_feature_size``       — base embedding width (default 24).
+        ``swinunetr_depths``             — transformer depth per stage
+                                            (default [2,2,2,2]).
+        ``swinunetr_num_heads``          — attention heads per stage
+                                            (default [3,6,12,24]).
+        ``swinunetr_norm_name``          — output norm block spec
+                                            (default ``"instance"``).
+        ``swinunetr_drop_rate``          — embedding dropout in [0,1] (default 0).
+        ``swinunetr_attn_drop_rate``     — attention dropout in [0,1] (default 0).
+        ``swinunetr_dropout_path_rate``  — stochastic-depth rate in [0,1] (default 0).
+        ``swinunetr_use_checkpoint``     — enable gradient checkpointing (default false).
+        ``swinunetr_use_v2``             — enable SwinUNETR v2 path when supported by
+                                            installed MONAI.
+
     Returns
     -------
     nn.Module
@@ -160,21 +591,27 @@ def build_model(cfg: dict) -> nn.Module:
     Raises
     ------
     ValueError
-        If ``cfg["model"]`` is not present in ``_MODEL_REGISTRY``, or if
-        no modalities are active (no input channels), or if
-        ``model: deconver`` is requested but the package failed to import.
+        If ``cfg["model"]`` is unknown, no modalities are active, or a selected
+        optional architecture is unavailable in the current runtime.
     """
     name = cfg.get("model", "unet3d").lower()
 
-    if name == "deconver" and not _DECONVER_AVAILABLE:
+    if name in {"deconver", "deconver_multitask"} and not _DECONVER_AVAILABLE:
         raise ValueError(
-            "model='deconver' requested but the Deconver package could not be "
+            f"model='{name}' requested but the Deconver package could not be "
             "imported from src/models/deconver/. "
             "Check that the submodule is present and its dependencies are installed."
         )
 
-    if name not in _MODEL_REGISTRY:
-        available = list(_MODEL_REGISTRY)
+    _register_monai_models()
+    if name in _MONAI_MODEL_NAMES and name not in _MODEL_REGISTRY:
+        raise ValueError(
+            f"model='{name}' requested but MONAI is not importable. "
+            "Install the 'monai' package in this runtime."
+        )
+
+    if name not in _SUPPORTED_MODEL_NAMES:
+        available = list(_SUPPORTED_MODEL_NAMES)
         raise ValueError(
             f"Unknown model '{name}'. "
             f"Available architectures: {available}"
@@ -233,6 +670,20 @@ def build_model(cfg: dict) -> nn.Module:
             dropout=float(cfg.get("fct_dropout", 0.0)),
         )
 
+    if name == "dynunet":
+        return _build_dynunet(
+            cfg,
+            in_channels=in_channels,
+            out_channels=cfg.get("out_channels", 1),
+        )
+
+    if name == "swinunetr":
+        return _build_swinunetr(
+            cfg,
+            in_channels=in_channels,
+            out_channels=cfg.get("out_channels", 1),
+        )
+
     # -----------------------------------------------------------------------
     # UNet3D / AttentionUNet3D share the same constructor signature.
     # -----------------------------------------------------------------------
@@ -245,6 +696,8 @@ def build_model(cfg: dict) -> nn.Module:
     )
 
 
+_register_monai_models()
+
 __all__ = [
     "UNet3D",
     "AttentionUNet3D",
@@ -255,3 +708,7 @@ __all__ = [
 if _DECONVER_AVAILABLE:
     __all__.append("Deconver")
     __all__.append("DeconverMultiTask")
+if "dynunet" in _MODEL_REGISTRY:
+    __all__.append("DynUNet")
+if "swinunetr" in _MODEL_REGISTRY:
+    __all__.append("SwinUNETR")

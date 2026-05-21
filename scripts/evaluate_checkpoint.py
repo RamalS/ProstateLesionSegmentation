@@ -108,6 +108,7 @@ from roi import (  # noqa: E402
     crop_bounds_from_dict,
     keep_largest_component,
     resolve_localizer_checkpoint,
+    resolve_roi_settings,
     restore_from_roi,
     validate_task_and_roi_config,
 )
@@ -2504,7 +2505,9 @@ def main() -> None:
         logger.info("PI-CAI prostate labels directory: %s", picai_prostate_labels_dir)
 
     try:
-        task, roi_settings = validate_task_and_roi_config(cfg, dataset_type)
+        task, _ = validate_task_and_roi_config(cfg, dataset_type)
+        # Evaluation uses inference/validation behavior, so resolve the val-stage ROI.
+        roi_settings = resolve_roi_settings(cfg, stage="val")
     except Exception as exc:  # noqa: BLE001
         logger.error("Invalid evaluation configuration: %s", exc)
         sys.exit(1)

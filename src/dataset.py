@@ -42,10 +42,12 @@ import logging
 import math
 import os
 import random
+import shutil
+import socket
 import sys
-import threading
 import hashlib
 import csv
+import tempfile
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -1677,28 +1679,15 @@ class PiCaiDataset(Dataset):
         cache_path: Path,
         payload: _PreprocessedCase,
     ) -> None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(
-            f"{cache_path.suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
+        self._save_payload_to_storage_cache(
+            cache_path=cache_path,
+            payload={
+                "image": payload.image,
+                "lesion_label": payload.lesion_label,
+                "prostate_label": payload.prostate_label,
+            },
+            entry_label="storage cache entry",
         )
-        try:
-            torch.save(
-                {
-                    "image": payload.image,
-                    "lesion_label": payload.lesion_label,
-                    "prostate_label": payload.prostate_label,
-                },
-                tmp_path,
-            )
-            os.replace(tmp_path, cache_path)
-        except Exception as exc:
-            logger.warning("Could not write storage cache entry %s: %s", cache_path, exc)
-        finally:
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except Exception:
-                pass
 
     def _clone_preprocessed(self, payload: _PreprocessedCase) -> _PreprocessedCase:
         return _PreprocessedCase(
@@ -1765,27 +1754,90 @@ class PiCaiDataset(Dataset):
         cache_path: Path,
         payload: _ROICachedCase,
     ) -> None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(
-            f"{cache_path.suffix}.tmp.{os.getpid()}.{threading.get_ident()}"
+        self._save_payload_to_storage_cache(
+            cache_path=cache_path,
+            payload={
+                "image": payload.image,
+                "lesion_label": payload.lesion_label,
+                "roi": payload.roi,
+                "full_image": payload.full_image,
+                "full_lesion_label": payload.full_lesion_label,
+            },
+            entry_label="ROI storage cache entry",
         )
+
+    @staticmethod
+    def _new_storage_tmp_path(cache_path: Path) -> Path:
+        # Use mkstemp for cross-process uniqueness. PID/thread-derived names can
+        # collide across containers that share a cache mount.
+        fd, tmp_raw = tempfile.mkstemp(
+            dir=str(cache_path.parent),
+            prefix=f".{cache_path.name}.tmp.",
+            suffix=".pt",
+        )
+        os.close(fd)
+        return Path(tmp_raw)
+
+    @staticmethod
+    def _is_torch_zip_write_failure(exc: Exception) -> bool:
+        msg = str(exc)
+        return ("unexpected pos" in msg) or ("PytorchStreamWriter failed" in msg)
+
+    def _save_payload_to_storage_cache(
+        self,
+        cache_path: Path,
+        payload: dict[str, Any],
+        entry_label: str,
+    ) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Path | None = None
         try:
-            torch.save(
-                {
-                    "image": payload.image,
-                    "lesion_label": payload.lesion_label,
-                    "roi": payload.roi,
-                    "full_image": payload.full_image,
-                    "full_lesion_label": payload.full_lesion_label,
-                },
-                tmp_path,
-            )
+            tmp_path = self._new_storage_tmp_path(cache_path)
+            try:
+                torch.save(payload, tmp_path)
+            except RuntimeError as exc:
+                if not self._is_torch_zip_write_failure(exc):
+                    raise
+                logger.warning(
+                    "torch.save zip writer failed for %s %s (%s); retrying with "
+                    "legacy serialization.",
+                    entry_label,
+                    cache_path,
+                    exc,
+                )
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
+                tmp_path = self._new_storage_tmp_path(cache_path)
+                torch.save(
+                    payload,
+                    tmp_path,
+                    _use_new_zipfile_serialization=False,
+                )
             os.replace(tmp_path, cache_path)
         except Exception as exc:
-            logger.warning("Could not write ROI storage cache entry %s: %s", cache_path, exc)
+            free_space_gib = "unknown"
+            try:
+                free_space = shutil.disk_usage(cache_path.parent).free
+                free_space_gib = f"{free_space / (1024 ** 3):.2f}"
+            except Exception:
+                pass
+            logger.warning(
+                "Could not write %s %s: %s (tmp=%s, host=%s, pid=%d, "
+                "free_space_gib=%s)",
+                entry_label,
+                cache_path,
+                exc,
+                str(tmp_path) if tmp_path is not None else "-",
+                socket.gethostname(),
+                os.getpid(),
+                free_space_gib,
+            )
         finally:
             try:
-                if tmp_path.exists():
+                if tmp_path is not None and tmp_path.exists():
                     tmp_path.unlink()
             except Exception:
                 pass

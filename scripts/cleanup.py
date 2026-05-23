@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,12 +146,31 @@ def main() -> int:
         return 0
 
     deleted = 0
+    failures: list[tuple[Path, Exception]] = []
     for candidate in candidates:
         for ckpt in candidate.checkpoint_files:
-            ckpt.unlink()
-            deleted += 1
+            try:
+                ckpt.unlink()
+                deleted += 1
+            except PermissionError as exc:
+                failures.append((ckpt, exc))
+            except OSError as exc:
+                failures.append((ckpt, exc))
 
     print(f"Deleted {deleted} checkpoint file(s).")
+    if failures:
+        print(f"Failed to delete {len(failures)} checkpoint file(s):")
+        for path, exc in failures:
+            print(f"  {path}: {exc}")
+
+        blocked_runs = sorted({path.parent.parent for path, _ in failures})
+        blocked_args = " ".join(shlex.quote(str(path)) for path in blocked_runs)
+        print("Fix ownership and retry:")
+        print(
+            f'  sudo chown -R "$(id -u):$(id -g)" {blocked_args}'
+        )
+        return 1
+
     return 0
 
 

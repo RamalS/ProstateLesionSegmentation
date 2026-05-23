@@ -81,8 +81,6 @@ def get_train_transforms(
                 pos=pos_fraction,
                 neg=1.0 - pos_fraction,
                 num_samples=num_samples,
-                image_key=IMAGE_KEY,
-                image_threshold=0.0,
             ),
             # ----------------------------------------------------------
             # Spatial augmentations (applied to image AND label)

@@ -1547,6 +1547,15 @@ def main() -> None:
                 and ((epoch % val_compute_hd95_every == 0) or (epoch == epochs))
             )
 
+            logger.info(
+                "Epoch %d/%d | starting validation with patch_size=%s sw_batch_size=%d overlap=%.2f",
+                epoch,
+                epochs,
+                patch_size,
+                val_sw_batch_size,
+                sw_overlap,
+            )
+
             val_metrics, used_sw_batch_size = validate_with_oom_retry(
                 model=model,
                 loader=val_loader,

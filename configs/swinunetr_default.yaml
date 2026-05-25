@@ -54,7 +54,7 @@ swinunetr_norm_name: "instance"
 swinunetr_drop_rate: 0.0
 swinunetr_attn_drop_rate: 0.0
 swinunetr_dropout_path_rate: 0.0
-swinunetr_use_checkpoint: false
+swinunetr_use_checkpoint: true
 swinunetr_use_v2: false
 
 # Loss
@@ -70,7 +70,7 @@ warmup_epochs: 10
 
 # Validation (sliding window)
 sw_overlap: 0.50
-sw_batch_size: 2
+sw_batch_size: 1                    # SwinUNETR validation can be SIGKILLed before OOM retry at 2
 val_min_sw_batch_size: 1
 val_compute_hd95_every: 1
 val_every: 2

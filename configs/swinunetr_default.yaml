@@ -1,7 +1,7 @@
 experiment_name: swinunetr_default
 epochs: 300
 batch_size: 2
-learning_rate: 1.0e-4
+learning_rate: 2.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
 device: cuda
@@ -23,7 +23,7 @@ roi:
     mode: gt_mask
   target: prostate
   margin_mm: [9.0, 16.0, 16.0]
-  min_size_vox: [32, 96, 96]
+  min_size_vox: [32, 128, 128]
   fallback_to_full_volume: true
   gt_dataset_types: [prostate158]
   localizer_run: ""
@@ -34,7 +34,7 @@ roi:
   cache_dir: /cache/roi_cache
 
 # Patch sampling
-patch_size: [32, 96, 96]
+patch_size: [32, 128, 128]
 pos_fraction: 0.70
 num_samples: 1
 
@@ -46,7 +46,9 @@ features: [32, 64, 128, 256]       # retained for compatibility with shared trai
 deep_supervision: false             # SwinUNETR is single-output in this repo pass
 
 # SwinUNETR-specific hyperparameters (used only when model: swinunetr)
-swinunetr_img_size: [32, 96, 96]
+# NOTE: the installed MONAI SwinUNETR no longer consumes img_size; keep this
+# aligned with patch_size for compatibility with older runtimes and repo tooling.
+swinunetr_img_size: [32, 128, 128]
 swinunetr_feature_size: 24
 swinunetr_depths: [2, 2, 2, 2]
 swinunetr_num_heads: [3, 6, 12, 24]
@@ -66,11 +68,11 @@ bce_weight: 1.0
 bce_pos_weight: 10.0
 
 # LR schedule
-warmup_epochs: 10
+warmup_epochs: 8
 
 # Validation (sliding window)
 sw_overlap: 0.50
-sw_batch_size: 1                    # SwinUNETR validation can be SIGKILLed before OOM retry at 2
+sw_batch_size: 4                    # 32x128x128 fits comfortably on the current 7.5 GB GPU at 4
 val_min_sw_batch_size: 1
 val_compute_hd95_every: 1
 val_every: 2

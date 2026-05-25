@@ -567,8 +567,10 @@ def build_model(cfg: dict) -> nn.Module:
 
         Additional keys for ``model: swinunetr``:
 
-        ``swinunetr_img_size``           — spatial size for architectures that still
-                                            require ``img_size`` (defaults to ``patch_size``).
+        ``swinunetr_img_size``           — legacy spatial size for MONAI builds that
+                                            still require ``img_size``; ignored by the
+                                            installed runtime when unsupported
+                                            (defaults to ``patch_size``).
         ``swinunetr_feature_size``       — base embedding width (default 24).
         ``swinunetr_depths``             — transformer depth per stage
                                             (default [2,2,2,2]).

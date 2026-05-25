@@ -1485,8 +1485,9 @@ class PiCaiDataset(Dataset):
         case_id: str = case["case_id"]
         cache_candidate = idx in self._cache_indices
         roi_cache_candidate = idx in self._roi_cache_indices
+        roi_cache_will_store = self.roi_cache_enabled and roi_cache_candidate
 
-        if self.roi_cache_enabled and roi_cache_candidate:
+        if roi_cache_will_store:
             if self.roi_cache_mode == "ram" and idx in self._roi_cache:
                 sample = self._sample_from_roi_cache(self._clone_roi_cached(self._roi_cache[idx]))
                 sample["case_id"] = case_id
@@ -1506,7 +1507,13 @@ class PiCaiDataset(Dataset):
         # ---------------------------------------------------------------------------
         # Dataset cache lookup
         # ---------------------------------------------------------------------------
-        if self.cache_mode == "ram" and cache_candidate:
+        if roi_cache_will_store:
+            # ROI cache already stores the post-crop tensors that subsequent
+            # accesses need. Avoid writing a second full-volume dataset cache
+            # entry for the same case, which otherwise grows /cache without
+            # improving reuse once the ROI cache is populated.
+            cached = self._load_and_preprocess(case)
+        elif self.cache_mode == "ram" and cache_candidate:
             if idx in self._cache:
                 # Cache hit: return cloned tensors to prevent in-place transform
                 # mutations from corrupting the stored originals.
@@ -1527,7 +1534,7 @@ class PiCaiDataset(Dataset):
         else:
             cached = self._load_and_preprocess(case)
 
-        if self.roi_cache_enabled and roi_cache_candidate:
+        if roi_cache_will_store:
             roi_cached = self._build_roi_cached_from_preprocessed(case, cached)
             if self.roi_cache_mode == "ram":
                 self._roi_cache[idx] = self._clone_roi_cached(roi_cached)

@@ -1,7 +1,7 @@
 experiment_name: swinunetr_default
 epochs: 300
 batch_size: 2
-learning_rate: 2.0e-4
+learning_rate: 1.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
 device: cuda
@@ -35,7 +35,7 @@ roi:
 
 # Patch sampling
 patch_size: [32, 128, 128]
-pos_fraction: 0.70
+pos_fraction: 0.85
 num_samples: 1
 
 # Model
@@ -55,9 +55,9 @@ swinunetr_num_heads: [3, 6, 12, 24]
 swinunetr_norm_name: "instance"
 swinunetr_drop_rate: 0.0
 swinunetr_attn_drop_rate: 0.0
-swinunetr_dropout_path_rate: 0.0
+swinunetr_dropout_path_rate: 0.1
 swinunetr_use_checkpoint: true
-swinunetr_use_v2: false
+swinunetr_use_v2: true
 
 # Loss
 loss_fn: tversky_bce
@@ -65,7 +65,7 @@ tversky_alpha: 0.3
 tversky_beta: 0.7
 dice_weight: 1.0
 bce_weight: 1.0
-bce_pos_weight: 10.0
+bce_pos_weight: 20.0
 
 # LR schedule
 warmup_epochs: 8

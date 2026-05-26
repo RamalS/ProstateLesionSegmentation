@@ -1,7 +1,7 @@
 experiment_name: swinunetr_default
 epochs: 300
 batch_size: 2
-learning_rate: 1.0e-4
+learning_rate: 2.0e-4
 weight_decay: 1.0e-5
 num_workers: 5
 device: cuda
@@ -23,7 +23,7 @@ roi:
     mode: gt_mask
   target: prostate
   margin_mm: [9.0, 16.0, 16.0]
-  min_size_vox: [32, 128, 128]
+  min_size_vox: [16, 128, 128]
   fallback_to_full_volume: true
   gt_dataset_types: [prostate158]
   localizer_run: ""
@@ -34,9 +34,10 @@ roi:
   cache_dir: /cache/roi_cache
 
 # Patch sampling
-patch_size: [32, 128, 128]
-pos_fraction: 0.85
-num_samples: 1
+patch_size: [16, 128, 128]
+pos_fraction: 0.95
+num_samples: 2
+augmentation_profile: light
 
 # Model
 model: swinunetr                   # options: unet3d, attention_unet3d, fct, deconver, dynunet, swinunetr
@@ -48,16 +49,16 @@ deep_supervision: false             # SwinUNETR is single-output in this repo pa
 # SwinUNETR-specific hyperparameters (used only when model: swinunetr)
 # NOTE: the installed MONAI SwinUNETR no longer consumes img_size; keep this
 # aligned with patch_size for compatibility with older runtimes and repo tooling.
-swinunetr_img_size: [32, 128, 128]
-swinunetr_feature_size: 24
+swinunetr_img_size: [16, 128, 128]
+swinunetr_feature_size: 12
 swinunetr_depths: [2, 2, 2, 2]
 swinunetr_num_heads: [3, 6, 12, 24]
 swinunetr_norm_name: "instance"
 swinunetr_drop_rate: 0.0
 swinunetr_attn_drop_rate: 0.0
-swinunetr_dropout_path_rate: 0.1
+swinunetr_dropout_path_rate: 0.0
 swinunetr_use_checkpoint: true
-swinunetr_use_v2: true
+swinunetr_use_v2: false
 
 # Loss
 loss_fn: tversky_bce
@@ -65,14 +66,14 @@ tversky_alpha: 0.3
 tversky_beta: 0.7
 dice_weight: 1.0
 bce_weight: 1.0
-bce_pos_weight: 20.0
+bce_pos_weight: 50.0
 
 # LR schedule
-warmup_epochs: 8
+warmup_epochs: 20
 
 # Validation (sliding window)
 sw_overlap: 0.50
-sw_batch_size: 4                    # 32x128x128 fits comfortably on the current 7.5 GB GPU at 4
+sw_batch_size: 8                    # 16x128x128 should allow a higher inference batch
 val_min_sw_batch_size: 1
 val_compute_hd95_every: 1
 val_every: 2

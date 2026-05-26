@@ -972,6 +972,7 @@ def main() -> None:
             patch_size=patch_size,
             pos_fraction=cfg.get("pos_fraction", 0.75),
             num_samples=cfg.get("num_samples", 1),
+            augmentation_profile=cfg.get("augmentation_profile", "default"),
         ),
         cases=train_cases,
         cache_mode=cache_mode,

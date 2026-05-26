@@ -40,6 +40,7 @@ def get_train_transforms(
     patch_size: tuple[int, ...] = (20, 128, 128),
     pos_fraction: float = 0.75,
     num_samples: int = 1,
+    augmentation_profile: str = "default",
 ) -> T.Compose:
     """
     Return a composed MONAI transform for training.
@@ -55,7 +56,52 @@ def get_train_transforms(
     num_samples   : number of patches to extract per __getitem__ call.
                     Increase alongside monai.data.list_data_collate for higher
                     GPU utilisation per volume load.
+    augmentation_profile : augmentation preset. ``"default"`` keeps the
+                    existing stronger pipeline; ``"light"`` reduces geometric
+                    and intensity perturbations for transformer-style models
+                    that are prone to collapsing into near-background
+                    predictions early in training.
     """
+    profile = str(augmentation_profile).strip().lower()
+    if profile not in {"default", "light"}:
+        raise ValueError(
+            "augmentation_profile must be 'default' or 'light', "
+            f"got {augmentation_profile!r}."
+        )
+
+    if profile == "light":
+        rotate90_prob = 0.3
+        affine_prob = 0.2
+        affine_rotate = (0.10, 0.10, 0.10)
+        affine_scale = (0.05, 0.05, 0.05)
+        elastic_prob = 0.05
+        elastic_sigma = (6, 8)
+        elastic_magnitude = (20, 60)
+        noise_prob = 0.15
+        smooth_prob = 0.15
+        intensity_scale_prob = 0.2
+        intensity_shift_prob = 0.2
+        contrast_prob = 0.15
+        bias_field_prob = 0.15
+        gibbs_prob = 0.1
+        coarse_dropout_prob = 0.1
+    else:
+        rotate90_prob = 0.5
+        affine_prob = 0.5
+        affine_rotate = (0.26, 0.26, 0.26)
+        affine_scale = (0.1, 0.1, 0.1)
+        elastic_prob = 0.2
+        elastic_sigma = (5, 7)
+        elastic_magnitude = (50, 150)
+        noise_prob = 0.3
+        smooth_prob = 0.3
+        intensity_scale_prob = 0.4
+        intensity_shift_prob = 0.4
+        contrast_prob = 0.3
+        bias_field_prob = 0.3
+        gibbs_prob = 0.2
+        coarse_dropout_prob = 0.2
+
     return T.Compose(
         [
             # ----------------------------------------------------------
@@ -90,16 +136,16 @@ def get_train_transforms(
             T.RandFlipd(keys=_BOTH, prob=0.5, spatial_axis=2),   # x axis
             T.RandRotate90d(
                 keys=_BOTH,
-                prob=0.5,
+                prob=rotate90_prob,
                 max_k=3,
                 spatial_axes=(1, 2),  # rotate in the axial (y-x) plane only
             ),
             T.RandAffined(
                 keys=_BOTH,
                 mode=("bilinear", "nearest"),  # bilinear for image, NN for label
-                prob=0.5,
-                rotate_range=(0.26, 0.26, 0.26),  # ±~15° per axis (was ±8.6°)
-                scale_range=(0.1, 0.1, 0.1),      # ±10% isotropic scaling
+                prob=affine_prob,
+                rotate_range=affine_rotate,
+                scale_range=affine_scale,
                 padding_mode="border",
             ),
             # Elastic deformation: simulates prostate shape changes due to
@@ -109,9 +155,9 @@ def get_train_transforms(
             T.Rand3DElasticd(
                 keys=_BOTH,
                 mode=("bilinear", "nearest"),
-                prob=0.2,
-                sigma_range=(5, 7),
-                magnitude_range=(50, 150),
+                prob=elastic_prob,
+                sigma_range=elastic_sigma,
+                magnitude_range=elastic_magnitude,
                 padding_mode="border",
             ),
             # ----------------------------------------------------------
@@ -119,13 +165,13 @@ def get_train_transforms(
             # ----------------------------------------------------------
             T.RandGaussianNoised(
                 keys=[IMAGE_KEY],
-                prob=0.3,
+                prob=noise_prob,
                 mean=0.0,
                 std=0.1,
             ),
             T.RandGaussianSmoothd(
                 keys=[IMAGE_KEY],
-                prob=0.3,
+                prob=smooth_prob,
                 sigma_x=(0.5, 1.5),
                 sigma_y=(0.5, 1.5),
                 sigma_z=(0.5, 1.5),
@@ -133,19 +179,19 @@ def get_train_transforms(
             T.RandScaleIntensityd(
                 keys=[IMAGE_KEY],
                 factors=0.2,   # scales by U(1-0.2, 1+0.2)
-                prob=0.4,
+                prob=intensity_scale_prob,
             ),
             T.RandShiftIntensityd(
                 keys=[IMAGE_KEY],
                 offsets=0.2,   # shifts by U(-0.2, 0.2)
-                prob=0.4,
+                prob=intensity_shift_prob,
             ),
             # Gamma contrast: simulates intensity response differences between
             # scanner vendors (Siemens vs Philips) and acquisition protocols
             # across the 4 PI-CAI acquisition centers.
             T.RandAdjustContrastd(
                 keys=[IMAGE_KEY],
-                prob=0.3,
+                prob=contrast_prob,
                 gamma=(0.7, 1.5),
             ),
             # MRI B1 field inhomogeneity: simulates spatially varying receive
@@ -154,7 +200,7 @@ def get_train_transforms(
             # ADC, HBV) has its own coil geometry and field profile.
             T.RandBiasFieldd(
                 keys=[IMAGE_KEY],
-                prob=0.3,
+                prob=bias_field_prob,
                 coeff_range=(0.0, 0.3),
             ),
             # Gibbs/ringing artifact: simulates MRI k-space truncation, which
@@ -162,7 +208,7 @@ def get_train_transforms(
             # T2w and high-b-value DWI acquisitions.
             T.RandGibbsNoised(
                 keys=[IMAGE_KEY],
-                prob=0.2,
+                prob=gibbs_prob,
                 alpha=(0.0, 0.5),
             ),
             # Coarse dropout: randomly zeros rectangular 3-D regions, forcing
@@ -173,7 +219,7 @@ def get_train_transforms(
                 holes=3,
                 spatial_size=(4, 16, 16),
                 fill_value=0.0,
-                prob=0.2,
+                prob=coarse_dropout_prob,
             ),
         ]
     )

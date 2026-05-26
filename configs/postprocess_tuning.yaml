@@ -1,0 +1,24 @@
+# Post-processing tuning preset for already-trained lesion models.
+#
+# This does not train or update neural-network weights. Evaluation loads the
+# checkpoint, runs inference on the original validation split, caches logits,
+# then searches only these post-processing parameters. The held-out test set is
+# still used only for normal evaluation reporting.
+postprocess_tuning:
+  enabled: true
+
+  # Sigmoid threshold grid for logits -> binary prediction.
+  # Inclusive range syntax is start:stop:step.
+  threshold_grid: "0.25:0.85:0.025"
+
+  # Minimum connected-component volume in mm^3.
+  # 0 disables component filtering for that sweep entry.
+  min_component_volume_mm3_grid: [0, 10, 30, 50, 75, 100, 150, 200, 300, 500]
+
+  # Ranking objective:
+  # - dice: maximize overlap on positive cases
+  # - precision: prefer fewer false-positive voxels on positive cases
+  # - sensitivity: prefer fewer missed lesion voxels
+  # - balanced: weighted Dice/precision/sensitivity
+  # - fp_penalized: balanced score minus penalty for predictions on negative cases
+  objective: fp_penalized

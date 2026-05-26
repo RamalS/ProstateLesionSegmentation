@@ -78,7 +78,7 @@ val_every: 1
 val_start_epoch: 1
 
 # Prediction / post-processing
-pred_threshold: 0.3
+pred_threshold: 0.5
 postprocess_enabled: false
 postprocess_min_component_volume_mm3: 30.0
 postprocess_connectivity: 26
@@ -98,8 +98,8 @@ pretrained_encoder_checkpoint: ""
 freeze_encoder_epochs: 0
 
 # Best checkpoint selection
-best_ckpt_w_sensitivity: 0.6
-best_ckpt_w_dice: 0.4
+best_ckpt_w_sensitivity: 0.0
+best_ckpt_w_dice: 1.0
 best_ckpt_w_hd95: 0.0
 best_ckpt_hd95_scale: 10.0
 

@@ -10,7 +10,7 @@ for arg in "$@"; do
     --local)
       USE_LOCAL=true
       ;;
-    train|pretrain|tensorboard|smoke-test|shell|evaluate|learnability|download|visualize-3d|visualize-3d-app|report-runs|explain-case)
+    train|pretrain|tensorboard|smoke-test|shell|evaluate|tune-postprocess|learnability|download|visualize-3d|visualize-3d-app|report-runs|explain-case)
       MODE="$arg"
       ;;
     *)
@@ -58,6 +58,11 @@ case "$MODE" in
     cd "$PROJECT_ROOT"
     PYTHONPATH="$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/evaluate_checkpoint.py" "${EXTRA_ARGS[@]}"
     ;;
+  tune-postprocess)
+    echo "Running post-processing tuning..."
+    cd "$PROJECT_ROOT"
+    PYTHONPATH="$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/tune_postprocess.py" "${EXTRA_ARGS[@]}"
+    ;;
   visualize-3d)
     echo "Running 3D visualizer..."
     cd "$PROJECT_ROOT"
@@ -95,7 +100,7 @@ case "$MODE" in
     ;;
   *)
     echo "Unknown mode: $MODE"
-    echo "Available modes: train | pretrain | tensorboard | smoke-test | evaluate | visualize-3d | visualize-3d-app | report-runs | explain-case | learnability | download | shell"
+    echo "Available modes: train | pretrain | tensorboard | smoke-test | evaluate | tune-postprocess | visualize-3d | visualize-3d-app | report-runs | explain-case | learnability | download | shell"
     exit 1
     ;;
 esac

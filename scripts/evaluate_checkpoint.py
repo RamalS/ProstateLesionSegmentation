@@ -186,6 +186,13 @@ class BatchEvalJob:
     external_model_version: str = ""
 
 
+@dataclass(frozen=True)
+class BatchWorkflow:
+    """Interactive selector workflow mode."""
+    key: str
+    label: str
+
+
 _ROI_BOUNDS_CACHE_VERSION = 1
 _PICAI_GT_MASK_SENTINEL_PROSTATE_COL = "__picai_gt_mask__"
 
@@ -1385,6 +1392,60 @@ def _checkbox_menu(
         return []
 
 
+def _single_choice_menu(
+    title: str,
+    options: list[str],
+    *,
+    default_idx: int = 0,
+) -> int:
+    """Curses single-choice UI. Returns -1 on abort."""
+    if not options:
+        return -1
+    if not sys.stdin.isatty():
+        return max(0, min(default_idx, len(options) - 1))
+
+    selected_idx = max(0, min(default_idx, len(options) - 1))
+
+    def _draw(stdscr: curses.window) -> None:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        help_line = "↑/↓ move   Enter confirm   q quit"
+        stdscr.addstr(0, 0, title[: max_x - 1], curses.A_BOLD)
+        stdscr.addstr(1, 0, help_line[: max_x - 1], curses.A_DIM)
+        stdscr.addstr(2, 0, ("─" * (max_x - 1))[: max_x - 1])
+        visible = max(1, max_y - 4)
+        start = max(0, min(selected_idx - visible // 2, len(options) - visible))
+        for offset, row_idx in enumerate(range(start, min(len(options), start + visible))):
+            y = 3 + offset
+            mark = "(*)"
+            prefix = "▶ " if row_idx == selected_idx else "  "
+            line = f"{prefix}{mark} {options[row_idx]}"
+            attr = curses.A_REVERSE if row_idx == selected_idx else curses.A_NORMAL
+            stdscr.addstr(y, 0, line[: max_x - 1], attr)
+        stdscr.refresh()
+
+    def _run(stdscr: curses.window) -> int:
+        nonlocal selected_idx
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        while True:
+            _draw(stdscr)
+            key = stdscr.getch()
+            if key in (curses.KEY_UP, ord("k")):
+                selected_idx = max(0, selected_idx - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected_idx = min(len(options) - 1, selected_idx + 1)
+            elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+                return selected_idx
+            elif key in (ord("q"), ord("Q"), 27):
+                return -1
+
+    try:
+        return curses.wrapper(_run)
+    except KeyboardInterrupt:
+        return -1
+
+
 def _select_datasets_for_batch() -> list[str]:
     """Interactive dataset checkbox step."""
     keys = ["picai", "prostate158"]
@@ -1396,6 +1457,21 @@ def _select_datasets_for_batch() -> list[str]:
         all_label="All datasets",
     )
     return [keys[i] for i in chosen]
+
+
+def _select_workflow_for_batch() -> str:
+    """Interactive workflow selection step."""
+    workflows = [
+        BatchWorkflow("evaluate", "Evaluate only"),
+        BatchWorkflow("tune", "Tune postprocess only"),
+        BatchWorkflow("both", "Evaluate + tune postprocess"),
+    ]
+    chosen = _single_choice_menu(
+        title="Workflow",
+        options=[w.label for w in workflows],
+        default_idx=0,
+    )
+    return workflows[chosen].key if chosen >= 0 else ""
 
 
 def _select_models_for_batch(candidates: list[ModelCandidate]) -> list[ModelCandidate]:
@@ -1657,6 +1733,54 @@ def _batch_command_for_job(job: BatchEvalJob, args: argparse.Namespace) -> list[
     return cmd
 
 
+def _batch_tune_command_for_job(job: BatchEvalJob, args: argparse.Namespace) -> list[str] | None:
+    """Build subprocess argv for one post-processing tuning job."""
+    if job.run_dir is None or job.checkpoint is None:
+        return None
+
+    tune_script = Path(__file__).resolve().parent / "tune_postprocess.py"
+    summary_name = job.summary_json.name.replace(
+        "evaluation_summary",
+        "postprocess_tuning_summary",
+        1,
+    )
+    if summary_name == job.summary_json.name:
+        summary_name = f"{job.run_dir.name}_{job.dataset_type}_{_roi_tag(job.roi_mode, job.roi_localizer_run)}_postprocess_tuning_summary.json"
+    summary_path = (job.summary_json.parent / summary_name).resolve()
+
+    cmd = [
+        sys.executable,
+        str(tune_script),
+        "--run", str(job.run_dir),
+        "--checkpoint", str(job.checkpoint),
+        "--config", str(Path(getattr(args, "tune_config", "") or "configs/postprocess_tuning.yaml")),
+        "--dataset-type", job.dataset_type,
+        "--summary-json", str(summary_path),
+    ]
+    if job.roi_mode:
+        cmd.extend(["--roi-mode", job.roi_mode])
+    if job.roi_localizer_run and not job.roi_localizer_external_model_id:
+        cmd.extend(["--roi-localizer-run", job.roi_localizer_run])
+    if job.roi_localizer_external_model_id:
+        cmd.extend(["--roi-localizer-external-model", job.roi_localizer_external_model_id])
+    if job.roi_localizer_external_model_version:
+        cmd.extend(["--roi-localizer-external-model-version", job.roi_localizer_external_model_version])
+    if args.prostate158_root:
+        cmd.extend(["--prostate158-root", args.prostate158_root])
+    if args.prostate158_label_reader:
+        cmd.extend(["--prostate158-label-reader", args.prostate158_label_reader])
+    if args.prostate158_prostate_label_col:
+        cmd.extend(["--prostate158-prostate-label-col", args.prostate158_prostate_label_col])
+    picai_prostate_labels_dir = str(getattr(args, "picai_prostate_labels_dir", "")).strip()
+    if picai_prostate_labels_dir:
+        cmd.extend(["--picai-prostate-labels-dir", picai_prostate_labels_dir])
+    if args.device:
+        cmd.extend(["--device", args.device])
+    if args.sw_batch_size is not None:
+        cmd.extend(["--sw-batch-size", str(args.sw_batch_size)])
+    return cmd
+
+
 def _run_interactive_batch(args: argparse.Namespace) -> None:
     """Top-level interactive selector flow for dataset/model/ROI batch evaluation."""
     if not sys.stdin.isatty():
@@ -1670,6 +1794,11 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         sys.exit(1)
     roi_localizer_candidates = _discover_roi_localizer_candidates(runs_root)
     external_roi_localizer_candidates = _discover_external_roi_localizer_candidates()
+
+    workflow = _select_workflow_for_batch()
+    if not workflow:
+        print("Aborted.")
+        sys.exit(0)
 
     datasets = _select_datasets_for_batch()
     if not datasets:
@@ -1724,11 +1853,24 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    _section("Batch Evaluation Plan")
+    _section("Batch Selector Plan")
+    print(
+        "  Workflow         : "
+        + {
+            "evaluate": "Evaluate only",
+            "tune": "Tune postprocess only",
+            "both": "Evaluate + tune postprocess",
+        }[workflow]
+    )
     print(f"  Models selected  : {len(selected_models)}")
     print(f"  Datasets         : {datasets}")
     print(f"  ROI variants     : {len(roi_variants)}")
-    print(f"  Total jobs       : {len(jobs)}")
+    print(f"  Eval jobs        : {len(jobs) if workflow in {'evaluate', 'both'} else 0}")
+    tune_jobs = [job for job in jobs if job.run_dir is not None]
+    skipped_tune_jobs = len(jobs) - len(tune_jobs)
+    print(f"  Tune jobs        : {len(tune_jobs) if workflow in {'tune', 'both'} else 0}")
+    if workflow in {"tune", "both"} and skipped_tune_jobs:
+        print(f"  Tune skipped     : {skipped_tune_jobs} external model job(s)")
 
     preview_n = min(8, len(jobs))
     if preview_n:
@@ -1753,7 +1895,11 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         if len(jobs) > preview_n:
             print(f"    ... ({len(jobs) - preview_n} more)")
 
-    proceed = input(f"\nRun {len(jobs)} evaluation job(s)? [y/N]: ").strip().lower()
+    requested_jobs = (
+        (len(jobs) if workflow in {"evaluate", "both"} else 0)
+        + (len(tune_jobs) if workflow in {"tune", "both"} else 0)
+    )
+    proceed = input(f"\nRun {requested_jobs} selected job(s)? [y/N]: ").strip().lower()
     if proceed not in {"y", "yes"}:
         print("Aborted.")
         sys.exit(0)
@@ -1779,18 +1925,33 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         print(f"  Task       : {job.task}")
         print(f"  ROI        : {roi_desc}")
 
-        cmd = _batch_command_for_job(job, args)
-        rc = subprocess.run(cmd).returncode
-        if rc != 0:
-            failures += 1
-            logger.error(
-                "Batch job failed (rc=%d): model=%s checkpoint=%s dataset=%s roi=%s",
-                rc,
-                model_desc,
-                ckpt_desc,
-                job.dataset_type,
-                roi_desc,
-            )
+        commands: list[tuple[str, list[str]]] = []
+        if workflow in {"evaluate", "both"}:
+            commands.append(("evaluation", _batch_command_for_job(job, args)))
+        if workflow in {"tune", "both"}:
+            tune_cmd = _batch_tune_command_for_job(job, args)
+            if tune_cmd is None:
+                logger.info(
+                    "Skipping postprocess tuning for external model: %s",
+                    model_desc,
+                )
+            else:
+                commands.append(("postprocess tuning", tune_cmd))
+
+        for command_label, cmd in commands:
+            print(f"\n  Running {command_label}...")
+            rc = subprocess.run(cmd).returncode
+            if rc != 0:
+                failures += 1
+                logger.error(
+                    "Batch %s job failed (rc=%d): model=%s checkpoint=%s dataset=%s roi=%s",
+                    command_label,
+                    rc,
+                    model_desc,
+                    ckpt_desc,
+                    job.dataset_type,
+                    roi_desc,
+                )
 
     if failures:
         logger.error("Batch run finished with %d failed job(s).", failures)
@@ -2651,7 +2812,6 @@ def main() -> None:
         f"(min_component_volume_mm3={postprocess_min_component_volume_mm3:.1f}, "
         f"connectivity={postprocess_connectivity})"
     )
-
     # ---- Inference loop ---------------------------------------------------------
     per_case: list[dict] = []
     vis_data: list[dict] = []          # volumetric arrays for up to 5 positive cases

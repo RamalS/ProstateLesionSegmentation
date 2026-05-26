@@ -524,6 +524,11 @@ def validate(
     n_all = 0   # total volumes processed
 
     hd95_values: list[float] = []
+    prob_mean_sum = 0.0
+    prob_max_sum = 0.0
+    pred_pos_fraction_sum = 0.0
+    pred_pos_cases = 0
+    target_pos_fraction_sum = 0.0
 
     autocast_device = "cuda" if device.type == "cuda" else "cpu"
 
@@ -559,6 +564,17 @@ def validate(
             if "roi" in batch:
                 roi_batch = _roi_bounds_from_collated_batch(batch["roi"])
                 logits = restore_from_roi(logits, roi_batch)
+
+            probs = torch.sigmoid(logits)
+            pred_bin = (probs > threshold).float()
+            prob_mean_sum += float(probs.mean().item())
+            prob_max_sum += float(probs.amax().item())
+            pred_pos_fraction = float(pred_bin.mean().item())
+            pred_pos_fraction_sum += pred_pos_fraction
+            if pred_pos_fraction > 0.0:
+                pred_pos_cases += 1
+            target_pos_fraction_sum += float(labels.float().mean().item())
+
             metric_logits, _ = postprocess_logits(
                 logits=logits,
                 threshold=threshold,
@@ -587,7 +603,7 @@ def validate(
             if not math.isnan(m["hd95"]):
                 hd95_values.append(m["hd95"])
 
-            del metric_logits, logits, images, labels, m
+            del metric_logits, logits, probs, pred_bin, images, labels, m
 
     if n_all == 0:
         return {"dice": float("nan"), "iou": float("nan"),
@@ -598,6 +614,11 @@ def validate(
         "hd95": float(sum(hd95_values) / len(hd95_values)) if hd95_values else float("nan"),
         "n_pos": float(n_pos),
         "n_all": float(n_all),
+        "prob_mean": prob_mean_sum / n_all,
+        "prob_max": prob_max_sum / n_all,
+        "pred_pos_fraction": pred_pos_fraction_sum / n_all,
+        "pred_pos_case_rate": pred_pos_cases / n_all,
+        "target_pos_fraction": target_pos_fraction_sum / n_all,
     }
     if n_pos > 0:
         for k in pos_sums:
@@ -1587,6 +1608,11 @@ def main() -> None:
             writer.add_scalar("val/iou",         val_metrics["iou"],         epoch)
             writer.add_scalar("val/sensitivity", val_metrics["sensitivity"], epoch)
             writer.add_scalar("val/precision",   val_metrics["precision"],   epoch)
+            writer.add_scalar("val/prob_mean", val_metrics["prob_mean"], epoch)
+            writer.add_scalar("val/prob_max", val_metrics["prob_max"], epoch)
+            writer.add_scalar("val/pred_pos_fraction", val_metrics["pred_pos_fraction"], epoch)
+            writer.add_scalar("val/pred_pos_case_rate", val_metrics["pred_pos_case_rate"], epoch)
+            writer.add_scalar("val/target_pos_fraction", val_metrics["target_pos_fraction"], epoch)
             if not math.isnan(val_metrics["hd95"]):
                 writer.add_scalar("val/hd95", val_metrics["hd95"], epoch)
 
@@ -1597,7 +1623,10 @@ def main() -> None:
             logger.info(
                 "Epoch %d/%d | val_dice=%s | val_iou=%s"
                 " | val_sens=%s | val_prec=%s | val_hd95=%s"
-                " | pos_cases=%d/%d",
+                " | pos_cases=%d/%d"
+                " | prob_mean=%.4f | prob_max=%.4f"
+                " | pred_pos_frac=%.6f | pred_pos_case_rate=%.4f"
+                " | target_pos_frac=%.6f",
                 epoch, epochs,
                 _fmt(val_metrics["dice"]),
                 _fmt(val_metrics["iou"]),
@@ -1605,6 +1634,11 @@ def main() -> None:
                 _fmt(val_metrics["precision"]),
                 hd95_str,
                  n_pos_val, n_all_val,
+                val_metrics["prob_mean"],
+                val_metrics["prob_max"],
+                val_metrics["pred_pos_fraction"],
+                val_metrics["pred_pos_case_rate"],
+                val_metrics["target_pos_fraction"],
             )
 
             # ---- Composite score: best.pt selection + early stopping ----

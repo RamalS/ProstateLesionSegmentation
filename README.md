@@ -37,8 +37,9 @@ src/                        # All importable source code (PYTHONPATH=.)
   utils.py                  # Shared helpers (checkpointing, run directories, composite score, encoder transfer)
 scripts/
   smoke_test.py             # Manual integration smoke test
-  start.sh                  # Docker entrypoint dispatcher (train|pretrain|tensorboard|smoke-test|evaluate|visualize-3d|visualize-3d-app|report-runs|learnability|download|shell)
+  start.sh                  # Docker entrypoint dispatcher (train|pretrain|tensorboard|smoke-test|evaluate|tune-postprocess|visualize-3d|visualize-3d-app|report-runs|learnability|download|shell)
   evaluate_checkpoint.py    # Evaluate a saved checkpoint on the hold-out test set
+  tune_postprocess.py       # Tune frozen-model post-processing on the validation split
   report_pipeline.py        # Orchestrate evaluate + GIF export + run report regeneration
   visualize_3d.py           # Interactive 3-D HTML visualizer (GT only or GT vs model prediction)
   visualize_3d_app.py       # Streamlit localhost app wrapper for visualize_3d.py
@@ -61,6 +62,8 @@ configs/
   pretrain_local.yaml       # Local SSL pretraining config
   prostate158_default.yaml  # Docker supervised Prostate158 config
   prostate158_local.yaml    # Local supervised Prostate158 config
+  postprocess_tuning.yaml       # Normal grid/objective for tune-postprocess
+  postprocess_tuning_light.yaml # Lightweight tune-postprocess grid for quick iteration
 ```
 
 ---
@@ -306,6 +309,8 @@ PYTHONPATH=. python scripts/count_positives.py \
 | 3-D visualizer (GT vs model) | `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>` |
 | 3-D visualizer app (localhost) | `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501` |
 | Evaluate checkpoint | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name>` |
+| Tune post-processing (light) | `docker compose run --rm trainer tune-postprocess --run /outputs/runs/<run_name> --checkpoint best.pt --config /workspace/configs/postprocess_tuning_light.yaml` |
+| Tune post-processing (normal) | `docker compose run --rm trainer tune-postprocess --run /outputs/runs/<run_name> --checkpoint best.pt --config /workspace/configs/postprocess_tuning.yaml` |
 | Evaluate external MONAI prostate baseline | `docker compose run --rm trainer evaluate --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1` |
 | Evaluate with external MONAI ROI localizer | `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1` |
 | Generate run report | `docker compose run --rm trainer report-runs --visualizations-dir /workspace/visualizations --output /workspace/report.md` |

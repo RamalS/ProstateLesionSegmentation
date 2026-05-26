@@ -1,0 +1,14 @@
+# Lightweight post-processing tuning preset for quick iteration.
+#
+# This uses the same validation-split tuning flow as postprocess_tuning.yaml,
+# but searches a much smaller grid to reduce CPU-heavy metric/connected-
+# component work.
+postprocess_tuning:
+  enabled: true
+
+  # 5 thresholds x 4 component-volume settings = 20 sweep entries.
+  threshold_grid: "0.35:0.75:0.10"
+  min_component_volume_mm3_grid: [0, 30, 100, 300]
+
+  # Keep the same objective as the normal preset so results are comparable.
+  objective: fp_penalized

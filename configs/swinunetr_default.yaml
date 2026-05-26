@@ -23,7 +23,7 @@ roi:
     mode: gt_mask
   target: prostate
   margin_mm: [9.0, 16.0, 16.0]
-  min_size_vox: [16, 128, 128]
+  min_size_vox: [32, 128, 128]
   fallback_to_full_volume: true
   gt_dataset_types: [prostate158]
   localizer_run: ""
@@ -34,7 +34,7 @@ roi:
   cache_dir: /cache/roi_cache
 
 # Patch sampling
-patch_size: [16, 128, 128]
+patch_size: [32, 128, 128]
 pos_fraction: 0.95
 num_samples: 2
 augmentation_profile: light
@@ -49,7 +49,7 @@ deep_supervision: false             # SwinUNETR is single-output in this repo pa
 # SwinUNETR-specific hyperparameters (used only when model: swinunetr)
 # NOTE: the installed MONAI SwinUNETR no longer consumes img_size; keep this
 # aligned with patch_size for compatibility with older runtimes and repo tooling.
-swinunetr_img_size: [16, 128, 128]
+swinunetr_img_size: [32, 128, 128]
 swinunetr_feature_size: 12
 swinunetr_depths: [2, 2, 2, 2]
 swinunetr_num_heads: [3, 6, 12, 24]
@@ -73,7 +73,7 @@ warmup_epochs: 20
 
 # Validation (sliding window)
 sw_overlap: 0.50
-sw_batch_size: 8                    # 16x128x128 should allow a higher inference batch
+sw_batch_size: 4                    # 32x128x128 keeps inference geometry valid for SwinUNETR
 val_min_sw_batch_size: 1
 val_compute_hd95_every: 1
 val_every: 2

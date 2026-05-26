@@ -217,13 +217,27 @@ def _coerce_spatial_block_sequence(
 
 
 def _resolve_swinunetr_img_size(cfg: dict) -> tuple[int, int, int]:
-    raw = cfg.get("swinunetr_img_size", cfg.get("patch_size", [16, 128, 128]))
+    raw = cfg.get("swinunetr_img_size", cfg.get("patch_size", [32, 128, 128]))
     values = _coerce_positive_int_sequence(raw, "swinunetr_img_size", min_len=3)
     if len(values) != 3:
         raise ValueError(
             "Config key 'swinunetr_img_size' must contain exactly 3 values (D, H, W)."
         )
     return cast(tuple[int, int, int], values)
+
+
+def _validate_swinunetr_spatial_size(
+    size: tuple[int, int, int],
+    *,
+    key: str,
+    divisor: int = 32,
+) -> None:
+    bad_axes = [idx for idx, dim in enumerate(size) if dim % divisor != 0]
+    if bad_axes:
+        raise ValueError(
+            f"Config key '{key}'={size} is invalid for SwinUNETR: spatial dimensions "
+            f"{bad_axes} must be divisible by {divisor}."
+        )
 
 
 def _build_dynunet(
@@ -369,6 +383,7 @@ def _build_swinunetr(
     sig_params = signature.parameters
 
     img_size = _resolve_swinunetr_img_size(cfg)
+    _validate_swinunetr_spatial_size(img_size, key="swinunetr_img_size")
     feature_size = _coerce_positive_int(
         cfg.get("swinunetr_feature_size", 24),
         "swinunetr_feature_size",
@@ -404,6 +419,12 @@ def _build_swinunetr(
         "in_channels": in_channels,
         "out_channels": out_channels,
     }
+
+    if "patch_size" in cfg:
+        patch_size = _coerce_positive_int_sequence(cfg.get("patch_size"), "patch_size", min_len=3)
+        if len(patch_size) != 3:
+            raise ValueError("Config key 'patch_size' must contain exactly 3 values (D, H, W).")
+        _validate_swinunetr_spatial_size(cast(tuple[int, int, int], patch_size), key="patch_size")
 
     if "img_size" in sig_params:
         kwargs["img_size"] = img_size

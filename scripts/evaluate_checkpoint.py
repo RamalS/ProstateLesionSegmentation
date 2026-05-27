@@ -69,6 +69,9 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 from monai.inferers import sliding_window_inference
+from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import auc, precision_recall_curve, roc_curve
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -86,8 +89,10 @@ from dataset import (  # noqa: E402
     _prepare_case_image_tensor,
     annotate_cases_with_lesion_flags,
     active_modality_pairs,
+    default_split_manifest_path,
     discover_cases,
     discover_prostate158_cases,
+    load_split_manifest,
 )
 from external_models import (  # noqa: E402
     MonaiBundleProstateMaskAdapter,
@@ -173,6 +178,7 @@ class BatchEvalJob:
     """One concrete evaluation job in interactive batch mode."""
     model_source: str
     dataset_type: str
+    eval_split: str
     task: str
     roi_mode: str
     roi_localizer_run: str
@@ -209,6 +215,152 @@ def _fmt(v: float) -> str:
 def _json_float(v: float) -> float | None:
     """Convert metric to JSON-safe float; return null for NaN/inf."""
     return float(v) if math.isfinite(v) else None
+
+
+_PICAI_LABEL_STRUCTURE = np.ones((3, 3, 3), dtype=np.uint8)
+
+
+def _picai_iou(a: np.ndarray, b: np.ndarray) -> float:
+    """Official PI-CAI default overlap basis: lesion IoU."""
+    intersection = float(np.logical_and(a, b).sum())
+    union = float(np.logical_or(a, b).sum())
+    return (intersection + 1e-8) / (union + 1e-8)
+
+
+def _detection_map_from_probability(
+    prob_zyx: np.ndarray,
+    pred_mask_zyx: np.ndarray,
+) -> np.ndarray:
+    """
+    Convert voxel probabilities into a PI-CAI detection map.
+
+    PI-CAI expects each connected lesion candidate to have one confidence
+    value. We use the max probability inside each post-threshold/postprocessed
+    component, matching the official case-confidence default of max score.
+    """
+    mask = pred_mask_zyx.astype(bool, copy=False)
+    labels, num_components = ndimage.label(mask, structure=_PICAI_LABEL_STRUCTURE)
+    det = np.zeros_like(prob_zyx, dtype=np.float32)
+    for component_id in range(1, num_components + 1):
+        component = labels == component_id
+        det[component] = float(prob_zyx[component].max())
+    return det
+
+
+def _picai_evaluate_case(
+    det_zyx: np.ndarray,
+    target_zyx: np.ndarray,
+    min_overlap: float = 0.10,
+) -> tuple[list[tuple[int, float, float]], float]:
+    """
+    PI-CAI lesion matching for one case.
+
+    Mirrors picai_eval defaults: 26-connected components, IoU >= 0.1 hit
+    criterion, Hungarian assignment prioritizing the number of matches, and
+    unmatched candidates that overlap a matched GT lesion sufficiently are
+    ignored rather than counted as FPs.
+    """
+    det = det_zyx.astype(np.float32, copy=False)
+    target = (target_zyx > 0).astype(np.int32, copy=False)
+    if det.min(initial=0.0) < 0.0:
+        raise ValueError("PI-CAI detection confidences must be non-negative.")
+
+    pred_labels, num_pred = ndimage.label(det > 0, structure=_PICAI_LABEL_STRUCTURE)
+    pred_ids = np.arange(num_pred)
+    confidences = {
+        pred_id: float(det[pred_labels == (pred_id + 1)].max())
+        for pred_id in pred_ids
+    }
+    case_confidence = float(det.max(initial=0.0))
+    lesion_results: list[tuple[int, float, float]] = []
+
+    if not target.any():
+        lesion_results.extend((0, confidence, 0.0) for confidence in confidences.values())
+        return lesion_results, case_confidence
+
+    gt_labels, num_gt = ndimage.label(target, structure=_PICAI_LABEL_STRUCTURE)
+    gt_ids = np.arange(num_gt)
+    overlap_matrix = np.zeros((num_gt, num_pred), dtype=np.float64)
+
+    for gt_id in gt_ids:
+        gt_mask = gt_labels == (gt_id + 1)
+        for pred_id in pred_ids:
+            pred_mask = pred_labels == (pred_id + 1)
+            overlap_matrix[gt_id, pred_id] = _picai_iou(pred_mask, gt_mask)
+
+    match_matrix = overlap_matrix.copy()
+    match_matrix[match_matrix < min_overlap] = 0.0
+    match_matrix[match_matrix > 0.0] += 1.0
+
+    if num_gt > 0 and num_pred > 0:
+        matched_gt, matched_pred = linear_sum_assignment(match_matrix, maximize=True)
+        keep = match_matrix[matched_gt, matched_pred] > 0.0
+        matched_gt = matched_gt[keep]
+        matched_pred = matched_pred[keep]
+    else:
+        matched_gt = np.array([], dtype=np.int64)
+        matched_pred = np.array([], dtype=np.int64)
+
+    for gt_id, pred_id in zip(matched_gt, matched_pred):
+        overlap = float(match_matrix[gt_id, pred_id] - 1.0)
+        lesion_results.append((1, confidences[int(pred_id)], overlap))
+
+    unmatched_gt = set(int(gt_id) for gt_id in gt_ids) - set(int(gt_id) for gt_id in matched_gt)
+    lesion_results.extend((1, 0.0, 0.0) for _ in unmatched_gt)
+
+    candidates_sufficient_overlap = set(
+        int(pred_id) for pred_id in pred_ids[(match_matrix > 0.0).any(axis=0)]
+    )
+    unmatched_pred = set(int(pred_id) for pred_id in pred_ids) - candidates_sufficient_overlap
+    lesion_results.extend((0, confidences[pred_id], 0.0) for pred_id in unmatched_pred)
+
+    return lesion_results, case_confidence
+
+
+def _picai_average_precision(
+    lesion_results: list[tuple[int, float, float]],
+) -> float:
+    if not lesion_results or not any(is_lesion for is_lesion, _, _ in lesion_results):
+        return float("nan")
+    y_true = np.asarray([is_lesion for is_lesion, _, _ in lesion_results], dtype=np.int32)
+    y_score = np.asarray([confidence for _, confidence, _ in lesion_results], dtype=np.float64)
+    precision, recall, thresholds = precision_recall_curve(y_true=y_true, y_score=y_score)
+    precision[:-1][thresholds == 0.0] = 0.0
+    return float(-np.sum(np.diff(recall) * np.asarray(precision)[:-1]))
+
+
+def _picai_auroc(case_targets: list[int], case_scores: list[float]) -> float:
+    if len(set(case_targets)) < 2:
+        return float("nan")
+    fpr, tpr, _ = roc_curve(y_true=case_targets, y_score=case_scores)
+    return float(auc(fpr, tpr))
+
+
+def _picai_ranking_metrics(per_case: list[dict]) -> dict[str, Any]:
+    lesion_results = [
+        item
+        for row in per_case
+        for item in row.get("picai_lesion_results", [])
+    ]
+    case_targets = [int(row["has_target"]) for row in per_case]
+    case_scores = [float(row.get("picai_case_confidence", 0.0)) for row in per_case]
+
+    ap = _picai_average_precision(lesion_results)
+    auroc = _picai_auroc(case_targets, case_scores)
+    score = (ap + auroc) / 2.0 if math.isfinite(ap) and math.isfinite(auroc) else float("nan")
+    return {
+        "AP": ap,
+        "AUROC": auroc,
+        "score": score,
+        "num_lesions": int(sum(is_lesion for is_lesion, _, _ in lesion_results)),
+        "num_candidates": int(
+            sum(
+                1
+                for is_lesion, confidence, _ in lesion_results
+                if not is_lesion and confidence > 0.0
+            )
+        ),
+    }
 
 
 def _seg_logits(outputs: object) -> torch.Tensor:
@@ -1459,6 +1611,21 @@ def _select_datasets_for_batch() -> list[str]:
     return [keys[i] for i in chosen]
 
 
+def _select_eval_split_for_batch(current_split: str = "test") -> str:
+    """Interactive evaluation split selection step."""
+    splits = [
+        ("test", "Fixed hold-out test set"),
+        ("val", "Run validation split"),
+    ]
+    default_idx = 1 if current_split == "val" else 0
+    chosen = _single_choice_menu(
+        title="Evaluation split",
+        options=[label for _, label in splits],
+        default_idx=default_idx,
+    )
+    return splits[chosen][0] if chosen >= 0 else ""
+
+
 def _select_workflow_for_batch() -> str:
     """Interactive workflow selection step."""
     workflows = [
@@ -1556,6 +1723,7 @@ def _build_batch_jobs(
     selected_models: list[ModelCandidate],
     checkpoints_by_run: dict[Path, Path],
     datasets: list[str],
+    eval_split: str,
     roi_variants: list[ROIVariant],
     repo_root: Path,
     prostate158_prostate_label_col: str,
@@ -1576,6 +1744,13 @@ def _build_batch_jobs(
             ckpt_tag = _slugify(checkpoint.stem)
             artifact_stem = run_dir.name
         else:
+            if eval_split != "test":
+                logger.warning(
+                    "Skipping external model %s for eval_split=%s; validation splits are run-specific.",
+                    candidate.label,
+                    eval_split,
+                )
+                continue
             run_dir = None
             checkpoint = None
             spec = resolve_external_model_request(
@@ -1599,6 +1774,16 @@ def _build_batch_jobs(
                 continue
             for roi in roi_variants:
                 try:
+                    prostate158_root_for_col = prostate158_root_override
+                    prostate158_split_for_col = ""
+                    if dataset_type == "prostate158" and eval_split == "val":
+                        prostate158_root_for_col = (
+                            prostate158_root_override
+                            or str(base_cfg.get("prostate158_train_dir", "data/prostate158_train"))
+                        )
+                        prostate158_split_for_col = str(
+                            base_cfg.get("prostate158_val_split", "valid")
+                        )
                     cfg_for_combo = _apply_roi_overrides(
                         base_cfg,
                         roi.mode,
@@ -1610,7 +1795,8 @@ def _build_batch_jobs(
                         cfg_for_combo,
                         dataset_type=dataset_type,
                         explicit_col=prostate158_prostate_label_col,
-                        prostate158_root_override=prostate158_root_override,
+                        prostate158_root_override=prostate158_root_for_col,
+                        prostate158_split_override=prostate158_split_for_col,
                     )
                     cfg_for_combo, _ = _ensure_picai_gt_roi_config(
                         cfg_for_combo,
@@ -1629,9 +1815,12 @@ def _build_batch_jobs(
                     continue
 
                 roi_tag = _roi_tag(roi.mode, roi.localizer_run)
-                summary_name = f"evaluation_summary_{dataset_type}_{roi_tag}_{ckpt_tag}.json"
+                split_tag = "val" if eval_split == "val" else "test"
+                summary_name = (
+                    f"evaluation_summary_{split_tag}_{dataset_type}_{roi_tag}_{ckpt_tag}.json"
+                )
                 vis_name = (
-                    f"{artifact_stem}_{dataset_type}_{roi_tag}_{ckpt_tag}_"
+                    f"{artifact_stem}_{split_tag}_{dataset_type}_{roi_tag}_{ckpt_tag}_"
                     "eval_visualization.png"
                 )
                 if run_dir is None:
@@ -1661,6 +1850,7 @@ def _build_batch_jobs(
                     BatchEvalJob(
                         model_source=candidate.model_source,
                         dataset_type=dataset_type,
+                        eval_split=eval_split,
                         task=str(cfg_for_combo.get("task", candidate.task)).strip().lower(),
                         roi_mode=roi.mode,
                         roi_localizer_run=roi.localizer_run,
@@ -1687,6 +1877,8 @@ def _batch_command_for_job(job: BatchEvalJob, args: argparse.Namespace) -> list[
         "--labels-dir", args.labels_dir,
         "--summary-json", str(job.summary_json),
     ]
+    if job.eval_split != "test":
+        cmd.extend(["--eval-split", job.eval_split])
     if job.run_dir is not None:
         cmd.extend(["--run", str(job.run_dir)])
     if job.checkpoint is not None:
@@ -1805,6 +1997,14 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         print("Aborted.")
         sys.exit(0)
 
+    eval_split = args.eval_split
+    if workflow in {"evaluate", "both"}:
+        eval_split = _select_eval_split_for_batch(args.eval_split)
+        if not eval_split:
+            print("Aborted.")
+            sys.exit(0)
+    args.eval_split = eval_split
+
     selected_models = _select_models_for_batch(candidates)
     if not selected_models:
         print("Aborted.")
@@ -1836,6 +2036,7 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         selected_models=selected_models,
         checkpoints_by_run=checkpoints_by_run,
         datasets=datasets,
+        eval_split=eval_split,
         roi_variants=roi_variants,
         repo_root=repo_root,
         prostate158_prostate_label_col=args.prostate158_prostate_label_col,
@@ -1864,6 +2065,8 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
     )
     print(f"  Models selected  : {len(selected_models)}")
     print(f"  Datasets         : {datasets}")
+    if workflow in {"evaluate", "both"}:
+        print(f"  Eval split       : {eval_split}")
     print(f"  ROI variants     : {len(roi_variants)}")
     print(f"  Eval jobs        : {len(jobs) if workflow in {'evaluate', 'both'} else 0}")
     tune_jobs = [job for job in jobs if job.run_dir is not None]
@@ -1890,7 +2093,7 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
             ckpt_desc = job.checkpoint.name if job.checkpoint is not None else "-"
             print(
                 f"    - model={model_desc}  ckpt={ckpt_desc}  "
-                f"dataset={job.dataset_type}  roi={roi_desc}"
+                f"dataset={job.dataset_type}  split={job.eval_split}  roi={roi_desc}"
             )
         if len(jobs) > preview_n:
             print(f"    ... ({len(jobs) - preview_n} more)")
@@ -1922,6 +2125,7 @@ def _run_interactive_batch(args: argparse.Namespace) -> None:
         print(f"  Model      : {model_desc}")
         print(f"  Checkpoint : {ckpt_desc}")
         print(f"  Dataset    : {job.dataset_type}")
+        print(f"  Eval split : {job.eval_split}")
         print(f"  Task       : {job.task}")
         print(f"  ROI        : {roi_desc}")
 
@@ -2084,6 +2288,7 @@ def _ensure_prostate_label_col(
     dataset_type: str,
     explicit_col: str,
     prostate158_root_override: str = "",
+    prostate158_split_override: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """
     Ensure prostate158_prostate_label_col exists when ROI/task requires it.
@@ -2111,7 +2316,11 @@ def _ensure_prostate_label_col(
         prostate158_root_override
         or merged.get("prostate158_test_dir", "data/prostate158_test")
     ).expanduser()
-    split = str(merged.get("prostate158_test_split", "test")).strip().lower() or "test"
+    split = (
+        str(prostate158_split_override).strip().lower()
+        or str(merged.get("prostate158_test_split", "test")).strip().lower()
+        or "test"
+    )
     columns: list[str] = []
     csv_path: Path | None = None
     try:
@@ -2184,10 +2393,13 @@ def _ensure_picai_gt_roi_config(
     merged = deepcopy(cfg)
     dataset_norm = str(dataset_type).strip().lower()
     roi_cfg = dict(merged.get("roi", {}) or {})
-    roi_mode = str(roi_cfg.get("mode", "disabled")).strip().lower()
+    roi_modes = {
+        resolve_roi_settings(merged, stage="train").mode,
+        resolve_roi_settings(merged, stage="val").mode,
+    }
     picai_labels_dir = _resolve_picai_prostate_labels_dir(picai_prostate_labels_dir, merged)
 
-    if dataset_norm != "picai" or roi_mode != "gt_mask":
+    if dataset_norm != "picai" or "gt_mask" not in roi_modes:
         return merged, picai_labels_dir
 
     if picai_labels_dir is None:
@@ -2209,6 +2421,7 @@ def _ensure_picai_gt_roi_config(
         gt_dataset_types.append("picai")
     roi_cfg["gt_dataset_types"] = gt_dataset_types
     merged["roi"] = roi_cfg
+    merged["picai_prostate_labels_dir"] = str(picai_labels_dir)
 
     if not str(merged.get("prostate158_prostate_label_col", "")).strip():
         merged["prostate158_prostate_label_col"] = _PICAI_GT_MASK_SENTINEL_PROSTATE_COL
@@ -2257,6 +2470,77 @@ def _attach_picai_prostate_labels(
             f"Missing PI-CAI prostate labels for {len(missing)} case(s) in {prostate_labels_dir}: "
             f"{preview}{suffix}"
         )
+
+
+def _select_cases_by_manifest_ids(
+    *,
+    all_cases: list[dict[str, Any]],
+    case_ids: list[str],
+    manifest_path: Path,
+    split_name: str,
+) -> list[dict[str, Any]]:
+    case_map = {str(case["case_id"]): case for case in all_cases}
+    missing = [cid for cid in case_ids if cid not in case_map]
+    if missing:
+        preview = ", ".join(missing[:8])
+        suffix = " ..." if len(missing) > 8 else ""
+        raise ValueError(
+            f"{split_name} split manifest references {len(missing)} case(s) "
+            f"not found in current data: {preview}{suffix} (manifest={manifest_path})"
+        )
+    return [case_map[cid] for cid in case_ids]
+
+
+def _resolve_picai_validation_cases(
+    *,
+    cfg: Mapping[str, Any],
+    run_dir: Path,
+    active_modalities: list[str],
+    task: str,
+    roi_settings: Any,
+    picai_prostate_labels_dir: Path | None,
+) -> tuple[list[dict[str, Any]], Path, Path, str]:
+    images_dir = Path(str(cfg.get("images_dir", "data/images"))).expanduser()
+    labels_dir = Path(str(cfg.get("labels_dir", "data/labels"))).expanduser()
+
+    manifest_candidates = [run_dir / "train_val_split_manifest.json"]
+    split_manifest_raw = cfg.get("split_manifest_path", "")
+    split_manifest_cfg = str(split_manifest_raw).strip() if split_manifest_raw is not None else ""
+    if split_manifest_cfg:
+        manifest_candidates.append(Path(split_manifest_cfg).expanduser())
+    base_output_dir = cfg.get("base_output_dir")
+    if base_output_dir:
+        manifest_candidates.append(default_split_manifest_path(base_output_dir))
+
+    manifest_path = next((path for path in manifest_candidates if path.exists()), None)
+    if manifest_path is None:
+        checked = ", ".join(str(path) for path in manifest_candidates)
+        raise FileNotFoundError(
+            "Could not find PI-CAI train/validation split manifest for this run. "
+            f"Checked: {checked}"
+        )
+
+    all_cases = discover_cases(images_dir, labels_dir, active_keys=active_modalities)
+    if task == "prostate_localization" or roi_settings.mode == "gt_mask":
+        if picai_prostate_labels_dir is None:
+            raise ValueError(
+                "PI-CAI prostate labels are required for validation evaluation "
+                f"with task={task} / roi.mode={roi_settings.mode}."
+            )
+        _attach_picai_prostate_labels(
+            all_cases,
+            picai_prostate_labels_dir,
+            require_all=True,
+        )
+
+    manifest = load_split_manifest(manifest_path)
+    val_cases = _select_cases_by_manifest_ids(
+        all_cases=all_cases,
+        case_ids=[str(v) for v in manifest["val_case_ids"]],
+        manifest_path=manifest_path,
+        split_name="Validation",
+    )
+    return val_cases, images_dir, labels_dir, str(manifest_path)
 
 
 # ---------------------------------------------------------------------------
@@ -2350,6 +2634,16 @@ def main() -> None:
         help="Dataset adapter to use. Default reads dataset_type from the run config.",
     )
     parser.add_argument(
+        "--eval-split",
+        type=str,
+        default="test",
+        choices=["test", "val"],
+        help=(
+            "Dataset split to evaluate. 'test' keeps the fixed hold-out behavior; "
+            "'val' evaluates the run's original validation split."
+        ),
+    )
+    parser.add_argument(
         "--roi-mode",
         type=str,
         default="",
@@ -2391,7 +2685,10 @@ def main() -> None:
         type=str,
         default="",
         metavar="DIR",
-        help="Extracted Prostate158 test root. Default reads prostate158_test_dir from config.",
+        help=(
+            "Extracted Prostate158 root. Default reads prostate158_test_dir for "
+            "test evaluation and prostate158_train_dir for validation evaluation."
+        ),
     )
     parser.add_argument(
         "--prostate158-label-reader",
@@ -2485,6 +2782,9 @@ def main() -> None:
         sys.exit(1)
     if args.external_model and args.checkpoint:
         logger.error("--checkpoint cannot be used with --external-model.")
+        sys.exit(1)
+    if args.external_model and args.eval_split != "test":
+        logger.error("--eval-split val requires --run because validation splits are run-specific.")
         sys.exit(1)
     if args.roi_localizer_run and args.roi_localizer_external_model:
         logger.error(
@@ -2640,11 +2940,21 @@ def main() -> None:
         or str(cfg.get("dataset_type", "picai")).strip().lower()
         or "picai"
     )
+    eval_split = str(args.eval_split).strip().lower()
+    prostate158_root_for_col = args.prostate158_root
+    prostate158_split_for_col = ""
+    if dataset_type == "prostate158" and eval_split == "val":
+        prostate158_root_for_col = (
+            args.prostate158_root
+            or str(cfg.get("prostate158_train_dir", "data/prostate158_train"))
+        )
+        prostate158_split_for_col = str(cfg.get("prostate158_val_split", "valid"))
     cfg, auto_prostate_col = _ensure_prostate_label_col(
         cfg,
         dataset_type=dataset_type,
         explicit_col=args.prostate158_prostate_label_col,
-        prostate158_root_override=args.prostate158_root,
+        prostate158_root_override=prostate158_root_for_col,
+        prostate158_split_override=prostate158_split_for_col,
     )
     if auto_prostate_col:
         logger.info(
@@ -2673,22 +2983,33 @@ def main() -> None:
         logger.error("Invalid evaluation configuration: %s", exc)
         sys.exit(1)
     active_modalities = [key for key, _ in active_modality_pairs(cfg)]
+    split_source = "fixed hold-out test set"
 
     if dataset_type == "prostate158":
-        images_dir = Path(
-            args.prostate158_root
-            or cfg.get("prostate158_test_dir", "data/prostate158_test")
-        )
+        if eval_split == "val":
+            images_dir = Path(
+                args.prostate158_root
+                or cfg.get("prostate158_train_dir", "data/prostate158_train")
+            )
+            prostate158_split = str(cfg.get("prostate158_val_split", "valid")).strip().lower() or "valid"
+            split_source = f"Prostate158 {prostate158_split}.csv"
+        else:
+            images_dir = Path(
+                args.prostate158_root
+                or cfg.get("prostate158_test_dir", "data/prostate158_test")
+            )
+            prostate158_split = str(cfg.get("prostate158_test_split", "test")).strip().lower() or "test"
+            split_source = f"Prostate158 {prostate158_split}.csv"
         labels_dir = images_dir
         label_reader = (
             args.prostate158_label_reader
             or cfg.get("prostate158_label_reader", 1)
         )
         prostate_label_col = str(cfg.get("prostate158_prostate_label_col", "")).strip()
-        logger.info("Discovering Prostate158 test cases in %s ...", images_dir)
+        logger.info("Discovering Prostate158 %s cases in %s ...", eval_split, images_dir)
         test_cases = discover_prostate158_cases(
             root_dir=images_dir,
-            split=str(cfg.get("prostate158_test_split", "test")),
+            split=prostate158_split,
             active_keys=active_modalities,
             label_target=str(cfg.get("prostate158_label_target", "tumor")),
             label_reader=label_reader,
@@ -2696,25 +3017,47 @@ def main() -> None:
             prostate_label_col=prostate_label_col if (prostate_label_col and (task == "prostate_localization" or roi_settings.mode == "gt_mask")) else None,
         )
     elif dataset_type == "picai":
-        images_dir = Path(args.images_dir)
-        labels_dir = Path(args.labels_dir)
-        logger.info("Discovering cases in %s ...", images_dir)
-        test_cases = discover_cases(images_dir, labels_dir, active_keys=active_modalities)
-        if task == "prostate_localization" or roi_settings.mode == "gt_mask":
-            if picai_prostate_labels_dir is None:
-                logger.error(
-                    "PI-CAI prostate labels are required for task=%s / roi.mode=%s. "
-                    "Defaults are /data/prostate_labels or data/prostate_labels; "
-                    "otherwise pass --picai-prostate-labels-dir or set picai_prostate_labels_dir in config.",
-                    task,
-                    roi_settings.mode,
-                )
+        if eval_split == "val":
+            if run_dir is None:
+                logger.error("--eval-split val requires --run for PI-CAI evaluation.")
                 sys.exit(1)
-            _attach_picai_prostate_labels(
-                test_cases,
-                picai_prostate_labels_dir,
-                require_all=True,
+            try:
+                test_cases, images_dir, labels_dir, split_source = _resolve_picai_validation_cases(
+                    cfg=cfg,
+                    run_dir=run_dir,
+                    active_modalities=active_modalities,
+                    task=task,
+                    roi_settings=roi_settings,
+                    picai_prostate_labels_dir=picai_prostate_labels_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Could not resolve PI-CAI validation split: %s", exc)
+                sys.exit(1)
+            logger.info(
+                "Resolved PI-CAI validation split from %s (%d case(s)).",
+                split_source,
+                len(test_cases),
             )
+        else:
+            images_dir = Path(args.images_dir)
+            labels_dir = Path(args.labels_dir)
+            logger.info("Discovering cases in %s ...", images_dir)
+            test_cases = discover_cases(images_dir, labels_dir, active_keys=active_modalities)
+            if task == "prostate_localization" or roi_settings.mode == "gt_mask":
+                if picai_prostate_labels_dir is None:
+                    logger.error(
+                        "PI-CAI prostate labels are required for task=%s / roi.mode=%s. "
+                        "Defaults are /data/prostate_labels or data/prostate_labels; "
+                        "otherwise pass --picai-prostate-labels-dir or set picai_prostate_labels_dir in config.",
+                        task,
+                        roi_settings.mode,
+                    )
+                    sys.exit(1)
+                _attach_picai_prostate_labels(
+                    test_cases,
+                    picai_prostate_labels_dir,
+                    require_all=True,
+                )
     else:
         logger.error("Unsupported dataset_type: %s", dataset_type)
         sys.exit(1)
@@ -2773,7 +3116,8 @@ def main() -> None:
     )
 
     # ---- Header -----------------------------------------------------------------
-    _section("Checkpoint Evaluation  (fixed test set)")
+    split_label = "validation split" if eval_split == "val" else "fixed test set"
+    _section(f"Checkpoint Evaluation  ({split_label})")
     model_label = (
         f"{external_model_id}@{external_model_version}"
         if external_model_id
@@ -2784,7 +3128,8 @@ def main() -> None:
     print(f"  Checkpoint  : {ckpt_path if ckpt_path is not None else '-'}")
     print(f"  Epoch       : {ckpt_epoch}   |   Best val Dice (training): {_fmt(best_val_dice)}")
     print(f"  Device      : {device}")
-    print(f"  Test cases  : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
+    print(f"  Eval split  : {eval_split} ({split_source})")
+    print(f"  Cases       : {len(test_cases)}  ({pos_count} positive, {neg_count} negative)")
     print(f"  Dataset     : {dataset_type}")
     print(f"  Task        : {task}")
     print(f"  ROI mode    : {roi_settings.mode}")
@@ -2861,11 +3206,24 @@ def main() -> None:
             )
             has_target = bool(labels[0, 0].detach().sum().item() > 0)
             has_lesion = lesion_map.get(case_id, False)
+            prob_zyx = torch.sigmoid(logits[0, 0]).detach().cpu().numpy()
+            pred_mask_zyx = pred_bin[0, 0].detach().cpu().numpy() > 0
+            target_zyx = labels[0, 0].detach().cpu().numpy() > 0
+            detection_map = _detection_map_from_probability(
+                prob_zyx=prob_zyx,
+                pred_mask_zyx=pred_mask_zyx,
+            )
+            picai_lesion_results, picai_case_confidence = _picai_evaluate_case(
+                det_zyx=detection_map,
+                target_zyx=target_zyx,
+            )
 
             per_case.append({
                 "case_id":    case_id,
                 "has_target": has_target,
                 "has_lesion": has_lesion,
+                "picai_case_confidence": picai_case_confidence,
+                "picai_lesion_results": picai_lesion_results,
                 **m,
             })
 
@@ -2930,12 +3288,16 @@ def main() -> None:
     agg_sensitivity = _mean(sens_vals)
     agg_precision = _mean(prec_vals)
     agg_hd95 = _mean(hd95_vals)
+    picai_metrics = _picai_ranking_metrics(per_case)
 
     print(f"  Dice         (positive cases only) : {_fmt(agg_dice)}")
     print(f"  IoU          (positive cases only) : {_fmt(agg_iou)}")
     print(f"  Sensitivity  (positive cases only) : {_fmt(agg_sensitivity)}")
     print(f"  Precision    (positive cases only) : {_fmt(agg_precision)}")
     print(f"  HD95         (non-empty pairs)     : {_fmt(agg_hd95)} voxels")
+    print(f"  PI-CAI AP    (lesion ranking)      : {_fmt(picai_metrics['AP'])}")
+    print(f"  PI-CAI AUROC (case ranking)        : {_fmt(picai_metrics['AUROC'])}")
+    print(f"  PI-CAI score ((AP+AUROC)/2)        : {_fmt(picai_metrics['score'])}")
 
     # ---- Visualization ----------------------------------------------------------
     vis_path: Path | None = None
@@ -2949,7 +3311,8 @@ def main() -> None:
                 if run_dir is not None
                 else _slugify(f"{external_model_id}_{external_model_version}")
             )
-            vis_name = f"{vis_stem}_eval_visualization.png"
+            split_suffix = "_val" if eval_split == "val" else ""
+            vis_name = f"{vis_stem}_eval{split_suffix}_visualization.png"
             if run_dir is not None:
                 vis_path = _default_vis_output_path(
                     run_dir=run_dir,
@@ -2974,9 +3337,10 @@ def main() -> None:
     if args.summary_json:
         summary_path = Path(args.summary_json).expanduser().resolve()
     elif run_dir is not None:
+        summary_name = "evaluation_summary_val.json" if eval_split == "val" else "evaluation_summary.json"
         summary_path = _default_eval_summary_path(
             run_dir=run_dir,
-            summary_name="evaluation_summary.json",
+            summary_name=summary_name,
             repo_root=repo_root,
         ).resolve()
     else:
@@ -3001,6 +3365,8 @@ def main() -> None:
         },
         "dataset": {
             "dataset_type": dataset_type,
+            "eval_split": eval_split,
+            "split_source": split_source,
             "images_dir": str(images_dir),
             "labels_dir": str(labels_dir),
             "picai_prostate_labels_dir": (
@@ -3046,6 +3412,38 @@ def main() -> None:
             "sensitivity_pos_only": _json_float(agg_sensitivity),
             "precision_pos_only": _json_float(agg_precision),
             "hd95_non_empty_pairs_voxels": _json_float(agg_hd95),
+            "picai_AP": _json_float(picai_metrics["AP"]),
+            "picai_AUROC": _json_float(picai_metrics["AUROC"]),
+            "picai_score": _json_float(picai_metrics["score"]),
+            "picai_num_lesions": picai_metrics["num_lesions"],
+            "picai_num_candidates": picai_metrics["num_candidates"],
+        },
+        "picai_ranking": {
+            "AP": _json_float(picai_metrics["AP"]),
+            "AUROC": _json_float(picai_metrics["AUROC"]),
+            "score": _json_float(picai_metrics["score"]),
+            "score_formula": "(AP + AUROC) / 2",
+            "min_overlap": 0.10,
+            "overlap_func": "IoU",
+            "connectivity": 26,
+            "case_confidence_func": "max",
+            "num_lesions": picai_metrics["num_lesions"],
+            "num_candidates": picai_metrics["num_candidates"],
+            "case_pred": {
+                row["case_id"]: _json_float(float(row["picai_case_confidence"]))
+                for row in per_case
+            },
+            "case_target": {
+                row["case_id"]: int(row["has_target"])
+                for row in per_case
+            },
+            "lesion_results": {
+                row["case_id"]: [
+                    [int(is_lesion), float(confidence), float(overlap)]
+                    for is_lesion, confidence, overlap in row["picai_lesion_results"]
+                ]
+                for row in per_case
+            },
         },
         "artifacts": {
             "visualization_enabled": bool(args.visualize),

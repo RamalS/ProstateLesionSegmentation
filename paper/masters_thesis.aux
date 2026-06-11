@@ -1,0 +1,159 @@
+\relax 
+\providecommand \babel@aux [2]{\global \let \babel@toc \@gobbletwo }
+\@nameuse{bbl@beforestart}
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\babel@aux{croatian}{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}UVOD}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Zadatak rada}{1}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}Struktura rada}{1}{subsection.1.2}\protected@file@percent }
+\citation{picai_dataset}
+\citation{picai_labels}
+\citation{pirads_v21}
+\@writefile{toc}{\contentsline {section}{\numberline {2}PREGLED PODRUČJA TEME}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Rak prostate i suspektne lezije}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Modaliteti MR snimanja prostate}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}PI-RADS i opseg rada}{2}{subsection.2.3}\protected@file@percent }
+\citation{unet}
+\citation{unet3d}
+\citation{attention_unet}
+\citation{nnunet}
+\citation{picai_dataset}
+\citation{prostate158_main}
+\citation{prostate158_dib}
+\citation{deconver}
+\citation{fct}
+\citation{cvt}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Duboko učenje za segmentaciju medicinskih slika}{3}{subsection.2.4}\protected@file@percent }
+\citation{picai_dataset}
+\citation{picai_labels}
+\@writefile{toc}{\contentsline {section}{\numberline {3}SKUP PODATAKA I PREDOBRADA}{5}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Skup PI-CAI}{5}{subsection.3.1}\protected@file@percent }
+\citation{prostate158_main}
+\citation{prostate158_dib}
+\@writefile{lot}{\contentsline {table}{\numberline {3.1}{\ignorespaces Sažetak glavnog nadziranog skupa podataka. }}{6}{table.caption.1}\protected@file@percent }
+\newlabel{tab:dataset_summary}{{3.1}{6}{Sažetak glavnog nadziranog skupa podataka}{table.caption.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Skup Prostate158}{6}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Volumetrijski format podataka}{7}{subsection.3.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3.1}{\ignorespaces Tok pripreme višemodalnog volumena prije ulaza u segmentacijski model. }}{7}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:data_flow}{{3.1}{7}{Tok pripreme višemodalnog volumena prije ulaza u segmentacijski model}{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Učitavanje i predobrada}{8}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}ARHITEKTURA I IMPLEMENTACIJA SUSTAVA}{10}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Nadzirano treniranje}{10}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Samonadzirano predtreniranje}{11}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Konfiguracijski odabir modela}{11}{subsection.4.3}\protected@file@percent }
+\citation{unet}
+\citation{unet3d}
+\citation{attention_unet}
+\citation{deconver}
+\citation{fct}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Modeli}{12}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.1}U-Net 3D}{12}{subsubsection.4.4.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4.1}{\ignorespaces Sažeti blok-dijagram arhitekture U-Net 3D korištene u projektu. }}{13}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:unet3d_arch}{{4.1}{13}{Sažeti blok-dijagram arhitekture U-Net 3D korištene u projektu}{figure.caption.3}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.2}Attention U-Net 3D}{13}{subsubsection.4.4.2}\protected@file@percent }
+\citation{deconver}
+\@writefile{lof}{\contentsline {figure}{\numberline {4.2}{\ignorespaces Sažeti blok-dijagram Attention U-Net 3D arhitekture s pažnjom na preskočnim vezama. }}{14}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:attention_unet3d_arch}{{4.2}{14}{Sažeti blok-dijagram Attention U-Net 3D arhitekture s pažnjom na preskočnim vezama}{figure.caption.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.3}Deconver}{14}{subsubsection.4.4.3}\protected@file@percent }
+\newlabel{eq:deconver_forward}{{4-1}{14}{Deconver}{equation.4.1}{}}
+\newlabel{eq:deconver_objective}{{4-2}{14}{Deconver}{equation.4.2}{}}
+\newlabel{eq:deconver_ndc_update}{{4-3}{15}{Deconver}{equation.4.3}{}}
+\newlabel{eq:deconver_block_mixer}{{4-4}{15}{Deconver}{equation.4.4}{}}
+\newlabel{eq:deconver_block_mlp}{{4-5}{15}{Deconver}{equation.4.5}{}}
+\newlabel{eq:deconver_mixer}{{4-6}{15}{Deconver}{equation.4.6}{}}
+\citation{fct}
+\@writefile{lof}{\contentsline {figure}{\numberline {4.3}{\ignorespaces Sažeti blok-dijagram Deconver arhitekture u 3D segmentacijskom postavu. }}{16}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:deconver_arch}{{4.3}{16}{Sažeti blok-dijagram Deconver arhitekture u 3D segmentacijskom postavu}{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.4}FCT}{16}{subsubsection.4.4.4}\protected@file@percent }
+\newlabel{eq:fct_attention}{{4-7}{16}{FCT}{equation.4.7}{}}
+\newlabel{eq:fct_wide_focus}{{4-8}{17}{FCT}{equation.4.8}{}}
+\newlabel{eq:fct_block_attention}{{4-9}{17}{FCT}{equation.4.9}{}}
+\newlabel{eq:fct_block_wf}{{4-10}{17}{FCT}{equation.4.10}{}}
+\newlabel{eq:fct_volume_to_slices}{{4-11}{17}{FCT}{equation.4.11}{}}
+\newlabel{eq:fct_slices_to_volume}{{4-12}{17}{FCT}{equation.4.12}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4.4}{\ignorespaces Sažeti blok-dijagram prilagodbe FCT arhitekture volumetrijskom ulazu. }}{18}{figure.caption.6}\protected@file@percent }
+\newlabel{fig:fct_arch}{{4.4}{18}{Sažeti blok-dijagram prilagodbe FCT arhitekture volumetrijskom ulazu}{figure.caption.6}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.5}DynUNet}{18}{subsubsection.4.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.4.6}SwinUNETR}{18}{subsubsection.4.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Evaluacija i vizualizacija}{19}{subsection.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Postprocesiranje predikcija}{19}{subsection.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}EKSPERIMENTALNI POSTAV I METRIKE}{21}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Eksperimentalni postav}{21}{subsection.5.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5.1}{\ignorespaces Sažetak reprezentativnih konfiguracija treniranja iz konsolidiranog izvještaja pokretanja. }}{21}{table.caption.7}\protected@file@percent }
+\newlabel{tab:training_setup}{{5.1}{21}{Sažetak reprezentativnih konfiguracija treniranja iz konsolidiranog izvještaja pokretanja}{table.caption.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Metrike}{21}{subsection.5.2}\protected@file@percent }
+\newlabel{eq:dice}{{5-1}{22}{Metrike}{equation.5.1}{}}
+\newlabel{eq:iou}{{5-2}{22}{Metrike}{equation.5.2}{}}
+\newlabel{eq:sensitivity}{{5-3}{22}{Metrike}{equation.5.3}{}}
+\newlabel{eq:precision}{{5-4}{22}{Metrike}{equation.5.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}REZULTATI I RASPRAVA}{23}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Attention U-Net 3D}{23}{subsection.6.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6.1}{\ignorespaces Rezultati Attention U-Net 3D pokretanja. P označava PI-CAI testni skup od 10 slučajeva, a Pr Prostate158 testni skup od 19 slučajeva. }}{23}{table.caption.8}\protected@file@percent }
+\newlabel{tab:attention_runs}{{6.1}{23}{Rezultati Attention U-Net 3D pokretanja. P označava PI-CAI testni skup od 10 slučajeva, a Pr Prostate158 testni skup od 19 slučajeva}{table.caption.8}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6.1}{\ignorespaces Kvalitativni prikaz evaluacije za Attention U-Net 3D sa SSL inicijalizacijom. }}{23}{figure.caption.9}\protected@file@percent }
+\newlabel{fig:attention_ssl_eval}{{6.1}{23}{Kvalitativni prikaz evaluacije za Attention U-Net 3D sa SSL inicijalizacijom}{figure.caption.9}{}}
+\citation{deconver}
+\@writefile{lof}{\contentsline {figure}{\numberline {6.2}{\ignorespaces Primjer 3D prikaza za Attention U-Net 3D sa SSL inicijalizacijom. }}{24}{figure.caption.10}\protected@file@percent }
+\newlabel{fig:attention_ssl_3d}{{6.2}{24}{Primjer 3D prikaza za Attention U-Net 3D sa SSL inicijalizacijom}{figure.caption.10}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Deconver}{24}{subsection.6.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6.2}{\ignorespaces Rezultati Deconver pokretanja. P označava PI-CAI testni skup od 10 slučajeva, a Pr Prostate158 testni skup od 19 slučajeva. }}{25}{table.caption.11}\protected@file@percent }
+\newlabel{tab:deconver_runs}{{6.2}{25}{Rezultati Deconver pokretanja. P označava PI-CAI testni skup od 10 slučajeva, a Pr Prostate158 testni skup od 19 slučajeva}{table.caption.11}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6.3}{\ignorespaces Kvalitativni prikaz evaluacije za osnovni Deconver model. }}{25}{figure.caption.12}\protected@file@percent }
+\newlabel{fig:deconver_eval}{{6.3}{25}{Kvalitativni prikaz evaluacije za osnovni Deconver model}{figure.caption.12}{}}
+\citation{fct}
+\@writefile{lof}{\contentsline {figure}{\numberline {6.4}{\ignorespaces Primjer 3D prikaza za osnovni Deconver model. }}{26}{figure.caption.13}\protected@file@percent }
+\newlabel{fig:deconver_3d}{{6.4}{26}{Primjer 3D prikaza za osnovni Deconver model}{figure.caption.13}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}FCT}{26}{subsection.6.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6.3}{\ignorespaces Sažetak FCT pokretanja. P označava PI-CAI testni skup od 10 slučajeva, a Pr Prostate158 testni skup od 19 slučajeva. }}{26}{table.caption.14}\protected@file@percent }
+\newlabel{tab:fct_runs}{{6.3}{26}{Sažetak FCT pokretanja. P označava PI-CAI testni skup od 10 slučajeva, a Pr Prostate158 testni skup od 19 slučajeva}{table.caption.14}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6.5}{\ignorespaces Kvalitativni prikaz evaluacije za FCT model. }}{27}{figure.caption.15}\protected@file@percent }
+\newlabel{fig:fct_eval}{{6.5}{27}{Kvalitativni prikaz evaluacije za FCT model}{figure.caption.15}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Usporedba reprezentativnih modela}{27}{subsection.6.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6.4}{\ignorespaces Usporedba reprezentativnih pokretanja na fiksnom PI-CAI testnom skupu od 10 slučajeva. }}{27}{table.caption.16}\protected@file@percent }
+\newlabel{tab:cross_model}{{6.4}{27}{Usporedba reprezentativnih pokretanja na fiksnom PI-CAI testnom skupu od 10 slučajeva}{table.caption.16}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}Detekcijske metrike prema PI-CAI postupku}{27}{subsection.6.5}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6.5}{\ignorespaces Predložak za dopunsku usporedbu modela PI-CAI metrikama rangiranja. }}{28}{table.caption.17}\protected@file@percent }
+\newlabel{tab:picai_ranking_placeholder}{{6.5}{28}{Predložak za dopunsku usporedbu modela PI-CAI metrikama rangiranja}{table.caption.17}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6}Analiza po pojedinačnim slučajevima}{28}{subsection.6.6}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6.6}{\ignorespaces Predložak za analizu ponašanja modela po slučajevima na fiksnom PI-CAI testnom skupu. }}{28}{table.caption.18}\protected@file@percent }
+\newlabel{tab:per_case_placeholder}{{6.6}{28}{Predložak za analizu ponašanja modela po slučajevima na fiksnom PI-CAI testnom skupu}{table.caption.18}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7}Ograničenja rezultata i ponašanje na negativnim slučajevima}{28}{subsection.6.7}\protected@file@percent }
+\citation{xai_survey}
+\citation{gradcam}
+\@writefile{toc}{\contentsline {section}{\numberline {7}OBJAŠNJIVOST MODELA}{30}{section.7}\protected@file@percent }
+\citation{simonyan_saliency}
+\@writefile{lof}{\contentsline {figure}{\numberline {7.1}{\ignorespaces Primjer Grad-CAM objašnjenja za osnovni Deconver model. }}{31}{figure.caption.19}\protected@file@percent }
+\newlabel{fig:xai_gradcam}{{7.1}{31}{Primjer Grad-CAM objašnjenja za osnovni Deconver model}{figure.caption.19}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {7.2}{\ignorespaces Primjer objedinjene mape osjetljivosti za osnovni Deconver model. }}{32}{figure.caption.20}\protected@file@percent }
+\newlabel{fig:xai_saliency}{{7.2}{32}{Primjer objedinjene mape osjetljivosti za osnovni Deconver model}{figure.caption.20}{}}
+\citation{adebayo_sanity}
+\@writefile{lof}{\contentsline {figure}{\numberline {7.3}{\ignorespaces Primjer sažetka ablacije modaliteta za osnovni Deconver model. }}{33}{figure.caption.21}\protected@file@percent }
+\newlabel{fig:xai_ablation}{{7.3}{33}{Primjer sažetka ablacije modaliteta za osnovni Deconver model}{figure.caption.21}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}ZAKLJUČAK}{34}{section.8}\protected@file@percent }
+\bibstyle{unsrt}
+\bibdata{./supp_files/bibtex_baza}
+\bibcite{picai_dataset}{1}
+\bibcite{picai_labels}{2}
+\bibcite{pirads_v21}{3}
+\bibcite{unet}{4}
+\bibcite{unet3d}{5}
+\bibcite{attention_unet}{6}
+\bibcite{nnunet}{7}
+\bibcite{prostate158_main}{8}
+\bibcite{prostate158_dib}{9}
+\bibcite{deconver}{10}
+\bibcite{fct}{11}
+\bibcite{cvt}{12}
+\bibcite{xai_survey}{13}
+\@writefile{toc}{\contentsline {section}{LITERATURA}{35}{section.8}\protected@file@percent }
+\bibcite{gradcam}{14}
+\bibcite{simonyan_saliency}{15}
+\bibcite{adebayo_sanity}{16}
+\@writefile{toc}{\contentsline {section}{Popis oznaka}{37}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{Popis kratica}{38}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{Sažetak}{39}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{Abstract}{40}{section.8}\protected@file@percent }
+\ttl@finishall
+\gdef \@abspage@last{43}

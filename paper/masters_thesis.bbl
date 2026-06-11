@@ -1,0 +1,111 @@
+\begin{thebibliography}{10}
+
+\bibitem{picai_dataset}
+Anindo Saha, Jeroen~J. Twilt, Joeran~S. Bosma, Bram van Ginneken, Derya Yakar,
+  Matthijs Elschot, Jelle Veltman, Jurgen F{\"u}tterer, Marloes de~Rooij, and
+  Henkjan Huisman.
+\newblock The pi-cai challenge: Public training and development dataset.
+\newblock Zenodo, version v2.0, 2022.
+
+\bibitem{picai_labels}
+{DIAGNijmegen}.
+\newblock Annotations for the pi-cai challenge: Public training and development
+  dataset.
+\newblock GitHub repository.
+\newblock Accessed: 2026-06-10.
+
+\bibitem{pirads_v21}
+Baris Turkbey, Andrew~B. Rosenkrantz, Masoom~A. Haider, Anwar~R. Padhani, Geert
+  Villeirs, Katarzyna~J. Macura, Clare~M. Tempany, Peter~L. Choyke, Francois
+  Cornud, Daniel J.~A. Margolis, Harriet~C. Thoeny, Sadhna Verma, Jelle
+  Barentsz, and Jeffrey~C. Weinreb.
+\newblock Prostate imaging reporting and data system version 2.1: 2019 update
+  of prostate imaging reporting and data system version 2.
+\newblock {\em European Urology}, 76(3):340--351, 2019.
+
+\bibitem{unet}
+Olaf Ronneberger, Philipp Fischer, and Thomas Brox.
+\newblock U-net: Convolutional networks for biomedical image segmentation.
+\newblock In {\em Medical Image Computing and Computer-Assisted Intervention --
+  MICCAI 2015}, pages 234--241, 2015.
+
+\bibitem{unet3d}
+{\"O}zg{\"u}n {\c{C}}i{\c{c}}ek, Ahmed Abdulkadir, Soeren~S. Lienkamp, Thomas
+  Brox, and Olaf Ronneberger.
+\newblock 3d u-net: Learning dense volumetric segmentation from sparse
+  annotation.
+\newblock In {\em Medical Image Computing and Computer-Assisted Intervention --
+  MICCAI 2016}, pages 424--432, 2016.
+
+\bibitem{attention_unet}
+Ozan Oktay, Jo~Schlemper, Loic Le~Folgoc, Matthew Lee, Mattias Heinrich,
+  Kazunari Misawa, Kensaku Mori, Steven McDonagh, Nils~Y. Hammerla, Bernhard
+  Kainz, Ben Glocker, and Daniel Rueckert.
+\newblock Attention u-net: Learning where to look for the pancreas, 2018.
+
+\bibitem{nnunet}
+Fabian Isensee, Paul~F. Jaeger, Simon A.~A. Kohl, Jens Petersen, and Klaus~H.
+  Maier-Hein.
+\newblock nnu-net: a self-configuring method for deep learning-based biomedical
+  image segmentation.
+\newblock {\em Nature Methods}, 18:203--211, 2021.
+
+\bibitem{prostate158_main}
+Lisa~C. Adams, Marcus~R. Makowski, Gisela Engel, Maik Rattunde, Frederik Busch,
+  Patrick Asbach, Stefan~M. Niehues, Shankeeth Vinayahalingam, Bram van
+  Ginneken, Geert Litjens, and Keno~K. Bressem.
+\newblock Prostate158 - an expert-annotated 3t mri dataset and algorithm for
+  prostate cancer detection.
+\newblock {\em Computers in Biology and Medicine}, 148:105817, 2022.
+
+\bibitem{prostate158_dib}
+Lisa~C. Adams, Marcus~R. Makowski, Gisela Engel, Maik Rattunde, Frederik Busch,
+  Patrick Asbach, Stefan~M. Niehues, Shankeeth Vinayahalingam, Bram van
+  Ginneken, Geert Litjens, and Keno~K. Bressem.
+\newblock Dataset of prostate mri annotated for anatomical zones and cancer.
+\newblock {\em Data in Brief}, 45:108739, 2022.
+
+\bibitem{deconver}
+Pooya Ashtari, Shahryar Noei, Fateme Nateghi~Haredasht, Jonathan~H. Chen,
+  Giuseppe Jurman, Aleksandra Pizurica, and Sabine Van~Huffel.
+\newblock Deconver: A deconvolutional network for medical image segmentation,
+  2025.
+
+\bibitem{fct}
+Athanasios Tragakis, Chaitanya Kaul, Roderick Murray-Smith, and Dirk Husmeier.
+\newblock The fully convolutional transformer for medical image segmentation.
+\newblock In {\em Proceedings of the IEEE/CVF Winter Conference on Applications
+  of Computer Vision (WACV)}, pages 3660--3669, 2023.
+
+\bibitem{cvt}
+Haiping Wu, Bin Xiao, Noel Codella, Mengchen Liu, Xiyang Dai, Lu~Yuan, and Lei
+  Zhang.
+\newblock Cvt: Introducing convolutions to vision transformers, 2021.
+
+\bibitem{xai_survey}
+Feiyu Xu, Hans Uszkoreit, Yangzhou Du, Wei Fan, Dongyan Zhao, and Jun Zhu.
+\newblock Explainable ai: A brief survey on history, research areas, approaches
+  and challenges.
+\newblock In {\em NLPCC 2019}, pages 563--574, 2019.
+
+\bibitem{gradcam}
+Ramprasaath~R. Selvaraju, Michael Cogswell, Abhishek Das, Ramakrishna Vedantam,
+  Devi Parikh, and Dhruv Batra.
+\newblock Grad-cam: Visual explanations from deep networks via gradient-based
+  localization.
+\newblock In {\em 2017 IEEE International Conference on Computer Vision
+  (ICCV)}, pages 618--626, 2017.
+
+\bibitem{simonyan_saliency}
+Karen Simonyan, Andrea Vedaldi, and Andrew Zisserman.
+\newblock Deep inside convolutional networks: Visualising image classification
+  models and saliency maps, 2013.
+
+\bibitem{adebayo_sanity}
+Julius Adebayo, Justin Gilmer, Michael Muelly, Ian Goodfellow, Moritz Hardt,
+  and Been Kim.
+\newblock Sanity checks for saliency maps.
+\newblock In {\em Advances in Neural Information Processing Systems},
+  volume~31, 2018.
+
+\end{thebibliography}

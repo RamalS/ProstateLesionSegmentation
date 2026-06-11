@@ -1,101 +1,318 @@
-# AGENTS.md - ProstateLesionSegmentation
+# AGENTS.md
 
-## Fast commands (repo root)
+## Purpose of this repository
 
-- Build image (modern default, cu128): `docker compose build` (uses `compose.yml`, service `trainer`).
-- Build image (Volta/TITAN V, cu126): `docker compose -f compose.yml -f compose.volta.yml build`
-- Train in Docker: `docker compose run --rm trainer train`
-- Train Deconver tuned A: `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml`
-- Train Deconver tuned B (num_samples=2): `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_b.yaml`
-- Train Deconver tuned C (bce_pos_weight=20): `docker compose run --rm trainer train --config /workspace/configs/deconver_tuned_c.yaml`
-- Train Prostate158 supervised: `docker compose run --rm trainer train --config /workspace/configs/prostate158_default.yaml`
-- Train with current config from resumed checkpoint weights only: `docker compose run --rm trainer train --config /workspace/configs/deconver_conf.yaml --resume /outputs/runs/<run_name>/checkpoints/best.pt --current-config`
-- Pretrain encoder (SSL) in Docker: `docker compose run --rm trainer pretrain`
-- Smoke test (primary regression check): `docker compose run --rm trainer smoke-test`
-- Train in Docker (Volta/TITAN V): `docker compose -f compose.yml -f compose.volta.yml run --rm trainer train`
-- Pretrain in Docker (Volta/TITAN V): `docker compose -f compose.yml -f compose.volta.yml run --rm trainer pretrain`
-- TensorBoard: `docker compose run --rm --service-ports trainer tensorboard`
-- 3-D visualizer (GT only): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha`
-- 3-D visualizer (GT vs model): `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --run /outputs/runs/<run_name>`
-- 3-D visualizer GIF export: `docker compose run --rm trainer visualize-3d --t2w /data/test_images/<case>_t2w.mha --gif`
-- 3-D visualizer app (localhost): `docker compose run --rm --service-ports trainer visualize-3d-app` then open `http://localhost:8501`
-- Run report regeneration: `docker compose run --rm trainer report-runs --visualizations-dir /workspace/visualizations --output /workspace/report.md`
-- Full reporting pipeline (missing-only, Docker-first): `PYTHONPATH=. python scripts/report_pipeline.py`
-- Full reporting pipeline (force all runs): `PYTHONPATH=. python scripts/report_pipeline.py --all`
-- Learnability sanity run: `docker compose run --rm trainer learnability [N]`
-- Shell in container: `docker compose run --rm trainer shell`
-- Local train: `PYTHONPATH=. python -m src.train --config configs/local_default.yaml`
-- Local train Deconver tuned A: `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml`
-- Local train Deconver tuned B (num_samples=2): `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_b.yaml`
-- Local train Deconver tuned C (bce_pos_weight=20): `PYTHONPATH=. python -m src.train --config configs/deconver_tuned_c.yaml`
-- Local train with current config from resumed checkpoint weights only: `PYTHONPATH=. python -m src.train --config configs/deconver_conf.yaml --resume outputs/runs/<run_name>/checkpoints/best.pt --current-config`
-- Local pretrain: `PYTHONPATH=. python -m src.pretrain --config configs/pretrain_local.yaml`
-- Local smoke test: `PYTHONPATH=. python scripts/smoke_test.py`
-- Local 3-D visualizer: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha [--run outputs/runs/<run_name>]`
-- Local 3-D visualizer GIF export: `PYTHONPATH=. python scripts/visualize_3d.py --t2w data/test_images/<case>_t2w.mha --gif`
-- Local 3-D visualizer app: `PYTHONPATH=. streamlit run scripts/visualize_3d_app.py --server.address 0.0.0.0 --server.port 8501`
+This repository contains the LaTeX source, figures, references, notes, draft text, and supporting project materials for writing a master thesis based on the ProstateLesionSegmentation project. The main thesis LaTeX file is `paper/masters_thesis.tex`.
 
-## Evaluation is easy to run wrong
+The current goal is thesis writing, not new feature development. Most engineering work has already been completed. Future Codex/AI agents should help transform rough notes, short explanations, project details, screenshots, diagrams, code snippets, reports, and draft paragraphs into a coherent Croatian master thesis.
 
-- Repo checkpoints still require `--run <run_dir>`; `--checkpoint` alone is not valid.
-- External baseline support is eval-only: `--external-model monai:prostate_mri_anatomy@0.3.5`
-- Docker: `docker compose run --rm -it trainer evaluate --run /outputs/runs/<run_name>`
-- Docker external baseline: `docker compose run --rm trainer evaluate --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
-- Docker external ROI localizer: `docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
-- If Docker needs proxy egress for MONAI bundle download, export `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase variants). `compose.yml` passes them through to `trainer`.
-- Proxy-enabled Docker external ROI localizer example: `HTTP_PROXY=http://proxy.example:3128 HTTPS_PROXY=http://proxy.example:3128 NO_PROXY=localhost,127.0.0.1 docker compose run --rm trainer evaluate --run /outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
-- Local: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name>`
-- Local external baseline: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
-- Local external ROI localizer: `PYTHONPATH=. python scripts/evaluate_checkpoint.py --run outputs/runs/<run_name> --roi-mode predicted_mask --roi-localizer-external-model monai:prostate_mri_anatomy@0.3.5 --dataset-type prostate158 --prostate158-prostate-label-col t2_prostate_reader1`
-- Without a TTY, checkpoint selection auto-picks `best.pt` (or newest epoch file).
-- Defaults are `--images-dir data/test_images` and `--labels-dir data/labels`.
-- MONAI bundle cache defaults to `/cache/monai_bundles` in Docker and `cache/monai_bundles/` locally.
+The thesis must be based on the actual project. Do not write generic sections that could apply to any machine-learning or medical-imaging project. When implementation details are needed, inspect the repository first and describe what is actually present.
 
-## Repo wiring
+## Main writing language
 
-- Source is imported from `src/` via `PYTHONPATH`; prefer `python -m src.train`.
-- Main supervised entrypoint: `src/train.py`; SSL pretraining entrypoint: `src/pretrain.py`.
+- The thesis text must be written in Croatian.
+- Use standard Croatian technical and academic language.
+- Do not leave English phrases in the main text unless there is no accepted Croatian equivalent.
+- When a foreign technical term is necessary, write it in italic and, when useful, introduce it with the Croatian term first.
+- Do not translate names of technologies, libraries, protocols, tools, standards, datasets, models, or products when translation would be unnatural or incorrect.
+- Keep terminology consistent throughout the thesis.
+- If an English term is commonly used in Croatian technical writing, use it carefully and consistently instead of forcing an awkward translation.
+
+## Writing style
+
+Use natural academic Croatian: clear, precise, technically correct, and appropriate for a master thesis.
+
+- Avoid obvious AI style: no exaggerated transitions, no generic filler, no repeated phrases, no unnecessary claims of importance, and no empty conclusions.
+- Avoid broad openings such as "U današnje vrijeme" unless the context genuinely requires them.
+- Avoid first-person plural unless it is already used consistently in the thesis template or explicitly approved by the user.
+- Prefer neutral constructions such as "U radu je prikazano...", "Sustav omogućuje...", "Rezultati pokazuju..." and "U ovom poglavlju opisuje se...".
+- Do not invent results, measurements, citations, implementation details, design decisions, dataset properties, or experimental conclusions.
+- If information is missing, insert a clear TODO comment instead of guessing.
+- Keep paragraphs focused. One paragraph should develop one main idea.
+- Vary sentence length naturally. Avoid monotonous paragraph rhythm.
+- Prefer concrete explanations over generic claims.
+
+## Core task of the agent
+
+Future agents should help with:
+
+- Expanding rough notes into complete thesis paragraphs.
+- Rewriting draft text to improve grammar, flow, clarity, and academic tone.
+- Fixing Croatian grammar, spelling, punctuation, and terminology.
+- Reorganizing sections so the thesis has a logical structure.
+- Adding transitions between paragraphs only when they are useful and natural.
+- Converting bullet points into coherent prose when appropriate.
+- Preserving the technical meaning of the user's original text.
+- Suggesting where figures, tables, formulas, diagrams, and code listings should be referenced.
+- Making sure every figure, table, formula, and citation is introduced and discussed in the text.
+- Aligning text with the existing LaTeX template and FERIT thesis expectations.
+
+## FERIT thesis guideline rules
+
+The thesis should follow the provided FERIT PDF guidelines and the existing LaTeX template. Respect the template unless there is a clear reason to change it.
+
+### Expected thesis structure
+
+The thesis should generally contain:
+
+1. Title page according to the provided template.
+2. Required institutional forms if generated by the official system or required in the final version.
+3. Table of contents.
+4. Introduction as the first chapter.
+5. Main body chapters.
+6. Conclusion as the final chapter.
+7. Literature.
+8. List of symbols if many symbols are used.
+9. List of abbreviations if many abbreviations are used.
+10. Summary and keywords in Croatian.
+11. Title, abstract, and keywords in English.
+12. Optional biography if required.
+13. Appendices if needed.
+
+Do not force this exact list into the source if the provided FERIT template already handles some parts automatically. Follow the template structure first, then adapt content within it.
+
+### Introduction
+
+The introduction should:
+
+- Describe the problem addressed by the thesis.
+- Explain the thesis task in more detail.
+- Present the motivation and relevance of the topic without exaggeration.
+- Mention important topics covered by the thesis.
+- Briefly summarize related work and literature where appropriate.
+- End with a short overview of the thesis structure by chapters.
+
+The introduction should not contain detailed implementation descriptions, complete experimental results, or claims that are only supported later in the thesis.
+
+### State of the art / related work
+
+The second chapter, or another appropriately named early chapter, should present the current state of the field.
+
+It should:
+
+- Compare existing scientific, technical, or practical solutions related to the thesis topic.
+- Use relevant references, preferably at least five where possible.
+- Focus on solutions, methods, systems, datasets, or applications similar to the thesis topic.
+- Avoid writing only about general technologies if the thesis is actually about a specific application or system.
+- Clearly explain how the thesis work differs from or builds upon existing approaches.
+
+Use citations for claims about existing methods, datasets, medical-imaging practice, segmentation models, evaluation metrics, and external systems.
+
+### Main body
+
+The main body should be divided into logical chapters according to the actual project. Typical areas include:
+
+- Theoretical background needed to understand the work.
+- Requirements and system analysis.
+- Design and architecture of the proposed solution.
+- Implementation details, including software, algorithms, data flow, models, configuration, and dependencies.
+- Testing, evaluation, results, and discussion.
+- Limitations and possible improvements.
+
+The exact structure should follow the actual thesis topic and project artifacts. Do not force generic chapter titles if a more specific structure is clearer.
+
+### Results and discussion
+
+When describing results:
+
+- Do not only show figures or tables.
+- Explain what each result means.
+- Comment on important observations.
+- Compare expected and obtained behavior when possible.
+- Mention limitations honestly.
+- Do not exaggerate the significance of the results.
+- Do not imply clinical usefulness, superiority, robustness, or generalizability unless the conducted evaluation supports it.
+
+If numerical results are missing, add a TODO comment rather than inventing plausible values.
+
+### Conclusion
+
+The conclusion should:
+
+- Summarize the goals of the thesis.
+- State what was implemented, tested, or achieved.
+- Mention the most important results.
+- Discuss advantages and limitations.
+- Suggest possible future work.
+- Avoid introducing new technical material that was not discussed earlier.
+
+The conclusion should be specific to this project. Avoid generic endings that do not add information.
+
+### Abstracts and keywords
+
+The Croatian summary and English abstract should:
+
+- Briefly describe the main problem.
+- Explain how the problem was solved.
+- Mention the achieved results.
+- Include keywords.
+- Be concise and suitable for a master thesis.
+
+The English abstract should be a faithful equivalent of the Croatian summary, not a separate text with extra claims.
+
+## Formatting and LaTeX rules
+
+Preserve and respect the existing LaTeX template.
+
+- Do not modify template files unnecessarily.
+- Use existing LaTeX commands, environments, bibliography setup, figure/table styles, and folder structure.
+- Keep chapter, section, figure, table, and equation numbering consistent.
+- Use proper LaTeX labels and references: `\label{...}`, `\ref{...}`, `\cite{...}`.
+- Do not hard-code figure numbers, table numbers, chapter numbers, or citation numbers in prose.
+- Every figure and table should have a caption and should be referenced in the text.
+- Figures should be placed near the text where they are discussed when possible.
+- Tables should be introduced before they appear and interpreted after they appear when useful.
+- Equations should be numbered only when referenced or important.
+- All variables in formulas should be explained after first use.
+- Use SI units and write values with appropriate spacing between number and unit.
+- Keep terminology, notation, abbreviations, and symbols consistent.
+- Use nonbreaking spaces where appropriate in Croatian LaTeX text, especially between numbers and units.
+- Do not introduce large formatting changes for stylistic reasons only.
+
+## Citation and bibliography rules
+
+Do not invent sources.
+
+When citations are needed:
+
+- Use only sources already present in the repository, sources explicitly provided by the user, or sources that the agent has been asked to find.
+- If a claim needs a citation and no source is available, add a TODO comment.
+- Do not fabricate authors, titles, URLs, dates, page numbers, DOI values, or publication venues.
+- Keep the bibliography format compatible with the existing LaTeX template.
+- Use citations for methods, definitions, standards, datasets, frameworks, comparisons, and claims based on external information.
+- Prefer primary sources, official documentation, dataset papers, method papers, and standards over informal sources.
+
+When adding a new source, verify that it is relevant to the exact claim being made. Do not add citations only to make a paragraph look more academic.
+
+## Handling rough text from the user
+
+When the user provides rough text:
+
+- Preserve the intended meaning.
+- Improve grammar, clarity, flow, and structure.
+- Expand only with technically justified content.
+- Do not remove important technical details.
+- Do not add unsupported claims.
+- Rewrite the text so it sounds like it was written by a student who understands the project, not like generic AI output.
+- Keep sentence length varied and natural.
+- Prefer concrete explanations over generic statements.
+
+When the text is unclear:
+
+- Make the smallest reasonable interpretation.
+- Add a TODO comment for missing or uncertain details.
+- Ask for clarification only when the missing information blocks meaningful progress.
+
+## Handling project/code information
+
+When using code or project files:
+
+- Read the relevant files before describing implementation details.
+- Do not guess how the system works.
+- Describe actual architecture, modules, data flow, algorithms, APIs, configuration, dependencies, and outputs based on the repository.
+- Do not put internal source paths, script paths, run-output paths, or file names such as `src/...`, `scripts/...`, `outputs/runs/...`, or `__init__.py` in the main thesis text unless the exact path is necessary for a code listing, appendix, reproducibility instruction, or explicit user request.
+- In the main thesis text, prefer explaining what was implemented and how the workflow operates over listing where individual functions, scripts, or directories are located.
+- If editing vendored Deconver internals, also read `src/models/deconver/AGENTS.md`.
+- If the implementation is incomplete, unclear, or inconsistent with the draft text, mark it with a TODO or ask for clarification.
+- Avoid including large code blocks in the thesis unless necessary.
+- Prefer explaining important logic, architecture, and design decisions in prose.
+- Long code listings should go to appendices only if needed.
+
+Useful project facts for implementation descriptions:
+
+- Source code is under `src/`.
+- Main supervised training entrypoint: `src/train.py`.
+- SSL pretraining entrypoint: `src/pretrain.py`.
 - Model factory: `src/models/__init__.py`.
-- Supported model names: `unet3d`, `attention_unet3d`, `deconver`.
-- `deconver` is vendored under `src/models/deconver/` and added to `sys.path` in `src/models/__init__.py`.
-- If editing vendored Deconver internals, read `src/models/deconver/AGENTS.md` too.
+- Supported model names include `unet3d`, `attention_unet3d`, and `deconver`.
+- Deconver is vendored under `src/models/deconver/`.
+- Dataset handling is in `src/dataset.py`.
+- Evaluation is handled through `scripts/evaluate_checkpoint.py` and the Docker `evaluate` command.
+- Run artifacts are stored under `outputs/runs/<run_name>/` and typically include checkpoints, TensorBoard logs, configuration, and metadata.
 
-## Paths and outputs (Docker defaults)
+Use these facts as starting points only. Always inspect current files before writing detailed thesis text.
 
-- `compose.yml` mounts: `./ -> /workspace`, `./data -> /data`, `./outputs -> /outputs`, `./cache -> /cache`.
-- Docker train mode uses `configs/default.yaml`; local runs use `configs/local_default.yaml`.
-- Docker pretrain mode uses `configs/pretrain_default.yaml`; local pretrain uses `configs/pretrain_local.yaml`.
-- Run artifacts go to `<base_output_dir>/<timestamp>_<experiment_name>/`.
-- Each run stores `checkpoints/`, `tensorboard/`, `config.yaml`, and `metadata.json`.
-- `scripts/start.sh --local ...` switches container commands to local config and repo-relative paths.
+## Human-sounding Croatian rewriting rules
 
-## Data assumptions (`src/dataset.py`)
+To avoid obvious AI-generated text:
 
-- Both PI-CAI layouts are supported: flat files or nested per-patient/per-case folders.
-- T2w (`*_t2w.mha`) is always required for case discovery.
-- ADC/HBV files are required only when `use_adc` / `use_hbv` are enabled.
-- Prostate158 full archives are extracted to `data/prostate158_train/` and `data/prostate158_test/`.
-- Supervised Prostate158 discovery reads upstream CSV splits (`train.csv`, `valid.csv`, `test.csv`) and maps `t2 -> t2w`, `adc -> adc`, and `dwi -> hbv`.
-- The default supervised Prostate158 label is `adc_tumor_reader1` (`prostate158_label_target: tumor`, `prostate158_label_reader: 1`).
-- Unlabeled Prostate158 SSL discovery still expects flattened files in `data/unlabeled_images/` as `<case>_{t2,adc,dwi}.nii.gz`; the downloader derives these from `data/prostate158_train/train/`.
-- For SSL pretraining, Prostate158 DWI is mapped to the HBV channel (`hbv_source="dwi"`), with optional DWI preprocessing via `dwi_hbv_preprocess`.
-- Labels are `<case_id>.nii.gz`; labels are binarized at load time (`>0` means lesion).
+- Do not use repetitive phrases such as "Važno je napomenuti", "U današnje vrijeme", "Ova tema je iznimno važna", unless they are truly appropriate.
+- Avoid overly broad introductions.
+- Avoid repeating the thesis title or the same concept in every paragraph.
+- Avoid generic paragraph endings.
+- Avoid unnecessary adjectives such as "vrlo", "iznimno", "značajno", "napredno", or "robustno" unless supported by evidence.
+- Prefer direct, specific, technically grounded sentences.
+- Use Croatian syntax naturally, not literal translations from English.
+- Keep paragraphs focused: one paragraph should develop one main idea.
+- Use transitions sparingly and only where they improve readability.
+- Avoid promotional phrasing and claims about impact that are not supported by results.
+- Do not overuse passive constructions if they make the sentence stiff or unclear.
 
-## Training and metric quirks for debugging
+## TODO comments
 
-- Validation can reduce `sw_batch_size` automatically on CUDA OOM (`validate_with_oom_retry`).
-- Dice/IoU/Sensitivity/Precision are averaged over positive-label cases only and may be `nan`.
-- `best.pt` is selected by composite score (`sensitivity`, `dice`, optional `hd95`), not dice alone.
-- `keep_last_checkpoints` rotates only `epoch_*.pt`; `best.pt` is not removed.
-- Supervised training can warm-start from SSL weights via `pretrained_encoder_checkpoint`; optional staged unfreezing is controlled by `freeze_encoder_epochs`.
-- `--resume` restores full state (model + optimizer + scheduler + scaler + epoch); add `--current-config` to switch resume into model-weights-only init under current config (fresh optimizer/scheduler/scaler, epoch 1). `--current-config` requires `--resume` or `resume_checkpoint`.
+Use clear TODO comments when information is missing. Examples:
 
-## Dependency and CI gotchas
+- `% TODO: Dodati točan naziv korištenog skupa podataka.`
+- `% TODO: Ovdje dodati rezultate evaluacije nakon završetka pokretanja eksperimenata.`
+- `% TODO: Dodati referencu za opis metode.`
+- `% TODO: Provjeriti s mentorom treba li ovo poglavlje ostati u glavnom tekstu ili ići u prilog.`
+- `% TODO: Usporediti rezultate s osnovnim modelom nakon što se potvrdi konačna konfiguracija evaluacije.`
 
-- Docker pins `torch==2.7.0`, `torchvision==0.22.0`, `torchaudio==2.7.0` in `compose.yml` build args (passed into `Dockerfile`).
-- Default Docker stack is `cu128` (modern GPUs); Volta/TITAN V uses `compose.volta.yml` override (`cu126`).
-- Docker filters torch packages out of `requirements.txt`; update `Dockerfile` too when changing torch versions.
-- Docker GIF export path relies on `plotly==6.7.0` + `kaleido==0.2.1` (pinned in `requirements.txt`) to avoid known hangs with newer Kaleido + headless Chrome combos.
-- `setuptools<80` is intentional (TensorBoard still depends on `pkg_resources`).
-- Pushing to branch `train` triggers `.github/workflows/train-sync.yml` on a self-hosted runner.
-- `scripts/train-sync.sh` hard-resets and cleans the remote clone before checkout; treat pushes to `train` as destructive sync/deploy triggers. It defaults to the Volta stack (`TORCH_STACK=volta`).
+Do not leave vague TODOs such as:
+
+- `% TODO fix`
+- `% more here`
+- `% add stuff`
+- `% citation needed`
+
+## Quality checklist before every commit/change
+
+Before finalizing changes, verify:
+
+- The text is in Croatian, except where English terms are necessary.
+- The text sounds natural and not AI-generated.
+- The technical meaning is preserved.
+- No unsupported facts were added.
+- No citations were invented.
+- Figures, tables, formulas, and references are correctly referenced.
+- The LaTeX compiles or the change is at least syntactically safe.
+- Chapter and section titles are consistent.
+- Abbreviations and symbols are introduced before use.
+- TODO comments are clear and actionable.
+- The result follows the FERIT thesis guidelines and the provided LaTeX template.
+
+If a full LaTeX build is expensive or unavailable, at least inspect the edited `.tex` files for obvious syntax errors, unmatched braces, broken commands, and missing labels.
+
+## Preferred workflow
+
+When asked to write or rewrite a section:
+
+1. Start from `paper/masters_thesis.tex`, then inspect the relevant included thesis files and project files.
+2. Identify the intended chapter or section.
+3. Rewrite or expand the text in Croatian.
+4. Preserve technical correctness.
+5. Add citations only when sources are available.
+6. Add TODO comments for missing data, figures, results, or references.
+7. Keep the LaTeX structure clean and consistent.
+8. Briefly summarize what was changed.
+
+When asked to describe implementation, first inspect the relevant source files. When asked to improve prose, focus on the thesis files and avoid unrelated engineering changes.
+
+## What the agent must not do
+
+The agent must not:
+
+- Write large generic sections unrelated to the project.
+- Invent measurements, test results, diagrams, citations, or implementation details.
+- Translate technical names unnaturally.
+- Overwrite the LaTeX template without a good reason.
+- Change repository structure without permission.
+- Add obvious AI-style filler.
+- Use English for thesis text unless explicitly requested.
+- Make the thesis sound like promotional material.
+- Hide uncertainty when information is missing.
+- Treat draft notes as final verified facts when they conflict with code, results, or cited sources.
+
+## Final goal
+
+The final thesis should read as a coherent Croatian master thesis based on the actual project. It should be technically accurate, well structured, grammatically correct, aligned with the FERIT guidelines and LaTeX template, and written in a natural academic style without obvious signs of AI-generated text.
